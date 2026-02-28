@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 from datetime import datetime, timezone
 from typing import Any
@@ -18,6 +20,8 @@ try:
         NSFont,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
+        NSMenu,
+        NSMenuItem as _NSMenuItem,
     )
     _HAS_APPKIT = True
 except ImportError:
@@ -67,6 +71,9 @@ class NaeNaeApp(rumps.App):
         self._ready_tasks: list[Any] = []
         self._prediction: Any = None
         self._has_setup_issues: bool = False
+        # Keep strong references to submenu objects so PyObjC/Cocoa don't GC them
+        self._agents_submenu: Any = None
+        self._agent_submenu_items: list[Any] = []
 
         self._build_menu()
 
@@ -135,6 +142,8 @@ class NaeNaeApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("📋 Task Queue (—)", callback=self._noop),
             rumps.separator,
+            rumps.MenuItem("⚙ No agents running", callback=self._noop),
+            rumps.separator,
             rumps.MenuItem("✅ Completed This Week (—)", callback=self._noop),
             rumps.separator,
             rumps.MenuItem("View Full Report", callback=self.view_report, key="r"),
@@ -146,6 +155,81 @@ class NaeNaeApp(rumps.App):
         ]
         # Hidden by default; shown only when issues are detected
         setup_item._menuitem.setHidden_(True)
+
+    # ── Agent submenu ─────────────────────────────────────────────────────
+
+    def _rebuild_agents_menu(self, agents_running: list[Any]) -> None:
+        """Rebuild the ⚙ Running Agents submenu.
+
+        Creates a fresh NSMenu on each call and stores strong references on self
+        so PyObjC/Cocoa cannot GC them between refreshes. Avoids item._menu
+        entirely because setSubmenu_() transfers Cocoa ownership and the PyObjC
+        proxy can silently become None.
+        """
+        item = self.menu["⚙ No agents running"]
+
+        # Detach old submenu and drop all strong refs before rebuilding
+        item._menuitem.setSubmenu_(None)
+        self._agents_submenu = None
+        self._agent_submenu_items = []
+
+        if not agents_running:
+            self._set_display_title(item, "⚙ No agents running")
+            return
+
+        self._set_display_title(item, f"⚙ {len(agents_running)} Running")
+
+        if not _HAS_APPKIT:
+            return
+
+        # Flat submenu: header (disabled) + Open Log + Stop, separated per agent
+        submenu = NSMenu.alloc().init()
+
+        for i, agent in enumerate(agents_running):
+            task_id = agent.get("task_id", "?")
+            title = agent.get("title", "")
+            project = agent.get("project", "")
+            pid = agent.get("pid")
+            log_path = agent.get("log", "")
+
+            label = f"{task_id}: {title}"
+            if len(label) > 45:
+                label = label[:42] + "…"
+            if project:
+                label += f"  ({project})"
+
+            # Non-interactive section header
+            header = _NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, None, "")
+            header.setEnabled_(False)
+            submenu.addItem_(header)
+
+            # Clickable actions — use rumps MenuItem so callback wiring is handled
+            open_log = rumps.MenuItem(
+                "   Open Log",
+                callback=lambda _, p=log_path: subprocess.run(["open", p], check=False),
+            )
+            stop = rumps.MenuItem(
+                "   Stop",
+                callback=lambda _, p=pid: self._stop_agent(p),
+            )
+            submenu.addItem_(open_log._menuitem)
+            submenu.addItem_(stop._menuitem)
+            self._agent_submenu_items.extend([open_log, stop])  # keep Python refs alive
+
+            if i < len(agents_running) - 1:
+                submenu.addItem_(_NSMenuItem.separatorItem())
+
+        self._agents_submenu = submenu  # keep strong ref so Cocoa doesn't GC it
+        item._menuitem.setSubmenu_(submenu)
+
+    def _stop_agent(self, pid: int | None) -> None:
+        """Send SIGTERM to a running agent process."""
+        if pid is None:
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
     # ── Timers ────────────────────────────────────────────────────────────
 
@@ -410,6 +494,8 @@ class NaeNaeApp(rumps.App):
             self.menu["✅ Completed This Week (—)"],
             f"✅ Completed This Week ({len(spawned)})",
         )
+
+        self._rebuild_agents_menu(agents_running)
 
 
 def main() -> None:
