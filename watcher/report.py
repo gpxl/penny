@@ -56,6 +56,13 @@ def generate_report(state: dict[str, Any], config: dict[str, Any]) -> Path:
     bar_all = get_usage_bar(pct_all)
     bar_sonnet = get_usage_bar(pct_sonnet)
 
+    sess_pct_all = pred.get("session_pct_all", 0.0)
+    sess_pct_sonnet = pred.get("session_pct_sonnet", 0.0)
+    bar_sess = get_usage_bar(sess_pct_all)
+    sess_reset_label = pred.get("session_reset_label", "—")
+    sess_hours = pred.get("session_hours_remaining", 0.0)
+    sess_remaining = pred.get("sessions_remaining_week", 0)
+
     svg = _history_svg(history)
 
     running_rows = ""
@@ -143,6 +150,31 @@ Last check: {state.get('last_check', 'never')[:19]}</p>
   <p style="margin-top:12px">⏰ Resets: {pred.get('reset_label', '—')}</p>
   <p class="note">Budget estimates are based on historical usage peaks.
   Compare with <code>/status</code> in Claude Code for server-side percentages.</p>
+</div>
+
+<div class="card">
+  <h2>⏱ Current Sub-Session Usage</h2>
+  <div class="gauge-row">
+    <div class="gauge-label">All models (vs. estimated session budget)</div>
+    <div class="gauge">{bar_sess} {sess_pct_all:.1f}%</div>
+  </div>
+  <div class="gauge-row">
+    <div class="gauge-label">Sonnet only</div>
+    <div class="gauge">{get_usage_bar(sess_pct_sonnet)} {sess_pct_sonnet:.1f}%</div>
+  </div>
+  <div>
+    <span class="stat">
+      <span class="stat-val">{sess_hours:.1f}h</span><br>
+      <span class="stat-lbl">Hours until reset</span>
+    </span>
+    <span class="stat">
+      <span class="stat-val">{sess_remaining}</span><br>
+      <span class="stat-lbl">Sessions left this week</span>
+    </span>
+  </div>
+  <p style="margin-top:12px">⏰ Session resets: {sess_reset_label}</p>
+  <p class="note">Sub-session limits reset every ~5–6 hours at fixed clock boundaries.
+  Session budget estimated from historical rate-limit data.</p>
 </div>
 
 <div class="card">

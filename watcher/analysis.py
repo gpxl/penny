@@ -297,34 +297,34 @@ def find_current_session_start(period_start: datetime) -> datetime:
     return past[-1] if past else period_start
 
 
-def estimate_session_budget(state: dict[str, Any]) -> int:
-    """
-    Estimate per-session output token budget from archived session history.
-    Returns 90th-percentile of past sessions, or 1,200,000 as default.
-    """
-    history = state.get("session_history", [])
-    tokens = [s["output_all"] for s in history if s.get("output_all", 0) > 0]
-    if len(tokens) < 2:
-        return 1_200_000
-    s = sorted(tokens)
-    if len(s) < 4:
-        return max(s)
-    return s[min(int(len(s) * 0.9), len(s) - 1)]
+# Session budget: observed ~2M output tokens per sub-session window.
+# This is fixed — not calibrated from session_history, whose short sub-session
+# token counts (tokens-until-rate-limit) are much smaller and must not be used.
+_SESSION_BUDGET = 2_000_000
 
 
 def build_session_info(state: dict[str, Any]) -> SessionInfo:
-    """Build current sub-session information."""
+    """Build current sub-session information, matching /status 'Current session'."""
+    now = datetime.now(timezone.utc)
     period_start, _ = current_billing_period()
+
+    # Session start = most recent rate-limit boundary from JSONL
     session_start = find_current_session_start(period_start)
     usage = count_tokens_since(session_start)
-    budget = estimate_session_budget(state)
 
-    pct_all = (usage.output_all / max(budget, 1)) * 100
-    pct_sonnet = (usage.output_sonnet / max(budget, 1)) * 100
+    pct_all = (usage.output_all / _SESSION_BUDGET) * 100
+    pct_sonnet = (usage.output_sonnet / _SESSION_BUDGET) * 100
 
-    # Estimate next reset: sessions are ~6h; show time remaining
-    now = datetime.now(timezone.utc)
-    estimated_next_reset = session_start + timedelta(hours=6)
+    # Estimate next reset from gap between observed boundaries (rate-limit windows).
+    # Gaps > 12h are phantom (session reset naturally, no JSONL entry) — exclude them.
+    boundaries = find_session_boundaries(period_start)
+    gaps_h = [
+        (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600
+        for i in range(1, len(boundaries))
+        if (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600 <= 12
+    ]
+    sub_session_h = sorted(gaps_h)[len(gaps_h) // 2] if gaps_h else 6.0
+    estimated_next_reset = session_start + timedelta(hours=sub_session_h)
     hours_remaining = max(0.0, (estimated_next_reset - now).total_seconds() / 3600)
 
     local_reset = estimated_next_reset.astimezone()
@@ -333,13 +333,13 @@ def build_session_info(state: dict[str, Any]) -> SessionInfo:
     else:
         reset_label = local_reset.strftime("%a at %-I:%M %p")
 
-    sessions_remaining = max(0, int(days_until_reset() * 24 / 5.5))
+    sessions_remaining = max(0, int(days_until_reset() * 24 / sub_session_h))
 
     return SessionInfo(
         session_start=session_start,
         output_all=usage.output_all,
         output_sonnet=usage.output_sonnet,
-        budget_all=budget,
+        budget_all=_SESSION_BUDGET,
         pct_all=round(pct_all, 1),
         pct_sonnet=round(pct_sonnet, 1),
         hours_remaining=round(hours_remaining, 1),

@@ -142,10 +142,6 @@ class WatcherApp(rumps.App):
                     f"{agent['task_id']} completed ✓ — {agent['title']} ({agent['project']})",
                 )
 
-        # Archive any completed sub-sessions before computing analysis
-        period_start, _ = current_billing_period()
-        self.state = detect_new_sessions(self.state, period_start)
-
         self._update_analysis()
 
         trigger = should_trigger(self._prediction, self.config) or force
@@ -175,6 +171,12 @@ class WatcherApp(rumps.App):
             "period_end": pred.period_end,
             "will_trigger": pred.will_trigger,
             "projected_pct_all": pred.projected_pct_all,
+            "session_start": pred.session_start,
+            "session_pct_all": pred.session_pct_all,
+            "session_pct_sonnet": pred.session_pct_sonnet,
+            "session_hours_remaining": pred.session_hours_remaining,
+            "session_reset_label": pred.session_reset_label,
+            "sessions_remaining_week": pred.sessions_remaining_week,
         }
 
         # Update ready tasks cache
@@ -234,6 +236,20 @@ class WatcherApp(rumps.App):
         self._set_display_title(
             self.menu["  Sonnet: —"],
             f"  Sonnet only: {bar_s} {pred.pct_sonnet:.0f}%",
+        )
+
+        # Session usage bar
+        bar_sess = get_usage_bar(pred.session_pct_all)
+        self._set_display_title(
+            self.menu["  Session: —"],
+            f"  Session: {bar_sess} {pred.session_pct_all:.0f}%",
+        )
+
+        # Session reset time
+        self._set_display_title(
+            self.menu["  Session resets: —"],
+            f"  Resets {pred.session_reset_label}  ({pred.session_hours_remaining:.1f}h, "
+            f"{pred.sessions_remaining_week} sessions left)",
         )
 
         # Reset time + days remaining
