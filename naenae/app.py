@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import rumps
+import setproctitle
 import yaml
 
 try:
@@ -92,11 +93,15 @@ class NaeNaeApp(rumps.App):
 
     # ── Menu construction ─────────────────────────────────────────────────
 
+    def _noop(self, _: Any) -> None:
+        """No-op callback so Task Queue and Completed items get a valid action selector,
+        preventing macOS from greying them out during menu validation."""
+
     @staticmethod
     def _set_display_title(
         item: rumps.MenuItem, title: str, secondary: bool = False
     ) -> None:
-        """Set title on a display-only (callback=None) item.
+        """Set title on a display-only item.
 
         Primary items (section headers) use labelColor at the standard menu font
         size. Secondary items (indented stat rows) use secondaryLabelColor at
@@ -117,9 +122,6 @@ class NaeNaeApp(rumps.App):
             }
             attr_str = NSAttributedString.alloc().initWithString_attributes_(title, attrs)
             item._menuitem.setAttributedTitle_(attr_str)
-            # rumps sets setEnabled_(False) for callback=None items, which causes macOS
-            # to grey out the text even when an attributedTitle is set.
-            # Re-enable so our color/font are respected (matches Battery menu style).
             item._menuitem.setEnabled_(True)
 
     def _build_menu(self) -> None:
@@ -131,9 +133,9 @@ class NaeNaeApp(rumps.App):
             rumps.MenuItem("  Session resets: —", callback=None),
             rumps.MenuItem("  Reset: —", callback=None),
             rumps.separator,
-            rumps.MenuItem("📋 Task Queue (—)", callback=None),
+            rumps.MenuItem("📋 Task Queue (—)", callback=self._noop),
             rumps.separator,
-            rumps.MenuItem("✅ Completed This Week (—)", callback=None),
+            rumps.MenuItem("✅ Completed This Week (—)", callback=self._noop),
             rumps.separator,
             rumps.MenuItem("View Full Report", callback=self.view_report, key="r"),
             rumps.MenuItem("Run Now", callback=self.run_now),
@@ -411,6 +413,7 @@ class NaeNaeApp(rumps.App):
 
 
 def main() -> None:
+    setproctitle.setproctitle("Nae Nae")
     app = NaeNaeApp()
     app.run()
 

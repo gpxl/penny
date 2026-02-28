@@ -60,7 +60,7 @@ fi
 # ── Local install (running from inside the repo) ──────────────────────────────
 # Data dir defaults to SCRIPT_DIR so existing dev installs keep their data in
 # place. Override with: NAENAE_HOME=/other/path bash install.sh
-NAENAE_HOME="${NAENAE_HOME:-$SCRIPT_DIR}"
+NAENAE_HOME="${NAENAE_HOME:-$HOME/.naenae}"
 
 PLIST_NAME="com.gpxl.naenae"
 PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
@@ -160,7 +160,7 @@ fi
 
 # Install Python dependencies
 echo "→ Installing Python dependencies…"
-"$PYTHON" -m pip install --quiet -r "$SCRIPT_DIR/requirements.txt"
+"$PYTHON" -m pip install --quiet --break-system-packages -r "$SCRIPT_DIR/requirements.txt"
 echo "✓ Dependencies installed"
 
 # Create data directories
