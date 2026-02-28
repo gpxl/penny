@@ -28,6 +28,33 @@ _WEEK_SECONDS = 7 * 24 * 3600
 AMSTERDAM_TZ = ZoneInfo("Europe/Amsterdam")
 _RATE_LIMIT_RE = re.compile(r"resets\s+(\d+)(am|pm)\s*\(Europe/Amsterdam\)", re.IGNORECASE)
 
+# Claude Max resets at these fixed clock times daily (Europe/Amsterdam).
+# Observed from /status: resets 4am, 9am, 2pm, 7pm, midnight Amsterdam.
+_SESSION_RESET_HOURS_AMS = [0, 4, 9, 14, 19]
+
+
+def _nearest_ams_session_boundary(now: datetime, direction: str = "past") -> datetime:
+    """Return the nearest fixed Amsterdam session boundary before/after *now* (UTC).
+
+    *direction* is ``"past"`` (most recent start <= now) or ``"future"`` (next reset > now).
+    """
+    now_ams = now.astimezone(AMSTERDAM_TZ)
+    today = now_ams.date()
+
+    candidates: list[datetime] = []
+    for day_offset in range(-2, 3):
+        d = today + timedelta(days=day_offset)
+        for h in _SESSION_RESET_HOURS_AMS:
+            t = datetime.combine(d, _time(h, 0), tzinfo=AMSTERDAM_TZ).astimezone(timezone.utc)
+            candidates.append(t)
+
+    if direction == "past":
+        past = [c for c in candidates if c <= now]
+        return max(past) if past else now - timedelta(hours=5)
+    # future
+    future = [c for c in candidates if c > now]
+    return min(future) if future else now + timedelta(hours=5)
+
 SONNET_MODELS = {
     "claude-sonnet-4-6",
     "claude-sonnet-4-5",
@@ -293,9 +320,8 @@ def find_current_session_start(period_start: datetime) -> datetime:
     """Return when the current sub-session started (UTC).
 
     Prefers explicit rate-limit boundaries from JSONL files.  Falls back to
-    projecting 5-hour windows from period_start so that un-hit sessions
-    (natural resets with no rate-limit message) don't accumulate all-week
-    tokens into the "current session" counter.
+    the most recent fixed Amsterdam session boundary (0:00, 4:00, 9:00, 14:00,
+    19:00 AMS) when no rate-limit messages exist for this period.
     """
     now = datetime.now(timezone.utc)
     boundaries = find_session_boundaries(period_start)
@@ -309,17 +335,15 @@ def find_current_session_start(period_start: datetime) -> datetime:
             if (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600 <= 12
         ]
         sub_session_h = sorted(gaps_h)[len(gaps_h) // 2] if gaps_h else 5.0
-    else:
-        # No rate-limit messages this period — project 5-hour windows from
-        # period start (matches Claude Max's typical ~5h session cadence).
-        anchor = period_start
-        sub_session_h = 5.0
+        # Walk forward from anchor until the next window would exceed now.
+        current = anchor
+        while current + timedelta(hours=sub_session_h) <= now:
+            current += timedelta(hours=sub_session_h)
+        return current
 
-    # Walk forward until the next window boundary would exceed now.
-    current = anchor
-    while current + timedelta(hours=sub_session_h) <= now:
-        current += timedelta(hours=sub_session_h)
-    return current
+    # No rate-limit messages this period — use the most recent fixed Amsterdam
+    # session time (Claude Max resets at 0:00, 4:00, 9:00, 14:00, 19:00 AMS).
+    return _nearest_ams_session_boundary(now, "past")
 
 
 # Session budget: observed ~2M output tokens per sub-session window.
@@ -340,16 +364,24 @@ def build_session_info(state: dict[str, Any]) -> SessionInfo:
     pct_all = (usage.output_all / _SESSION_BUDGET) * 100
     pct_sonnet = (usage.output_sonnet / _SESSION_BUDGET) * 100
 
-    # Estimate next reset from gap between observed boundaries (rate-limit windows).
-    # Gaps > 12h are phantom (session reset naturally, no JSONL entry) — exclude them.
+    # Estimate next reset time.
+    # If we have observed rate-limit boundaries, project from the median gap.
+    # Otherwise use the next fixed Amsterdam session time (0:00/4:00/9:00/14:00/19:00).
     boundaries = find_session_boundaries(period_start)
-    gaps_h = [
-        (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600
-        for i in range(1, len(boundaries))
-        if (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600 <= 12
-    ]
-    sub_session_h = sorted(gaps_h)[len(gaps_h) // 2] if gaps_h else 5.0
-    estimated_next_reset = session_start + timedelta(hours=sub_session_h)
+    past_boundaries = [b for b in boundaries if b <= now]
+    if past_boundaries:
+        gaps_h = [
+            (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600
+            for i in range(1, len(boundaries))
+            if (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600 <= 12
+        ]
+        sub_session_h = sorted(gaps_h)[len(gaps_h) // 2] if gaps_h else 5.0
+        estimated_next_reset = session_start + timedelta(hours=sub_session_h)
+    else:
+        # No rate-limit data — next reset is the next fixed Amsterdam slot.
+        estimated_next_reset = _nearest_ams_session_boundary(now, "future")
+        sub_session_h = 5.0  # approximate for sessions_remaining calculation
+
     hours_remaining = max(0.0, (estimated_next_reset - now).total_seconds() / 3600)
 
     local_reset = estimated_next_reset.astimezone()

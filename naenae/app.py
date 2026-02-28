@@ -93,27 +93,33 @@ class NaeNaeApp(rumps.App):
     # ── Menu construction ─────────────────────────────────────────────────
 
     @staticmethod
-    def _set_display_title(item: rumps.MenuItem, title: str) -> None:
-        """Set title on a display-only (callback=None) item with label-color text.
+    def _set_display_title(
+        item: rumps.MenuItem, title: str, secondary: bool = False
+    ) -> None:
+        """Set title on a display-only (callback=None) item.
 
-        macOS greys disabled NSMenuItems by default. Setting an attributedTitle
-        with NSColor.labelColor() forces dark text (adapts to light/dark mode)
-        while keeping the item disabled so it has no hover highlight — the same
-        technique used by the system Battery status menu.
+        Primary items (section headers) use labelColor at the standard menu font
+        size. Secondary items (indented stat rows) use secondaryLabelColor at
+        11pt — visually distinct from interactive menu items, matching the style
+        used by native macOS status menus like Battery and Wi-Fi.
         """
         item.title = title
         if _HAS_APPKIT:
+            if secondary:
+                color = NSColor.secondaryLabelColor()
+                font = NSFont.menuFontOfSize_(11)
+            else:
+                color = NSColor.labelColor()
+                font = NSFont.menuFontOfSize_(0)
             attrs = {
-                NSForegroundColorAttributeName: NSColor.labelColor(),
-                # Explicit menu font prevents NSAttributedString from defaulting
-                # to the body font, which renders larger than standard menu items.
-                NSFontAttributeName: NSFont.menuFontOfSize_(0),
+                NSForegroundColorAttributeName: color,
+                NSFontAttributeName: font,
             }
             attr_str = NSAttributedString.alloc().initWithString_attributes_(title, attrs)
             item._menuitem.setAttributedTitle_(attr_str)
             # rumps sets setEnabled_(False) for callback=None items, which causes macOS
             # to grey out the text even when an attributedTitle is set.
-            # Re-enable so NSColor.labelColor() is respected (matches Battery menu style).
+            # Re-enable so our color/font are respected (matches Battery menu style).
             item._menuitem.setEnabled_(True)
 
     def _build_menu(self) -> None:
@@ -369,23 +375,27 @@ class NaeNaeApp(rumps.App):
         self._set_display_title(
             self.menu["  Sonnet: —"],
             f"  Sonnet only: {bar_s} {pred.pct_sonnet:.0f}%",
+            secondary=True,
         )
 
         bar_sess = get_usage_bar(pred.session_pct_all)
         self._set_display_title(
             self.menu["  Session: —"],
             f"  Session: {bar_sess} {pred.session_pct_all:.0f}%",
+            secondary=True,
         )
 
         self._set_display_title(
             self.menu["  Session resets: —"],
             f"  Resets {pred.session_reset_label}  ({pred.session_hours_remaining:.1f}h, "
             f"{pred.sessions_remaining_week} sessions left)",
+            secondary=True,
         )
 
         self._set_display_title(
             self.menu["  Reset: —"],
             f"  Resets {pred.reset_label}  ({pred.days_remaining:.1f}d)",
+            secondary=True,
         )
 
         all_tasks_count = len(get_ready_tasks(self.config.get("projects", [])))
