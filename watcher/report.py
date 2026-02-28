@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import html as _html
 import subprocess
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from .analysis import get_usage_bar
+from .tasks import get_ready_tasks, get_task_description
 
 REPORT_DIR = Path(__file__).parent.parent / "reports"
 
@@ -62,6 +64,36 @@ def generate_report(state: dict[str, Any], config: dict[str, Any]) -> Path:
     sess_reset_label = pred.get("session_reset_label", "—")
     sess_hours = pred.get("session_hours_remaining", 0.0)
     sess_remaining = pred.get("sessions_remaining_week", 0)
+
+    # Task queue — fetch all ready tasks and full descriptions
+    projects = config.get("projects", [])
+    ready_tasks = get_ready_tasks(projects)
+    task_rows = ""
+    spawned_ids = {s["task_id"] for s in state.get("spawned_this_week", [])}
+    running_ids = {a["task_id"] for a in state.get("agents_running", [])}
+
+    for task in ready_tasks:
+        desc_raw = get_task_description(task)
+        desc_escaped = _html.escape(desc_raw)
+        status_badge = ""
+        if task.task_id in running_ids:
+            status_badge = ' <span style="color:#f59e0b;font-size:0.7rem">● running</span>'
+        elif task.task_id in spawned_ids:
+            status_badge = ' <span style="color:#10b981;font-size:0.7rem">✓ done</span>'
+        priority_color = {"P1": "#ef4444", "P2": "#f59e0b", "P3": "#6b7280"}.get(task.priority, "#6b7280")
+        task_rows += f"""
+        <tr>
+          <td style="white-space:nowrap"><code>{_html.escape(task.task_id)}</code>{status_badge}</td>
+          <td style="white-space:nowrap">{_html.escape(task.project_name)}</td>
+          <td style="white-space:nowrap;color:{priority_color};font-weight:600">{task.priority}</td>
+          <td>
+            <strong>{_html.escape(task.title)}</strong>
+            <details style="margin-top:4px">
+              <summary style="cursor:pointer;color:#6b7280;font-size:0.75rem">Full description</summary>
+              <pre style="margin-top:6px;font-size:0.75rem;white-space:pre-wrap;background:#f3f4f6;padding:8px;border-radius:6px;max-height:300px;overflow-y:auto">{desc_escaped}</pre>
+            </details>
+          </td>
+        </tr>"""
 
     svg = _history_svg(history)
 
@@ -180,6 +212,13 @@ Last check: {state.get('last_check', 'never')[:19]}</p>
 <div class="card">
   <h2>📈 Period History (output tokens)</h2>
   {svg}
+</div>
+
+<div class="card">
+  <h2>📋 Task Queue ({len(ready_tasks)} ready)</h2>
+  {'<p style="color:#6b7280">No ready tasks found across configured projects.</p>' if not ready_tasks else
+  '<table><tr><th>ID</th><th>Project</th><th>Pri</th><th>Task &amp; Description</th></tr>'
+  + task_rows + '</table>'}
 </div>
 
 <div class="card">

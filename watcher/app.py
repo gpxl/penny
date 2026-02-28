@@ -67,6 +67,10 @@ class WatcherApp(rumps.App):
             attrs = {NSForegroundColorAttributeName: NSColor.labelColor()}
             attr_str = NSAttributedString.alloc().initWithString_attributes_(title, attrs)
             item._menuitem.setAttributedTitle_(attr_str)
+            # rumps sets setEnabled_(False) for callback=None items, which causes macOS
+            # to grey out the text even when an attributedTitle is set.
+            # Re-enable so NSColor.labelColor() is respected (matches Battery menu style).
+            item._menuitem.setEnabled_(True)
 
     def _build_menu(self) -> None:
         self.menu = [
