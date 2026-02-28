@@ -63,6 +63,7 @@ class NaeNaeApp(rumps.App):
         self.state: dict[str, Any] = {}
         self._ready_tasks: list[Any] = []
         self._prediction: Any = None
+        self._has_setup_issues: bool = False
 
         self._build_menu()
 
@@ -80,6 +81,12 @@ class NaeNaeApp(rumps.App):
         if _HAS_APPKIT:
             NSApplication.sharedApplication().setActivationPolicy_(1)
         self._load_and_refresh()
+
+    # ── Setup item visibility ─────────────────────────────────────────────
+
+    def _refresh_setup_item(self) -> None:
+        """Show 'Setup Issues…' only when there are actual issues to address."""
+        self.menu["Setup Issues\u2026"]._menuitem.setHidden_(not self._has_setup_issues)
 
     # ── Menu construction ─────────────────────────────────────────────────
 
@@ -103,6 +110,7 @@ class NaeNaeApp(rumps.App):
             item._menuitem.setEnabled_(True)
 
     def _build_menu(self) -> None:
+        setup_item = rumps.MenuItem("Setup Issues\u2026", callback=self.show_setup_issues)
         self.menu = [
             rumps.MenuItem("📊 Usage This Week", callback=None),
             rumps.MenuItem("  Sonnet: —", callback=None),
@@ -116,11 +124,13 @@ class NaeNaeApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("View Full Report", callback=self.view_report, key="r"),
             rumps.MenuItem("Run Now", callback=self.run_now),
-            rumps.MenuItem("Setup Issues\u2026", callback=self.show_setup_issues),
+            setup_item,
             rumps.MenuItem("Preferences\u2026", callback=self.open_prefs),
             rumps.separator,
             rumps.MenuItem("Quit Nae Nae", callback=rumps.quit_application),
         ]
+        # Hidden by default; shown only when issues are detected
+        setup_item._menuitem.setHidden_(True)
 
     # ── Timers ────────────────────────────────────────────────────────────
 
@@ -172,6 +182,9 @@ class NaeNaeApp(rumps.App):
         fixed = fix_missing_beads(config)
 
         issues = run_preflight(config)
+        self._has_setup_issues = bool(issues)
+        self._refresh_setup_item()
+
         if not issues:
             msg = "\u2705 All checks passed."
             if fixed:
@@ -228,6 +241,9 @@ class NaeNaeApp(rumps.App):
         if tool_errors:
             rumps.alert("Nae Nae \u2014 Setup Required", format_issues_for_alert(tool_errors))
             self.title = "\u25cf Nae Nae \u26a0"
+
+        self._has_setup_issues = bool(issues)
+        self._refresh_setup_item()
 
         save_state(self.state)
         self._update_analysis()
