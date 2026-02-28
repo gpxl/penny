@@ -109,6 +109,27 @@ def spawn_claude_agent(
     return record
 
 
+def _pid_is_alive(pid: int) -> bool:
+    """Return True only if PID refers to a living, non-zombie process."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, no permission to signal — assume alive
+
+    # os.kill(pid, 0) succeeds for zombie processes too; filter them out.
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True, text=True, timeout=2,
+        )
+        stat = result.stdout.strip()
+        return bool(stat) and not stat.startswith("Z")
+    except Exception:
+        return True  # can't determine — assume alive
+
+
 def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Poll all running agents for completion.
@@ -123,15 +144,10 @@ def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
             completed.append({**agent, "status": "completed"})
             continue
 
-        # Check if process is still alive
-        try:
-            os.kill(pid, 0)  # signal 0 = check existence only
+        if _pid_is_alive(pid):
             still_running.append(agent)
-        except ProcessLookupError:
+        else:
             completed.append({**agent, "status": "completed"})
-        except PermissionError:
-            # Process exists but we can't signal it (still alive)
-            still_running.append(agent)
 
     state["agents_running"] = still_running
     return completed

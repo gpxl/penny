@@ -223,13 +223,26 @@ class NaeNaeApp(rumps.App):
         item._menuitem.setSubmenu_(submenu)
 
     def _stop_agent(self, pid: int | None) -> None:
-        """Send SIGTERM to a running agent process."""
+        """Stop a running agent and remove it from state immediately.
+
+        Sends SIGTERM to the process group (start_new_session=True makes the
+        spawned claude its own group leader, so this also kills any children).
+        Zombies can't be signalled but are still removed from state.
+        """
         if pid is None:
             return
         try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass  # already dead or zombie — still remove from state below
+
+        # Remove immediately from in-memory state and persist so the next
+        # _update_ui call reflects the change without waiting for the 4-hour cycle.
+        self.state["agents_running"] = [
+            a for a in self.state.get("agents_running", []) if a.get("pid") != pid
+        ]
+        save_state(self.state)
+        self._update_ui()
 
     # ── Timers ────────────────────────────────────────────────────────────
 
