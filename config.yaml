@@ -1,0 +1,23 @@
+projects:
+  - path: /Users/gerlando/Documents/GitHub/SetDigger
+    priority: 1
+  - path: /Users/gerlando/Documents/GitHub/niksen
+    priority: 2
+  - path: /Users/gerlando/Documents/GitHub/Builttochill
+    priority: 3
+
+trigger:
+  min_capacity_percent: 30    # Spawn agents if ≥30% capacity predicted unused
+  max_days_remaining: 2       # …and ≤2 days remain in the week
+  week_start_day: 0           # 0=Monday, 6=Sunday
+
+work:
+  max_agents_per_run: 2
+  task_priority_levels: [P1, P2, P3]
+
+notifications:
+  spawn: true
+  completion: true
+  weekly_summary: true
+
+stats_cache_path: ~/.claude/stats-cache.json
