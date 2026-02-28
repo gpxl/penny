@@ -14,6 +14,8 @@ try:
         NSApplication,
         NSAttributedString,
         NSColor,
+        NSFont,
+        NSFontAttributeName,
         NSForegroundColorAttributeName,
     )
     _HAS_APPKIT = True
@@ -101,7 +103,12 @@ class NaeNaeApp(rumps.App):
         """
         item.title = title
         if _HAS_APPKIT:
-            attrs = {NSForegroundColorAttributeName: NSColor.labelColor()}
+            attrs = {
+                NSForegroundColorAttributeName: NSColor.labelColor(),
+                # Explicit menu font prevents NSAttributedString from defaulting
+                # to the body font, which renders larger than standard menu items.
+                NSFontAttributeName: NSFont.menuFontOfSize_(0),
+            }
             attr_str = NSAttributedString.alloc().initWithString_attributes_(title, attrs)
             item._menuitem.setAttributedTitle_(attr_str)
             # rumps sets setEnabled_(False) for callback=None items, which causes macOS

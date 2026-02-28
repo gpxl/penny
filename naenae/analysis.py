@@ -290,11 +290,36 @@ def find_session_boundaries(since: datetime) -> list[datetime]:
 
 
 def find_current_session_start(period_start: datetime) -> datetime:
-    """Return when the current sub-session started (UTC)."""
+    """Return when the current sub-session started (UTC).
+
+    Prefers explicit rate-limit boundaries from JSONL files.  Falls back to
+    projecting 5-hour windows from period_start so that un-hit sessions
+    (natural resets with no rate-limit message) don't accumulate all-week
+    tokens into the "current session" counter.
+    """
     now = datetime.now(timezone.utc)
     boundaries = find_session_boundaries(period_start)
     past = [b for b in boundaries if b <= now]
-    return past[-1] if past else period_start
+
+    if past:
+        anchor = past[-1]
+        gaps_h = [
+            (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600
+            for i in range(1, len(boundaries))
+            if (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600 <= 12
+        ]
+        sub_session_h = sorted(gaps_h)[len(gaps_h) // 2] if gaps_h else 5.0
+    else:
+        # No rate-limit messages this period — project 5-hour windows from
+        # period start (matches Claude Max's typical ~5h session cadence).
+        anchor = period_start
+        sub_session_h = 5.0
+
+    # Walk forward until the next window boundary would exceed now.
+    current = anchor
+    while current + timedelta(hours=sub_session_h) <= now:
+        current += timedelta(hours=sub_session_h)
+    return current
 
 
 # Session budget: observed ~2M output tokens per sub-session window.
@@ -323,7 +348,7 @@ def build_session_info(state: dict[str, Any]) -> SessionInfo:
         for i in range(1, len(boundaries))
         if (boundaries[i] - boundaries[i - 1]).total_seconds() / 3600 <= 12
     ]
-    sub_session_h = sorted(gaps_h)[len(gaps_h) // 2] if gaps_h else 6.0
+    sub_session_h = sorted(gaps_h)[len(gaps_h) // 2] if gaps_h else 5.0
     estimated_next_reset = session_start + timedelta(hours=sub_session_h)
     hours_remaining = max(0.0, (estimated_next_reset - now).total_seconds() / 3600)
 
