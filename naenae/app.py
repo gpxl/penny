@@ -1,54 +1,84 @@
-"""Watcher — Claude Max Capacity Monitor. macOS menu bar app."""
+"""Nae Nae — Claude Max Capacity Monitor. macOS menu bar app."""
 
 from __future__ import annotations
 
-import os
 import subprocess
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import rumps
 import yaml
 
 try:
-    from AppKit import NSAttributedString, NSColor, NSForegroundColorAttributeName
+    from AppKit import (
+        NSApplication,
+        NSAttributedString,
+        NSColor,
+        NSForegroundColorAttributeName,
+    )
     _HAS_APPKIT = True
 except ImportError:
     _HAS_APPKIT = False
 
 from .analysis import (
     build_prediction,
-    current_billing_period,
     get_usage_bar,
     should_trigger,
 )
+from .onboarding import fix_missing_beads, needs_onboarding, run_onboarding
+from .paths import data_dir
+from .preflight import (
+    format_issues_for_alert,
+    has_errors,
+    run_preflight,
+)
 from .report import generate_report, open_report
 from .spawner import check_running_agents, send_notification, spawn_claude_agent
-from .state import detect_new_sessions, load_state, reset_period_if_needed, save_state
+from .state import load_state, reset_period_if_needed, save_state
 from .tasks import filter_tasks, get_ready_tasks, get_task_description
 
-ROOT = Path(__file__).parent.parent
-CONFIG_PATH = ROOT / "config.yaml"
+CONFIG_PATH = data_dir() / "config.yaml"
 
 
-def load_config() -> dict[str, Any]:
-    """Load user config from config.yaml."""
+def _safe_load_config() -> tuple[dict[str, Any], str | None]:
+    """Load config.yaml.
+
+    Returns (config_dict, error_str). On YAML parse failure returns
+    ({}, error_message) instead of crashing.
+    """
     if not CONFIG_PATH.exists():
-        return {}
-    with CONFIG_PATH.open() as f:
-        return yaml.safe_load(f) or {}
+        return {}, None
+    try:
+        with CONFIG_PATH.open() as f:
+            return yaml.safe_load(f) or {}, None
+    except yaml.YAMLError as exc:
+        return {}, str(exc)
 
 
-class WatcherApp(rumps.App):
+class NaeNaeApp(rumps.App):
     def __init__(self) -> None:
-        super().__init__("● Watcher", quit_button=None)
+        super().__init__("● Nae Nae", quit_button=None)
+
         self.config: dict[str, Any] = {}
         self.state: dict[str, Any] = {}
         self._ready_tasks: list[Any] = []
         self._prediction: Any = None
 
         self._build_menu()
+
+        # Defer first load until the event loop is running so the menu bar
+        # title is already visible when any onboarding dialogs appear.
+        self._startup_timer = rumps.Timer(self._on_startup, 0.4)
+        self._startup_timer.start()
+
+    # ── Startup ───────────────────────────────────────────────────────────
+
+    def _on_startup(self, timer: Any) -> None:
+        timer.stop()
+        # Set activation policy now that the event loop is running and NSApplication
+        # is fully initialised — hides the Python Dock icon (Apple HIG: background agents).
+        if _HAS_APPKIT:
+            NSApplication.sharedApplication().setActivationPolicy_(1)
         self._load_and_refresh()
 
     # ── Menu construction ─────────────────────────────────────────────────
@@ -86,19 +116,20 @@ class WatcherApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("View Full Report", callback=self.view_report, key="r"),
             rumps.MenuItem("Run Now", callback=self.run_now),
-            rumps.MenuItem("Preferences…", callback=self.open_prefs),
+            rumps.MenuItem("Setup Issues\u2026", callback=self.show_setup_issues),
+            rumps.MenuItem("Preferences\u2026", callback=self.open_prefs),
             rumps.separator,
-            rumps.MenuItem("Quit Watcher", callback=rumps.quit_application),
+            rumps.MenuItem("Quit Nae Nae", callback=rumps.quit_application),
         ]
 
     # ── Timers ────────────────────────────────────────────────────────────
 
-    @rumps.timer(300)  # Every 5 minutes: refresh display
+    @rumps.timer(300)   # Every 5 minutes: refresh display
     def refresh_display(self, _: Any) -> None:
         self._update_analysis()
         self._update_ui()
 
-    @rumps.timer(14400)  # Every 4 hours: full analysis cycle
+    @rumps.timer(14400)  # Every 4 hours: full analysis + spawn cycle
     def run_analysis_cycle(self, _: Any) -> None:
         self._run_cycle()
 
@@ -114,25 +145,105 @@ class WatcherApp(rumps.App):
             path = generate_report(self.state, self.config)
             open_report(path)
         except Exception as exc:
-            rumps.alert("Watcher", f"Failed to generate report:\n{exc}")
+            rumps.alert("Nae Nae", f"Failed to generate report:\n{exc}")
 
-    @rumps.clicked("Preferences…")
+    @rumps.clicked("Setup Issues\u2026")
+    def show_setup_issues(self, _: Any) -> None:
+        """Re-run setup checks, auto-fix what can be fixed, then report status."""
+        config, yaml_err = _safe_load_config()
+        if yaml_err:
+            rumps.alert(
+                "Nae Nae \u2014 Config Error",
+                f"config.yaml has a syntax error:\n{yaml_err}\n\nFix: open {CONFIG_PATH}",
+            )
+            return
+
+        if needs_onboarding(config):
+            updated = run_onboarding(CONFIG_PATH, config)
+            if updated is not None:
+                self.config = updated
+                self.state.pop("onboarding_deferred", None)
+                save_state(self.state)
+                self._update_analysis()
+                self._update_ui()
+            return
+
+        # Auto-fix projects missing .beads/ before running the full preflight check
+        fixed = fix_missing_beads(config)
+
+        issues = run_preflight(config)
+        if not issues:
+            msg = "\u2705 All checks passed."
+            if fixed:
+                msg += f"\n\nBeads initialised in: {', '.join(fixed)}"
+            rumps.alert("Nae Nae \u2014 Setup", msg)
+        else:
+            body = format_issues_for_alert(issues)
+            if fixed:
+                body += f"\n\n\u2705 Auto-fixed: Beads initialised in {', '.join(fixed)}"
+            rumps.alert("Nae Nae \u2014 Setup Issues", body)
+
+    @rumps.clicked("Preferences\u2026")
     def open_prefs(self, _: Any) -> None:
         subprocess.run(["open", str(CONFIG_PATH)], check=False)
 
     # ── Core logic ────────────────────────────────────────────────────────
 
     def _load_and_refresh(self) -> None:
-        """Initial load on startup."""
-        self.config = load_config()
+        """Initial load — runs once after the event loop starts."""
+        config, yaml_err = _safe_load_config()
+        if yaml_err:
+            rumps.alert(
+                "Nae Nae \u2014 Config Error",
+                f"config.yaml syntax error:\n{yaml_err}\n\nFix: open {CONFIG_PATH}",
+            )
+            self.title = "\u25cf Nae Nae \u26a0"
+            return
+
         self.state = load_state()
         self.state = reset_period_if_needed(self.state)
+
+        # First-run onboarding — only if user hasn't already deferred
+        if needs_onboarding(config) and not self.state.get("onboarding_deferred"):
+            updated = run_onboarding(CONFIG_PATH, config)
+            if updated is not None:
+                config = updated
+                self.state.pop("onboarding_deferred", None)
+            else:
+                # User clicked "Set Up Later"
+                self.state["onboarding_deferred"] = True
+                save_state(self.state)
+                self.title = "\u25cf Setup"
+                return   # Don't run analysis — no projects configured yet
+
+        self.config = config
+
+        # Surface remaining errors (missing CLI tools, etc.) via a simple alert.
+        # Project-related errors are already handled by the onboarding wizard above.
+        issues = run_preflight(config)
+        tool_errors = [
+            i for i in issues
+            if i.severity == "error" and "project" not in i.message.lower()
+        ]
+        if tool_errors:
+            rumps.alert("Nae Nae \u2014 Setup Required", format_issues_for_alert(tool_errors))
+            self.title = "\u25cf Nae Nae \u26a0"
+
+        save_state(self.state)
         self._update_analysis()
         self._update_ui()
 
     def _run_cycle(self, force: bool = False) -> None:
         """Full analysis + optional agent spawning cycle."""
-        self.config = load_config()
+        config, yaml_err = _safe_load_config()
+        if yaml_err:
+            rumps.alert(
+                "Nae Nae \u2014 Config Error",
+                f"config.yaml syntax error:\n{yaml_err}\n\nFix: open {CONFIG_PATH}",
+            )
+            return
+        self.config = config
+
         self.state = load_state()
         self.state = reset_period_if_needed(self.state)
 
@@ -142,8 +253,8 @@ class WatcherApp(rumps.App):
             self.state.setdefault("spawned_this_week", []).append(agent)
             if self.config.get("notifications", {}).get("completion", True):
                 send_notification(
-                    "Watcher",
-                    f"{agent['task_id']} completed ✓ — {agent['title']} ({agent['project']})",
+                    "Nae Nae",
+                    f"{agent['task_id']} completed \u2713 \u2014 {agent['title']} ({agent['project']})",
                 )
 
         self._update_analysis()
@@ -161,7 +272,6 @@ class WatcherApp(rumps.App):
         pred = build_prediction(self.state)
         self._prediction = pred
 
-        # Persist prediction to state
         self.state["predictions"] = {
             "pct_all": pred.pct_all,
             "pct_sonnet": pred.pct_sonnet,
@@ -183,7 +293,6 @@ class WatcherApp(rumps.App):
             "sessions_remaining_week": pred.sessions_remaining_week,
         }
 
-        # Update ready tasks cache
         projects = self.config.get("projects", [])
         all_tasks = get_ready_tasks(projects)
         self._ready_tasks = filter_tasks(all_tasks, self.state, self.config)
@@ -203,12 +312,12 @@ class WatcherApp(rumps.App):
         if spawned_names and self.config.get("notifications", {}).get("spawn", True):
             pred = self._prediction
             msg = (
-                f"Starting {len(spawned_names)} agent(s) — "
+                f"Starting {len(spawned_names)} agent(s) \u2014 "
                 + ", ".join(spawned_names)
                 + f". {100 - pred.projected_pct_all:.0f}% capacity unused, "
                 + f"{pred.days_remaining:.1f} days left."
             )
-            send_notification("Watcher", msg)
+            send_notification("Nae Nae", msg)
 
     def _update_ui(self) -> None:
         """Refresh menu bar icon and menu items from current prediction."""
@@ -220,56 +329,48 @@ class WatcherApp(rumps.App):
         spawned = self.state.get("spawned_this_week", [])
         n_running = len(agents_running)
 
-        # Title / icon
         if n_running > 0:
-            self.title = f"⚙ {n_running}"
+            self.title = f"\u2699 {n_running}"
         elif pred.will_trigger:
-            self.title = f"◐ {100 - pred.projected_pct_all:.0f}%"
+            self.title = f"\u25d0 {100 - pred.projected_pct_all:.0f}%"
         else:
-            self.title = "● Watcher"
+            self.title = "\u25cf Nae Nae"
 
-        # All-models usage bar
         bar = get_usage_bar(pred.pct_all)
         self._set_display_title(
             self.menu["📊 Usage This Week"],
             f"📊 All models: {bar} {pred.pct_all:.0f}%",
         )
 
-        # Sonnet-only usage bar
         bar_s = get_usage_bar(pred.pct_sonnet)
         self._set_display_title(
             self.menu["  Sonnet: —"],
             f"  Sonnet only: {bar_s} {pred.pct_sonnet:.0f}%",
         )
 
-        # Session usage bar
         bar_sess = get_usage_bar(pred.session_pct_all)
         self._set_display_title(
             self.menu["  Session: —"],
             f"  Session: {bar_sess} {pred.session_pct_all:.0f}%",
         )
 
-        # Session reset time
         self._set_display_title(
             self.menu["  Session resets: —"],
             f"  Resets {pred.session_reset_label}  ({pred.session_hours_remaining:.1f}h, "
             f"{pred.sessions_remaining_week} sessions left)",
         )
 
-        # Reset time + days remaining
         self._set_display_title(
             self.menu["  Reset: —"],
             f"  Resets {pred.reset_label}  ({pred.days_remaining:.1f}d)",
         )
 
-        # Task queue
         all_tasks_count = len(get_ready_tasks(self.config.get("projects", [])))
         self._set_display_title(
             self.menu["📋 Task Queue (—)"],
             f"📋 Task Queue ({all_tasks_count} ready)",
         )
 
-        # Completed this week
         self._set_display_title(
             self.menu["✅ Completed This Week (—)"],
             f"✅ Completed This Week ({len(spawned)})",
@@ -277,7 +378,7 @@ class WatcherApp(rumps.App):
 
 
 def main() -> None:
-    app = WatcherApp()
+    app = NaeNaeApp()
     app.run()
 
 

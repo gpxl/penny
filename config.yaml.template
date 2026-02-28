@@ -1,0 +1,34 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Nae Nae — First-run setup checklist
+# ────────────────────────────────────────────────────────────────────────────
+# Before Nae Nae can run agents, complete each step:
+#
+#   [ ] 1. Install the claude CLI:  npm install -g @anthropic-ai/claude-code
+#   [ ] 2. Authenticate:            claude auth login
+#   [ ] 3. Install beads CLI:       npm install -g beads-cli
+#   [ ] 4. Init beads in a project: cd ~/your-repo && bd init
+#   [ ] 5. Edit this file:          Replace PLACEHOLDER_PROJECT_PATH below
+#   [ ] 6. Verify setup:            bash install.sh --check
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+projects:
+  - path: PLACEHOLDER_PROJECT_PATH   # Replace with: ~/Documents/GitHub/your-repo
+    priority: 1
+  # - path: ~/Documents/GitHub/another-project
+  #   priority: 2
+
+trigger:
+  min_capacity_percent: 30    # Spawn agents if ≥30% capacity predicted unused
+  max_days_remaining: 2       # …and ≤2 days remain in the week
+
+work:
+  max_agents_per_run: 2
+  task_priority_levels: [P1, P2, P3]
+
+notifications:
+  spawn: true
+  completion: true
+  weekly_summary: true
+
+stats_cache_path: ~/.claude/stats-cache.json

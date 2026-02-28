@@ -1,4 +1,4 @@
-"""Usage stats parsing and capacity prediction for Watcher.
+"""Usage stats parsing and capacity prediction for Nae Nae.
 
 Billing period: Anthropic resets weekly at Friday 20:00 UTC (global epoch).
 This matches the "Resets Mar 6 at 9pm (Europe/Amsterdam)" display in /status
@@ -432,7 +432,7 @@ def build_prediction(state: dict[str, Any]) -> Prediction:
 
 def should_trigger(prediction: Prediction, config: dict[str, Any]) -> bool:
     """
-    Returns True if Watcher should spawn agents.
+    Returns True if Nae Nae should spawn agents.
     Fires when predicted unused capacity >= threshold AND ≤ N days left.
     """
     cfg = config.get("trigger", {})

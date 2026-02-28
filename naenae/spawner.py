@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .paths import data_dir
+
 AGENT_PROMPT_TEMPLATE = """\
 You are a background agent working on the project at {project_path}.
 
@@ -32,9 +34,8 @@ Work autonomously. Do not ask for confirmation. Complete the full task end-to-en
 
 
 def _logs_dir() -> Path:
-    here = Path(__file__).parent.parent
-    d = here / "logs"
-    d.mkdir(exist_ok=True)
+    d = data_dir() / "logs"
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -81,7 +82,7 @@ def spawn_claude_agent(
     env.pop("CLAUDE_CODE", None)
 
     log_fh = log_file.open("w")
-    log_fh.write(f"# Watcher agent — {task.task_id}\n")
+    log_fh.write(f"# Nae Nae agent — {task.task_id}\n")
     log_fh.write(f"# Spawned at {record['spawned_at']}\n")
     log_fh.write(f"# Project: {task.project_path}\n\n")
     log_fh.write("=== PROMPT ===\n")

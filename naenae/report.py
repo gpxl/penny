@@ -1,4 +1,4 @@
-"""HTML status report generation for Watcher."""
+"""HTML status report generation for Nae Nae."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .analysis import get_usage_bar
+from .paths import data_dir
 from .tasks import get_ready_tasks, get_task_description
 
-REPORT_DIR = Path(__file__).parent.parent / "reports"
+REPORT_DIR = data_dir() / "reports"
 
 
 def _history_svg(history: list[dict], width: int = 500, height: int = 120) -> str:
@@ -120,7 +121,7 @@ def generate_report(state: dict[str, Any], config: dict[str, Any]) -> Path:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Watcher — Status Report</title>
+<title>Nae Nae — Status Report</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -147,7 +148,7 @@ def generate_report(state: dict[str, Any], config: dict[str, Any]) -> Path:
 </style>
 </head>
 <body>
-<h1>● Watcher — Status Report</h1>
+<h1>● Nae Nae — Status Report</h1>
 <p class="subtitle">Generated {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ·
 Last check: {state.get('last_check', 'never')[:19]}</p>
 

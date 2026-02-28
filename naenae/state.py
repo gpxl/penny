@@ -1,4 +1,4 @@
-"""State persistence for Watcher."""
+"""State persistence for Nae Nae."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-STATE_PATH = Path(__file__).parent.parent / "state.json"
+from .paths import data_dir
+
+STATE_PATH = data_dir() / "state.json"
 
 
 def load_state() -> dict[str, Any]:
