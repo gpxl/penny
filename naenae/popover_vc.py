@@ -35,9 +35,9 @@ _TASK_LIMIT = 8  # max ready tasks shown
 
 
 def _make_separator() -> NSView:
-    sep = NSView.alloc().initWithFrame_(((0, 0), (_WIDTH - _PADDING * 2, 1)))
-    sep.setWantsLayer_(True)
-    sep.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
+    from AppKit import NSBox
+    sep = NSBox.alloc().initWithFrame_(((0, 0), (_WIDTH - _PADDING * 2, 1)))
+    sep.setBoxType_(2)   # NSBoxSeparator — renders as a native hairline separator
     return sep
 
 
