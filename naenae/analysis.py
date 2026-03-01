@@ -443,7 +443,14 @@ class Prediction:
 
 
 def build_prediction(state: dict[str, Any]) -> Prediction:
-    """Compute the full prediction from current token usage + budget estimate."""
+    """Compute the full prediction from current token usage + budget estimate.
+
+    Percentages and reset labels are overridden with ground-truth values from
+    claude /status when available (via status_fetcher).  Token counts and budget
+    absolutes still come from JSONL parsing — /status doesn't expose those.
+    """
+    from .status_fetcher import fetch_live_status  # local import to keep startup fast
+
     start, end = current_billing_period()
     usage = count_tokens_since(start)
     budget = estimate_budget_from_history(state)
@@ -451,7 +458,7 @@ def build_prediction(state: dict[str, Any]) -> Prediction:
     days_rem = days_until_reset()
     elapsed_days = max((_WEEK_SECONDS / 86400) - days_rem, 1 / 24)
 
-    # Current % used
+    # Current % used (JSONL-estimated; may be overridden below)
     pct_all = (usage.output_all / max(budget["all"], 1)) * 100
     pct_sonnet = (usage.output_sonnet / max(budget["sonnet"], 1)) * 100
 
@@ -465,6 +472,19 @@ def build_prediction(state: dict[str, Any]) -> Prediction:
 
     session = build_session_info(state)
 
+    # --- Override with live /status data when available ---
+    live = fetch_live_status()
+    if live is not None:
+        pct_all = live.weekly_pct_all
+        pct_sonnet = live.weekly_pct_sonnet
+        session_pct_all = live.session_pct
+        session_reset_label = live.session_reset_label
+        live_weekly_reset = live.weekly_reset_label
+    else:
+        session_pct_all = session.pct_all
+        session_reset_label = session.session_reset_label
+        live_weekly_reset = reset_label()
+
     return Prediction(
         output_all=usage.output_all,
         output_sonnet=usage.output_sonnet,
@@ -473,16 +493,16 @@ def build_prediction(state: dict[str, Any]) -> Prediction:
         pct_all=round(pct_all, 1),
         pct_sonnet=round(pct_sonnet, 1),
         days_remaining=round(days_rem, 2),
-        reset_label=reset_label(),
+        reset_label=live_weekly_reset,
         period_start=start.isoformat(),
         period_end=end.isoformat(),
         will_trigger=(remaining_pct >= 1.0),
         projected_pct_all=round(projected_pct, 1),
         session_start=session.session_start.isoformat(),
-        session_pct_all=session.pct_all,
+        session_pct_all=round(session_pct_all, 1),
         session_pct_sonnet=session.pct_sonnet,
         session_hours_remaining=session.hours_remaining,
-        session_reset_label=session.session_reset_label,
+        session_reset_label=session_reset_label,
         sessions_remaining_week=session.sessions_remaining_week,
     )
 
