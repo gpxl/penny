@@ -60,13 +60,14 @@ class NaeNaeApp(NSObject):
         self._all_ready_tasks: list[Any] = []
         self._ready_tasks: list[Any] = []
         self._has_setup_issues: bool = False
+        self._last_fetch_at: datetime | None = None
 
         # Build status item (icon in menu bar)
         status_bar = NSStatusBar.systemStatusBar()
         self._status_item = status_bar.statusItemWithLength_(NSVariableStatusItemLength)
         btn = self._status_item.button()
         if btn:
-            btn.setTitle_("● Nae Nae")
+            btn.setTitle_("Loading\u2026")
             btn.setTarget_(self)
             btn.setAction_("togglePopover:")
 
@@ -113,8 +114,15 @@ class NaeNaeApp(NSObject):
                 self._popover.showRelativeToRect_ofView_preferredEdge_(
                     btn.bounds(), btn, 3  # NSRectEdgeMaxY = bottom edge of menu bar
                 )
-                # Force-fetch fresh stats every time the popover opens
-                self._worker.fetch(force=True)
+                # Show cached data immediately — no force-fetch on open since
+                # fetch_live_status spawns claude which counts against session budget.
+                # The background timer refreshes every 5 minutes automatically.
+                self._vc.updateWithData_({
+                    "prediction": self._prediction,
+                    "state": self.state,
+                    "ready_tasks": self._all_ready_tasks,
+                    "fetched_at": self._last_fetch_at,
+                })
 
     # ── Timer ─────────────────────────────────────────────────────────────
 
@@ -123,12 +131,15 @@ class NaeNaeApp(NSObject):
 
     def refreshNow_(self, sender: Any) -> None:
         """Refresh button: force-bypass cache and fetch live /status data."""
+        self._vc.setRefreshing_(True)
         self._worker.fetch(force=True)
 
     # ── Background → main thread callback ────────────────────────────────
 
     def _didFetchData_(self, result: dict) -> None:
         """Called on main thread after BackgroundWorker._run() completes."""
+        # Always clear loading state regardless of outcome
+        self._vc.setRefreshing_(False)
         if not isinstance(result, dict):
             return
         if "error" in result:
@@ -140,10 +151,14 @@ class NaeNaeApp(NSObject):
 
         self.state = state
         self._prediction = pred
+        self._last_fetch_at = datetime.now(timezone.utc)
 
         # Handle newly-completed agents
         for agent in newly_done:
             state.setdefault("spawned_this_week", []).append(agent)
+            rc = state.setdefault("recently_completed", [])
+            rc.append(agent)
+            state["recently_completed"] = rc[-20:]  # keep last 20
             if self.config.get("notifications", {}).get("completion", True):
                 send_notification(
                     "Nae Nae",
@@ -161,14 +176,13 @@ class NaeNaeApp(NSObject):
         # Update status item title
         self._update_status_title()
 
-        # Update popover if open
-        if self._popover.isShown():
-            data = {
-                "prediction": pred,
-                "state": state,
-                "ready_tasks": self._all_ready_tasks,
-            }
-            self._vc.updateWithData_(data)
+        # Always update the VC so cached data is fresh for next popover open
+        self._vc.updateWithData_({
+            "prediction": pred,
+            "state": state,
+            "ready_tasks": self._all_ready_tasks,
+            "fetched_at": self._last_fetch_at,
+        })
 
         # Auto-spawn if trigger conditions met
         if pred and should_trigger(pred, self.config):
@@ -184,12 +198,16 @@ class NaeNaeApp(NSObject):
         btn = self._status_item.button()
         if btn is None:
             return
-        if n_running > 0:
-            btn.setTitle_(f"\u2699 {n_running}")
-        elif pred and pred.will_trigger:
-            btn.setTitle_(f"\u25d0 {100 - pred.projected_pct_all:.0f}%")
+        if pred:
+            stats = f"{pred.session_pct_all:.0f} {pred.pct_all:.0f}/{pred.pct_sonnet:.0f}"
+            if n_running > 0:
+                btn.setTitle_(f"{stats} \u2728{n_running}")
+            else:
+                btn.setTitle_(stats)
+        elif n_running > 0:
+            btn.setTitle_(f"\u2728{n_running}")
         else:
-            btn.setTitle_("\u25cf Nae Nae")
+            btn.setTitle_("Loading\u2026")
 
     # ── Task/agent actions ────────────────────────────────────────────────
 
@@ -197,6 +215,8 @@ class NaeNaeApp(NSObject):
         desc = get_task_description(task)
         record = spawn_claude_agent(task, desc)
         self.state.setdefault("agents_running", []).append(record)
+        # Remove from ready list immediately so the popover reflects the change now
+        self._all_ready_tasks = [t for t in self._all_ready_tasks if t.task_id != task.task_id]
         save_state(self.state)
         self._update_status_title()
         if self.config.get("notifications", {}).get("spawn", True):
@@ -204,7 +224,13 @@ class NaeNaeApp(NSObject):
                 "Nae Nae",
                 f"Starting agent \u2014 {task.task_id}: {task.title} ({task.project_name})",
             )
-        # Refresh UI
+        # Immediately update UI — task moves from Ready → Running Agents without reopen
+        self._vc.updateWithData_({
+            "prediction": self._prediction,
+            "state": self.state,
+            "ready_tasks": self._all_ready_tasks,
+            "fetched_at": self._last_fetch_at,
+        })
         self._worker.fetch()
 
     def stopAgent_(self, pid: int) -> None:
@@ -221,25 +247,51 @@ class NaeNaeApp(NSObject):
         self._update_status_title()
         self._worker.fetch()
 
+    def dismissCompleted_(self, task_id: str) -> None:
+        rc = self.state.get("recently_completed", [])
+        self.state["recently_completed"] = [a for a in rc if a.get("task_id") != task_id]
+        save_state(self.state)
+        self._vc.updateWithData_({
+            "prediction": self._prediction,
+            "state": self.state,
+            "ready_tasks": self._all_ready_tasks,
+            "fetched_at": self._last_fetch_at,
+        })
+
+    def clearAllCompleted_(self, sender: Any) -> None:
+        self.state["recently_completed"] = []
+        save_state(self.state)
+        self._vc.updateWithData_({
+            "prediction": self._prediction,
+            "state": self.state,
+            "ready_tasks": self._all_ready_tasks,
+            "fetched_at": self._last_fetch_at,
+        })
+
     def runBdAction_(self, args_cwd: Any) -> None:
         """Run a bd command in the background, then refresh."""
         args, cwd = args_cwd
-        if not cwd:
+        # Ensure all args are plain Python str so subprocess doesn't choke on NSString
+        str_args = [str(a) for a in args]
+        str_cwd = str(cwd) if cwd else ""
+        if not str_cwd:
             return
 
         def _run() -> None:
             try:
-                subprocess.run(
-                    ["bd"] + list(args),
-                    cwd=cwd,
+                r = subprocess.run(
+                    ["bd"] + str_args,
+                    cwd=str_cwd,
                     capture_output=True,
                     text=True,
                     timeout=30,
                 )
-            except Exception:
-                pass
+                if r.returncode != 0:
+                    print(f"[naenae] bd {str_args} failed (rc={r.returncode}): {r.stderr.strip()}", flush=True)
+            except Exception as exc:
+                print(f"[naenae] bd {str_args} exception: {exc}", flush=True)
             finally:
-                self._worker.fetch()
+                self._worker.fetch(force=True)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -309,8 +361,9 @@ class NaeNaeApp(NSObject):
         self._has_setup_issues = bool(issues)
         save_state(self.state)
 
-        # Kick off first data fetch
-        self._worker.fetch()
+        # Kick off first data fetch — force=True bypasses disk cache so the
+        # menu bar shows live stats immediately on launch, not cached values.
+        self._worker.fetch(force=True)
 
     @objc.python_method
     def _spawn_agents(self) -> None:
@@ -362,8 +415,12 @@ def _acquire_pid_lock() -> None:
 def _release_pid_lock() -> None:
     pid_file = data_dir() / "naenae.pid"
     try:
-        pid_file.unlink()
-    except FileNotFoundError:
+        # Only unlink if the file still belongs to this process.
+        # Prevents a slow-dying old instance from deleting the new instance's lock.
+        stored = int(pid_file.read_text().strip())
+        if stored == os.getpid():
+            pid_file.unlink()
+    except (FileNotFoundError, ValueError):
         pass
 
 

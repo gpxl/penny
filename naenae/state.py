@@ -37,6 +37,7 @@ def _default_state() -> dict[str, Any]:
         "predictions": {},
         "agents_running": [],
         "spawned_this_week": [],
+        "recently_completed": [],  # agents completed this session; user-clearable
         "period_history": [],    # past completed periods for budget calibration
         "session_history": [],   # past completed sub-sessions for budget calibration
         "last_session_scan": None,

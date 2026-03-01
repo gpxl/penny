@@ -14,12 +14,14 @@ Requirements: pexpect>=4.8, pyte>=0.8
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -28,6 +30,50 @@ from typing import Any
 _CACHE_TTL_SECONDS = 5 * 60
 
 _cache: LiveStatus | None = None
+
+
+def _cache_file() -> Path:
+    env = os.environ.get("NAENAE_HOME")
+    d = Path(env) if env else Path.home() / ".naenae"
+    return d / "status_cache.json"
+
+
+def _save_cache(status: "LiveStatus") -> None:
+    try:
+        path = _cache_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "session_pct": status.session_pct,
+            "session_reset_label": status.session_reset_label,
+            "session_reset_tz": status.session_reset_tz,
+            "weekly_pct_all": status.weekly_pct_all,
+            "weekly_pct_sonnet": status.weekly_pct_sonnet,
+            "weekly_reset_label": status.weekly_reset_label,
+            "weekly_reset_tz": status.weekly_reset_tz,
+            "fetched_at": status.fetched_at.isoformat(),
+        }))
+    except Exception:
+        pass
+
+
+def _load_cache() -> "LiveStatus | None":
+    try:
+        path = _cache_file()
+        if not path.exists():
+            return None
+        d = json.loads(path.read_text())
+        return LiveStatus(
+            session_pct=d["session_pct"],
+            session_reset_label=d["session_reset_label"],
+            session_reset_tz=d["session_reset_tz"],
+            weekly_pct_all=d["weekly_pct_all"],
+            weekly_pct_sonnet=d["weekly_pct_sonnet"],
+            weekly_reset_label=d["weekly_reset_label"],
+            weekly_reset_tz=d["weekly_reset_tz"],
+            fetched_at=datetime.fromisoformat(d["fetched_at"]),
+        )
+    except Exception:
+        return None
 
 # Terminal dimensions for the spawned claude process.
 # Dialog requires at least 40 rows; 200 cols avoids line-wrapping.
@@ -52,10 +98,13 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     """
     Parse percentages and reset labels from the pyte-rendered Usage tab text.
 
-    The Usage tab shows (in order):
-      Current session    → N% used  →  Resets TIME (Europe/Amsterdam)
-      Current week (all) → N% used  →  Resets DATE at TIME (Europe/Amsterdam)
-      Current week (Sonnet) → N% used (same reset line)
+    Actual render order on screen:
+      Current session       → N% used  →  Resets TIME (timezone)
+      Current week (all)    → N% used  →  Resets DATE at TIME (timezone)
+      Current week (Sonnet) → N% used  (same reset line as all)
+
+    So: pcts[0]=session, pcts[1]=all-models, pcts[2]=sonnet.
+    Resets: resets[0] is the session reset (short: "2pm"), resets[-1] is the weekly reset (long: "Mar 6 at 9pm").
 
     The pyte screen may contain remnants of the previous tab above the tab bar.
     We locate the tab bar line ("Usage" with "Config" also visible) and parse
@@ -81,12 +130,12 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     if len(pcts) < 3 or len(resets) < 1:
         return None
 
-    # Values appear in order: session, all-models week, sonnet week.
-    # Resets appear: session reset (short: "2pm"), weekly reset (long: "Mar 6 at 9pm").
+    # Actual screen order: session (pcts[0]), all-models week (pcts[1]), sonnet week (pcts[2]).
+    # Resets appear: session reset first (short: "2pm"), weekly reset last (long: "Mar 6 at 9pm").
     session_reset_label = resets[0][0].strip()
-    session_reset_tz = resets[0][1].strip()
-    weekly_reset_label = resets[-1][0].strip()
-    weekly_reset_tz = resets[-1][1].strip()
+    session_reset_tz    = resets[0][1].strip()
+    weekly_reset_label  = resets[-1][0].strip()
+    weekly_reset_tz     = resets[-1][1].strip()
 
     return LiveStatus(
         session_pct=float(pcts[0]),
@@ -136,6 +185,16 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
         age = (datetime.now(timezone.utc) - _cache.fetched_at).total_seconds()
         if age < _CACHE_TTL_SECONDS:
             return _cache
+
+    # On cold start (no in-memory cache) try the disk cache first.
+    # This makes restarts instant — no need to re-scrape claude immediately.
+    if _cache is None:
+        disk = _load_cache()
+        if disk is not None:
+            age = (datetime.now(timezone.utc) - disk.fetched_at).total_seconds()
+            _cache = disk          # always populate memory cache from disk
+            if not force and age < _CACHE_TTL_SECONDS:
+                return disk        # still fresh enough — skip live fetch
 
     if not shutil.which("claude"):
         return None
@@ -232,6 +291,7 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
 
     if result:
         _cache = result
+        _save_cache(result)   # persist so next process restart loads instantly
 
     return result
 
