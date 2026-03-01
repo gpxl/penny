@@ -22,12 +22,15 @@ Full task description:
 Instructions (follow exactly):
 1. Run: bd prime  (understand full project context)
 2. Run: bd update {task_id} --status=in_progress
-3. Implement the solution following project conventions (TDD: write tests first, then implement)
-4. Run all project tests and fix any failures
-5. Run lint and fix all warnings (code is not complete until lint passes)
-6. Commit with a descriptive message
-7. Run: bd close {task_id}
-8. Run: bd sync --flush-only
+3. Create a git branch for this task: git checkout -b agent/{task_id}
+4. Implement the solution following project conventions (TDD: write tests first, then implement)
+5. Run all project tests and fix any failures
+6. Run lint and fix all warnings (code is not complete until lint passes)
+7. Stage and commit with a descriptive message: git add <files> && git commit -m "..."
+8. Push the branch: git push -u origin agent/{task_id}
+9. Open a pull request: gh pr create --title "<task title>" --body "<summary of changes>"
+10. Run: bd close {task_id}
+11. Run: bd sync --flush-only
 
 Work autonomously. Do not ask for confirmation. Complete the full task end-to-end.
 """
@@ -154,16 +157,12 @@ def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def send_notification(title: str, message: str) -> None:
-    """Send a macOS Notification Center notification via osascript."""
-    script = (
-        f'display notification "{message}" with title "{title}"'
-    )
+    """Send a macOS Notification Center notification via NSUserNotificationCenter."""
     try:
-        subprocess.run(
-            ["osascript", "-e", script],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
+        from AppKit import NSUserNotification, NSUserNotificationCenter
+        note = NSUserNotification.alloc().init()
+        note.setTitle_(title)
+        note.setInformativeText_(message)
+        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(note)
     except Exception:
         pass  # Notifications are best-effort

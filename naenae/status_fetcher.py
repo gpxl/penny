@@ -40,9 +40,11 @@ class LiveStatus:
     """Parsed data from claude /status Usage tab, all values ground-truth from Anthropic."""
     session_pct: float          # "16% used"
     session_reset_label: str    # "2pm" (extracted from "Resets 2pm (Europe/Amsterdam)")
+    session_reset_tz: str       # "Europe/Amsterdam" (timezone shown in /status)
     weekly_pct_all: float       # "30% used"
     weekly_pct_sonnet: float    # "41% used"
     weekly_reset_label: str     # "Mar 6 at 9pm"
+    weekly_reset_tz: str        # "Europe/Amsterdam" (timezone shown in /status)
     fetched_at: datetime
 
 
@@ -73,22 +75,27 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     section = "\n".join(lines[tab_bar_idx:]) if tab_bar_idx != -1 else screen_txt
 
     pcts = re.findall(r"(\d+(?:\.\d+)?)\s*%\s*used", section)
-    resets = re.findall(r"Resets\s+(.+?)\s*\(Europe/Amsterdam\)", section)
+    # Capture both the time label AND the timezone string — works for any timezone
+    resets = re.findall(r"Resets\s+(.+?)\s*\(([^)]+)\)", section)
 
     if len(pcts) < 3 or len(resets) < 1:
         return None
 
     # Values appear in order: session, all-models week, sonnet week.
     # Resets appear: session reset (short: "2pm"), weekly reset (long: "Mar 6 at 9pm").
-    session_reset = resets[0].strip()
-    weekly_reset = resets[-1].strip()
+    session_reset_label = resets[0][0].strip()
+    session_reset_tz = resets[0][1].strip()
+    weekly_reset_label = resets[-1][0].strip()
+    weekly_reset_tz = resets[-1][1].strip()
 
     return LiveStatus(
         session_pct=float(pcts[0]),
-        session_reset_label=session_reset,
+        session_reset_label=session_reset_label,
+        session_reset_tz=session_reset_tz,
         weekly_pct_all=float(pcts[1]),
         weekly_pct_sonnet=float(pcts[2]),
-        weekly_reset_label=weekly_reset,
+        weekly_reset_label=weekly_reset_label,
+        weekly_reset_tz=weekly_reset_tz,
         fetched_at=datetime.now(timezone.utc),
     )
 
@@ -240,7 +247,9 @@ def status_as_prediction_overrides(status: LiveStatus) -> dict[str, Any]:
     return {
         "session_pct_all": status.session_pct,
         "session_reset_label": status.session_reset_label,
+        "session_reset_tz": status.session_reset_tz,
         "pct_all": status.weekly_pct_all,
         "pct_sonnet": status.weekly_pct_sonnet,
         "reset_label": status.weekly_reset_label,
+        "reset_tz": status.weekly_reset_tz,
     }

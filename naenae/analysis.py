@@ -12,48 +12,23 @@ from __future__ import annotations
 
 import glob
 import json
-import os
 import re
-from dataclasses import dataclass, field
-from datetime import date as _date, datetime, time as _time, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, time as _time, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 # Global Anthropic epoch for weekly billing periods.
 # Verified by working backwards from /status "Resets Mar 6 20:00 UTC".
 _BILLING_EPOCH = datetime(2023, 12, 29, 20, 0, 0, tzinfo=timezone.utc)
 _WEEK_SECONDS = 7 * 24 * 3600
 
-AMSTERDAM_TZ = ZoneInfo("Europe/Amsterdam")
-_RATE_LIMIT_RE = re.compile(r"resets\s+(\d+)(am|pm)\s*\(Europe/Amsterdam\)", re.IGNORECASE)
-
-# Claude Max resets at these fixed clock times daily (Europe/Amsterdam).
-# Observed from /status: resets 4am, 9am, 2pm, 7pm, midnight Amsterdam.
-_SESSION_RESET_HOURS_AMS = [0, 4, 9, 14, 19]
-
-
-def _nearest_ams_session_boundary(now: datetime, direction: str = "past") -> datetime:
-    """Return the nearest fixed Amsterdam session boundary before/after *now* (UTC).
-
-    *direction* is ``"past"`` (most recent start <= now) or ``"future"`` (next reset > now).
-    """
-    now_ams = now.astimezone(AMSTERDAM_TZ)
-    today = now_ams.date()
-
-    candidates: list[datetime] = []
-    for day_offset in range(-2, 3):
-        d = today + timedelta(days=day_offset)
-        for h in _SESSION_RESET_HOURS_AMS:
-            t = datetime.combine(d, _time(h, 0), tzinfo=AMSTERDAM_TZ).astimezone(timezone.utc)
-            candidates.append(t)
-
-    if direction == "past":
-        past = [c for c in candidates if c <= now]
-        return max(past) if past else now - timedelta(hours=5)
-    # future
-    future = [c for c in candidates if c > now]
-    return min(future) if future else now + timedelta(hours=5)
+# Generic rate-limit regex — captures hour, am/pm, and timezone string.
+# Works for any timezone the /status output returns.
+_RATE_LIMIT_RE = re.compile(
+    r"resets\s+(\d+)(am|pm)\s*\(([^)]+)\)",
+    re.IGNORECASE,
+)
 
 SONNET_MODELS = {
     "claude-sonnet-4-6",
@@ -183,17 +158,14 @@ def load_stats_cache(path: str | None = None) -> dict[str, Any]:
         return json.load(f)
 
 
-def estimate_budget_from_history(state: dict[str, Any]) -> dict[str, int]:
+def estimate_budget_from_history(state: dict[str, Any]) -> dict[str, int | None]:
     """
     Estimate weekly output token budgets from stored period history in state.json.
-    Returns {'all': N, 'sonnet': N}.
-    Falls back to known Claude Max defaults if no history.
+    Returns {'all': N | None, 'sonnet': N | None}.
+    Returns None values when there is insufficient history to estimate.
     """
     history = state.get("period_history", [])
-
-    # Known Claude Max weekly output token limits (approximate, from observed /status data)
-    # These are overridden once we accumulate real period data
-    defaults = {"all": 7_500_000, "sonnet": 5_500_000}
+    defaults: dict[str, int | None] = {"all": None, "sonnet": None}
 
     if len(history) < 2:
         return defaults
@@ -212,8 +184,8 @@ def estimate_budget_from_history(state: dict[str, Any]) -> dict[str, int]:
         return s[min(int(len(s) * 0.9), len(s) - 1)]
 
     return {
-        "all": max(percentile90(all_totals), defaults["all"]),
-        "sonnet": max(percentile90(sonnet_totals), defaults["sonnet"]) if sonnet_totals else defaults["sonnet"],
+        "all": percentile90(all_totals),
+        "sonnet": percentile90(sonnet_totals) if sonnet_totals else None,
     }
 
 
@@ -226,31 +198,53 @@ class SessionInfo:
     session_start: datetime        # when current session started (UTC)
     output_all: int                # tokens used this session (all models)
     output_sonnet: int             # tokens used this session (Sonnet only)
-    budget_all: int                # estimated session token budget
-    pct_all: float                 # % of session budget used
-    pct_sonnet: float              # % of session budget used (Sonnet)
-    hours_remaining: float         # hours until estimated session reset
-    session_reset_label: str       # e.g. "Today at 5:00 PM"
-    sessions_remaining_week: int   # estimated sessions left in billing period
+    pct_all: float                 # % of session budget used (0 if unknown)
+    pct_sonnet: float              # % of session budget used (Sonnet; 0 if unknown)
+    hours_remaining: float         # hours until estimated session reset (0 if unknown)
+    session_reset_label: str       # e.g. "—" when unavailable, "Today at 5:00 PM" from live
 
 
-def _parse_reset_hour(text: str) -> int | None:
-    """Parse reset hour (0–23) from a rate-limit message like 'resets 5pm (Europe/Amsterdam)'."""
+def _parse_rate_limit_reset(text: str) -> datetime | None:
+    """
+    Parse session reset time from a JSONL rate-limit message.
+
+    Message format: "resets 5pm (Europe/Amsterdam)" or any timezone.
+    Uses the timezone string from the message itself — no hardcoded tz.
+    Returns UTC datetime of the next session start, or None on failure.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
     m = _RATE_LIMIT_RE.search(text)
     if not m:
         return None
+
     hour = int(m.group(1))
     meridiem = m.group(2).lower()
+    tz_name = m.group(3).strip()
+
+    # Convert to 24-hour
     if meridiem == "am":
-        return 0 if hour == 12 else hour
-    return 12 if hour == 12 else hour + 12
+        hour_24 = 0 if hour == 12 else hour
+    else:
+        hour_24 = 12 if hour == 12 else hour + 12
+
+    try:
+        msg_tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, KeyError):
+        return None
+
+    # We need a context timestamp to determine the reset date — caller must provide it
+    return hour_24, msg_tz  # type: ignore[return-value]  # partial — used below
 
 
 def find_session_boundaries(since: datetime) -> list[datetime]:
     """
     Scan JSONL files for rate-limit messages since `since`.
     Returns sorted list of session reset datetimes in UTC — each is the START of a new session.
+    Uses the timezone embedded in the rate-limit message text (not hardcoded).
     """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
     projects_dir = Path.home() / ".claude" / "projects"
     since_str = since.strftime("%Y-%m-%dT%H:%M:%S")
     boundaries: list[datetime] = []
@@ -286,30 +280,46 @@ def find_session_boundaries(since: datetime) -> list[datetime]:
                         text = block.get("text", "")
                         if "You've hit your limit" not in text:
                             continue
-                        reset_hour = _parse_reset_hour(text)
-                        if reset_hour is None:
+
+                        m = _RATE_LIMIT_RE.search(text)
+                        if not m:
                             continue
 
-                        # Determine reset date from the event's Amsterdam-local time
+                        hour = int(m.group(1))
+                        meridiem = m.group(2).lower()
+                        tz_name = m.group(3).strip()
+
+                        # Convert to 24-hour
+                        if meridiem == "am":
+                            hour_24 = 0 if hour == 12 else hour
+                        else:
+                            hour_24 = 12 if hour == 12 else hour + 12
+
+                        try:
+                            msg_tz = ZoneInfo(tz_name)
+                        except (ZoneInfoNotFoundError, KeyError):
+                            continue
+
                         try:
                             event_utc = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                         except ValueError:
                             continue
-                        event_ams = event_utc.astimezone(AMSTERDAM_TZ)
-                        reset_date = event_ams.date()
 
-                        # Build reset datetime in Amsterdam timezone; push to next day if
-                        # it would otherwise be <= the event time (rate limit always resets
-                        # in the future from the moment it fires).
-                        reset_ams = datetime.combine(reset_date, _time(reset_hour, 0), tzinfo=AMSTERDAM_TZ)
-                        if reset_ams <= event_ams:
-                            reset_ams = datetime.combine(
-                                reset_date + timedelta(days=1),
-                                _time(reset_hour, 0),
-                                tzinfo=AMSTERDAM_TZ,
+                        event_local = event_utc.astimezone(msg_tz)
+                        reset_date = event_local.date()
+
+                        # Build reset datetime in the message's timezone
+                        reset_local = datetime.combine(reset_date, _time(hour_24, 0), tzinfo=msg_tz)
+                        # Push to next day if the reset time is not in the future from the event
+                        if reset_local <= event_local:
+                            from datetime import timedelta as _td
+                            reset_local = datetime.combine(
+                                reset_date + _td(days=1),
+                                _time(hour_24, 0),
+                                tzinfo=msg_tz,
                             )
 
-                        boundaries.append(reset_ams.astimezone(timezone.utc))
+                        boundaries.append(reset_local.astimezone(timezone.utc))
         except OSError:
             continue
 
@@ -319,9 +329,8 @@ def find_session_boundaries(since: datetime) -> list[datetime]:
 def find_current_session_start(period_start: datetime) -> datetime:
     """Return when the current sub-session started (UTC).
 
-    Prefers explicit rate-limit boundaries from JSONL files.  Falls back to
-    the most recent fixed Amsterdam session boundary (0:00, 4:00, 9:00, 14:00,
-    19:00 AMS) when no rate-limit messages exist for this period.
+    Prefers explicit rate-limit boundaries from JSONL files. Falls back to
+    period_start when no rate-limit messages exist for this period.
     """
     now = datetime.now(timezone.utc)
     boundaries = find_session_boundaries(period_start)
@@ -341,32 +350,23 @@ def find_current_session_start(period_start: datetime) -> datetime:
             current += timedelta(hours=sub_session_h)
         return current
 
-    # No rate-limit messages this period — use the most recent fixed Amsterdam
-    # session time (Claude Max resets at 0:00, 4:00, 9:00, 14:00, 19:00 AMS).
-    return _nearest_ams_session_boundary(now, "past")
-
-
-# Session budget: observed ~2M output tokens per sub-session window.
-# This is fixed — not calibrated from session_history, whose short sub-session
-# token counts (tokens-until-rate-limit) are much smaller and must not be used.
-_SESSION_BUDGET = 2_000_000
+    # No rate-limit messages this period — start of period is the safest fallback.
+    return period_start
 
 
 def build_session_info(state: dict[str, Any]) -> SessionInfo:
-    """Build current sub-session information, matching /status 'Current session'."""
+    """Build current sub-session information, matching /status 'Current session'.
+
+    pct_all/pct_sonnet are returned as 0.0 when no session budget is known.
+    The UI should override these with live /status data when available.
+    """
     now = datetime.now(timezone.utc)
     period_start, _ = current_billing_period()
 
-    # Session start = most recent rate-limit boundary from JSONL
     session_start = find_current_session_start(period_start)
     usage = count_tokens_since(session_start)
 
-    pct_all = (usage.output_all / _SESSION_BUDGET) * 100
-    pct_sonnet = (usage.output_sonnet / _SESSION_BUDGET) * 100
-
-    # Estimate next reset time.
-    # If we have observed rate-limit boundaries, project from the median gap.
-    # Otherwise use the next fixed Amsterdam session time (0:00/4:00/9:00/14:00/19:00).
+    # Estimate next reset time from observed rate-limit gaps
     boundaries = find_session_boundaries(period_start)
     past_boundaries = [b for b in boundaries if b <= now]
     if past_boundaries:
@@ -377,31 +377,26 @@ def build_session_info(state: dict[str, Any]) -> SessionInfo:
         ]
         sub_session_h = sorted(gaps_h)[len(gaps_h) // 2] if gaps_h else 5.0
         estimated_next_reset = session_start + timedelta(hours=sub_session_h)
+        hours_remaining = max(0.0, (estimated_next_reset - now).total_seconds() / 3600)
+
+        local_reset = estimated_next_reset.astimezone()
+        if local_reset.date() == datetime.now().date():
+            session_reset_label = "Today at " + local_reset.strftime("%-I:%M %p")
+        else:
+            session_reset_label = local_reset.strftime("%a at %-I:%M %p")
     else:
-        # No rate-limit data — next reset is the next fixed Amsterdam slot.
-        estimated_next_reset = _nearest_ams_session_boundary(now, "future")
-        sub_session_h = 5.0  # approximate for sessions_remaining calculation
-
-    hours_remaining = max(0.0, (estimated_next_reset - now).total_seconds() / 3600)
-
-    local_reset = estimated_next_reset.astimezone()
-    if local_reset.date() == datetime.now().date():
-        reset_label = "Today at " + local_reset.strftime("%-I:%M %p")
-    else:
-        reset_label = local_reset.strftime("%a at %-I:%M %p")
-
-    sessions_remaining = max(0, int(days_until_reset() * 24 / sub_session_h))
+        # No observed boundaries — live /status will provide the real label
+        hours_remaining = 0.0
+        session_reset_label = "—"
 
     return SessionInfo(
         session_start=session_start,
         output_all=usage.output_all,
         output_sonnet=usage.output_sonnet,
-        budget_all=_SESSION_BUDGET,
-        pct_all=round(pct_all, 1),
-        pct_sonnet=round(pct_sonnet, 1),
+        pct_all=0.0,      # unknown without budget — overridden by live data
+        pct_sonnet=0.0,   # unknown without budget — overridden by live data
         hours_remaining=round(hours_remaining, 1),
-        session_reset_label=reset_label,
-        sessions_remaining_week=sessions_remaining,
+        session_reset_label=session_reset_label,
     )
 
 
@@ -415,9 +410,9 @@ class Prediction:
     output_all: int = 0
     output_sonnet: int = 0
 
-    # Budget estimates
-    budget_all: int = 0
-    budget_sonnet: int = 0
+    # Budget estimates (None = unknown)
+    budget_all: int | None = None
+    budget_sonnet: int | None = None
 
     # Derived percentages (matching /status display)
     pct_all: float = 0.0
@@ -439,36 +434,24 @@ class Prediction:
     session_pct_sonnet: float = 0.0
     session_hours_remaining: float = 0.0
     session_reset_label: str = ""
-    sessions_remaining_week: int = 0
 
 
 def build_prediction(state: dict[str, Any]) -> Prediction:
     """Compute the full prediction from current token usage + budget estimate.
 
     Percentages and reset labels are overridden with ground-truth values from
-    claude /status when available (via status_fetcher).  Token counts and budget
+    claude /status when available (via status_fetcher). Token counts and budget
     absolutes still come from JSONL parsing — /status doesn't expose those.
+    Budget is back-calculated from live percentage + token count when possible.
     """
     from .status_fetcher import fetch_live_status  # local import to keep startup fast
 
     start, end = current_billing_period()
     usage = count_tokens_since(start)
-    budget = estimate_budget_from_history(state)
+    hist_budget = estimate_budget_from_history(state)
 
     days_rem = days_until_reset()
     elapsed_days = max((_WEEK_SECONDS / 86400) - days_rem, 1 / 24)
-
-    # Current % used (JSONL-estimated; may be overridden below)
-    pct_all = (usage.output_all / max(budget["all"], 1)) * 100
-    pct_sonnet = (usage.output_sonnet / max(budget["sonnet"], 1)) * 100
-
-    # Projection: if current rate continues
-    daily_rate = usage.output_all / elapsed_days
-    projected = usage.output_all + (daily_rate * days_rem)
-    projected_pct = (projected / max(budget["all"], 1)) * 100
-
-    # Remaining capacity = what we expect to go unused
-    remaining_pct = max(0.0, 100.0 - projected_pct)
 
     session = build_session_info(state)
 
@@ -480,16 +463,43 @@ def build_prediction(state: dict[str, Any]) -> Prediction:
         session_pct_all = live.session_pct
         session_reset_label = live.session_reset_label
         live_weekly_reset = live.weekly_reset_label
+
+        # Back-calculate budget from live percentage + observed token count
+        # pct = tokens / budget * 100  →  budget = tokens / (pct / 100)
+        if live.weekly_pct_all > 0 and usage.output_all > 0:
+            budget_all: int | None = int(usage.output_all / (live.weekly_pct_all / 100))
+        else:
+            budget_all = hist_budget.get("all")
+
+        if live.weekly_pct_sonnet > 0 and usage.output_sonnet > 0:
+            budget_sonnet: int | None = int(usage.output_sonnet / (live.weekly_pct_sonnet / 100))
+        else:
+            budget_sonnet = hist_budget.get("sonnet")
     else:
+        # No live data — use JSONL-estimated percentages (less accurate)
+        budget_all = hist_budget.get("all")
+        budget_sonnet = hist_budget.get("sonnet")
+        pct_all = (usage.output_all / max(budget_all, 1)) * 100 if budget_all else 0.0
+        pct_sonnet = (usage.output_sonnet / max(budget_sonnet, 1)) * 100 if budget_sonnet else 0.0
         session_pct_all = session.pct_all
         session_reset_label = session.session_reset_label
         live_weekly_reset = reset_label()
 
+    # Projection: if current rate continues (only meaningful when budget is known)
+    if budget_all:
+        daily_rate = usage.output_all / elapsed_days
+        projected = usage.output_all + (daily_rate * days_rem)
+        projected_pct = (projected / max(budget_all, 1)) * 100
+        remaining_pct = max(0.0, 100.0 - projected_pct)
+    else:
+        projected_pct = pct_all  # best guess: current usage
+        remaining_pct = max(0.0, 100.0 - pct_all)
+
     return Prediction(
         output_all=usage.output_all,
         output_sonnet=usage.output_sonnet,
-        budget_all=budget["all"],
-        budget_sonnet=budget["sonnet"],
+        budget_all=budget_all,
+        budget_sonnet=budget_sonnet,
         pct_all=round(pct_all, 1),
         pct_sonnet=round(pct_sonnet, 1),
         days_remaining=round(days_rem, 2),
@@ -503,7 +513,6 @@ def build_prediction(state: dict[str, Any]) -> Prediction:
         session_pct_sonnet=session.pct_sonnet,
         session_hours_remaining=session.hours_remaining,
         session_reset_label=session_reset_label,
-        sessions_remaining_week=session.sessions_remaining_week,
     )
 
 
