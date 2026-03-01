@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ import yaml
 
 try:
     from AppKit import (
+        NSAlert,
         NSApplication,
         NSAttributedString,
         NSColor,
@@ -46,6 +48,104 @@ from .tasks import filter_tasks, get_ready_tasks, get_task_description
 
 CONFIG_PATH = data_dir() / "config.yaml"
 
+# ── Markdown rendering helpers ─────────────────────────────────────────
+
+_SECTION_RE = re.compile(r'^[A-Z][A-Z _]+$')
+_INLINE_RE = re.compile(r'\*\*(.+?)\*\*|`(.+?)`')
+_BULLET_RE = re.compile(r'^(\s*)- ')
+
+
+def _extract_description(bd_show_output: str) -> str:
+    """Strip the bd show header block; return content from first section header on."""
+    lines = bd_show_output.splitlines()
+    for i, line in enumerate(lines):
+        if _SECTION_RE.match(line.strip()) and line.strip():
+            return '\n'.join(lines[i:]).strip()
+    return bd_show_output.strip()
+
+
+def _markdown_to_attrstr(text: str) -> Any:
+    """Convert simple markdown to NSMutableAttributedString for display in NSTextView."""
+    from AppKit import (  # noqa: PLC0415 — local import, only called when AppKit available
+        NSAttributedString,
+        NSMutableAttributedString,
+        NSFont,
+        NSColor,
+        NSFontAttributeName,
+        NSForegroundColorAttributeName,
+    )
+
+    body_font = NSFont.systemFontOfSize_(13)
+    bold_font = NSFont.boldSystemFontOfSize_(13)
+    mono_font = NSFont.fontWithName_size_("Menlo", 12) or body_font
+    hdr_font = NSFont.boldSystemFontOfSize_(11)
+    label_color = NSColor.labelColor()
+    secondary_color = NSColor.secondaryLabelColor()
+
+    result = NSMutableAttributedString.alloc().init()
+
+    def append(s: str, font: Any, color: Any) -> None:
+        if not s:
+            return
+        attrs = {NSFontAttributeName: font, NSForegroundColorAttributeName: color}
+        frag = NSAttributedString.alloc().initWithString_attributes_(s, attrs)
+        result.appendAttributedString_(frag)
+
+    for i, raw_line in enumerate(text.splitlines()):
+        if i > 0:
+            append("\n", body_font, label_color)
+
+        # Section header (e.g. DESCRIPTION, NOTES)
+        if _SECTION_RE.match(raw_line.strip()) and raw_line.strip():
+            append(raw_line.strip(), hdr_font, secondary_color)
+            continue
+
+        # Convert "- item" bullet to "• item"
+        line = _BULLET_RE.sub(lambda m: m.group(1) + "• ", raw_line)
+
+        # Inline markdown: **bold** and `code`
+        pos = 0
+        for m in _INLINE_RE.finditer(line):
+            if m.start() > pos:
+                append(line[pos:m.start()], body_font, label_color)
+            if m.group(1) is not None:   # **bold**
+                append(m.group(1), bold_font, label_color)
+            elif m.group(2) is not None:  # `code`
+                append(m.group(2), mono_font, secondary_color)
+            pos = m.end()
+        if pos < len(line):
+            append(line[pos:], body_font, label_color)
+
+    return result
+
+
+def _make_content_view(text: str, width: float = 480.0, height: float = 220.0) -> Any:
+    """Return a scrollable NSTextView filled with rendered markdown."""
+    from AppKit import NSScrollView, NSTextView  # noqa: PLC0415
+
+    frame = ((0.0, 0.0), (width, height))
+
+    scroll = NSScrollView.alloc().initWithFrame_(frame)
+    scroll.setHasVerticalScroller_(True)
+    scroll.setAutohidesScrollers_(True)
+    scroll.setBorderType_(0)  # NSNoBorder
+
+    tv = NSTextView.alloc().initWithFrame_(frame)
+    tv.setEditable_(False)
+    tv.setSelectable_(True)
+    tv.setDrawsBackground_(False)
+    tv.setRichText_(True)
+
+    container = tv.textContainer()
+    if container is not None:
+        container.setWidthTracksTextView_(True)
+        container.setContainerSize_((width - 16.0, 1e7))
+
+    tv.textStorage().setAttributedString_(_markdown_to_attrstr(text))
+
+    scroll.setDocumentView_(tv)
+    return scroll
+
 
 def _safe_load_config() -> tuple[dict[str, Any], str | None]:
     """Load config.yaml.
@@ -69,11 +169,16 @@ class NaeNaeApp(rumps.App):
         self.config: dict[str, Any] = {}
         self.state: dict[str, Any] = {}
         self._ready_tasks: list[Any] = []
+        self._all_ready_tasks: list[Any] = []
         self._prediction: Any = None
         self._has_setup_issues: bool = False
         # Keep strong references to submenu objects so PyObjC/Cocoa don't GC them
         self._agents_submenu: Any = None
         self._agent_submenu_items: list[Any] = []
+        self._task_queue_submenu: Any = None
+        self._task_queue_items: list[Any] = []
+        self._completed_submenu: Any = None
+        self._completed_items: list[Any] = []
 
         self._build_menu()
 
@@ -131,23 +236,32 @@ class NaeNaeApp(rumps.App):
             item._menuitem.setAttributedTitle_(attr_str)
             item._menuitem.setEnabled_(True)
 
+    def _style_section_header(self, item: rumps.MenuItem) -> None:
+        """Style a menu item as a disabled section header (Apple HIG style)."""
+        self._set_display_title(item, item.title, secondary=True)
+        if _HAS_APPKIT:
+            item._menuitem.setEnabled_(False)
+
     def _build_menu(self) -> None:
         setup_item = rumps.MenuItem("Setup Issues\u2026", callback=self.show_setup_issues)
         self.menu = [
-            rumps.MenuItem("📊 Usage This Week", callback=None),
+            rumps.separator,
+            rumps.MenuItem("Weekly Budget", callback=None),
+            rumps.MenuItem("  All models: —", callback=None),
             rumps.MenuItem("  Sonnet: —", callback=None),
-            rumps.MenuItem("  Session: —", callback=None),
-            rumps.MenuItem("  Session resets: —", callback=None),
             rumps.MenuItem("  Reset: —", callback=None),
             rumps.separator,
+            rumps.MenuItem("Session Budget", callback=None),
+            rumps.MenuItem("  Session: —", callback=None),
+            rumps.MenuItem("  Session resets: —", callback=None),
+            rumps.separator,
+            rumps.MenuItem("Tasks", callback=None),
             rumps.MenuItem("📋 Task Queue (—)", callback=self._noop),
+            rumps.MenuItem("✅ Completed This Week (—)", callback=self._noop),
             rumps.separator,
             rumps.MenuItem("⚙ No agents running", callback=self._noop),
             rumps.separator,
-            rumps.MenuItem("✅ Completed This Week (—)", callback=self._noop),
-            rumps.separator,
             rumps.MenuItem("View Full Report", callback=self.view_report, key="r"),
-            rumps.MenuItem("Run Now", callback=self.run_now),
             setup_item,
             rumps.MenuItem("Preferences\u2026", callback=self.open_prefs),
             rumps.separator,
@@ -155,6 +269,10 @@ class NaeNaeApp(rumps.App):
         ]
         # Hidden by default; shown only when issues are detected
         setup_item._menuitem.setHidden_(True)
+        # Style section headers as disabled group labels (Apple HIG)
+        self._style_section_header(self.menu["Weekly Budget"])
+        self._style_section_header(self.menu["Session Budget"])
+        self._style_section_header(self.menu["Tasks"])
 
     # ── Agent submenu ─────────────────────────────────────────────────────
 
@@ -222,6 +340,138 @@ class NaeNaeApp(rumps.App):
         self._agents_submenu = submenu  # keep strong ref so Cocoa doesn't GC it
         item._menuitem.setSubmenu_(submenu)
 
+    def _rebuild_task_queue_menu(self) -> None:
+        """Rebuild the 📋 Task Queue submenu with one clickable item per ready task."""
+        item = self.menu["📋 Task Queue (—)"]
+
+        # Detach old submenu and drop strong refs before rebuilding
+        item._menuitem.setSubmenu_(None)
+        self._task_queue_submenu = None
+        self._task_queue_items = []
+
+        tasks = self._all_ready_tasks
+        count = len(tasks)
+        self._set_display_title(item, f"📋 Task Queue ({count} ready)")
+
+        if not tasks or not _HAS_APPKIT:
+            return
+
+        running_ids = {a["task_id"] for a in self.state.get("agents_running", [])}
+
+        submenu = NSMenu.alloc().init()
+
+        for task in tasks:
+            is_running = task.task_id in running_ids
+            label = f"[{task.priority}] {task.project_name}/{task.task_id}: {task.title}"
+            if len(label) > 58:
+                label = label[:55] + "…"
+            if is_running:
+                label = f"⚙ {label}"
+                ns_item = _NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    label, None, ""
+                )
+                ns_item.setEnabled_(False)
+                submenu.addItem_(ns_item)
+            else:
+                menu_item = rumps.MenuItem(
+                    label,
+                    callback=lambda _, t=task: self._show_task_details(t),
+                )
+                submenu.addItem_(menu_item._menuitem)
+                self._task_queue_items.append(menu_item)  # keep Python ref alive
+
+        self._task_queue_submenu = submenu
+        item._menuitem.setSubmenu_(submenu)
+
+    def _show_task_details(self, task: Any) -> None:
+        """Show task details dialog; user must confirm before spawning."""
+        desc = get_task_description(task)
+        if _HAS_APPKIT:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(f"{task.task_id}: {task.title}")
+            alert.setInformativeText_(
+                f"Project: {task.project_name}   Priority: {task.priority}"
+            )
+            desc_clean = _extract_description(desc)
+            if desc_clean:
+                alert.setAccessoryView_(_make_content_view(desc_clean))
+                alert.layout()
+            alert.addButtonWithTitle_("Run Task")   # response 1000
+            alert.addButtonWithTitle_("Cancel")     # response 1001
+            if alert.runModal() == 1000:
+                self._spawn_single_task(task)
+        else:
+            self._spawn_single_task(task)
+
+    def _rebuild_completed_tasks_menu(self) -> None:
+        """Rebuild the ✅ Completed This Week submenu (newest first)."""
+        item = self.menu["✅ Completed This Week (—)"]
+
+        # Detach old submenu and drop strong refs before rebuilding
+        item._menuitem.setSubmenu_(None)
+        self._completed_submenu = None
+        self._completed_items = []
+
+        completed = list(reversed(self.state.get("spawned_this_week", [])))
+        if not completed or not _HAS_APPKIT:
+            return
+
+        submenu = NSMenu.alloc().init()
+
+        for agent in completed:
+            task_id = agent.get("task_id", "?")
+            title = agent.get("title", "")
+            project = agent.get("project", "")
+            label = f"{task_id}: {title}"
+            if len(label) > 45:
+                label = label[:42] + "…"
+            if project:
+                label += f"  ({project})"
+
+            menu_item = rumps.MenuItem(
+                label,
+                callback=lambda _, a=agent: self._show_completed_task_details(a),
+            )
+            submenu.addItem_(menu_item._menuitem)
+            self._completed_items.append(menu_item)
+
+        self._completed_submenu = submenu
+        item._menuitem.setSubmenu_(submenu)
+
+    def _show_completed_task_details(self, agent: dict) -> None:
+        """Show completed task details with option to open log."""
+        task_id  = agent.get("task_id", "?")
+        title    = agent.get("title", "—")
+        project  = agent.get("project", "—")
+        status   = agent.get("status", "completed")
+        started  = agent.get("spawned_at", "")[:16].replace("T", " ")
+        log_path = agent.get("log", "")
+
+        body = f"Project: {project}\nStatus: {status}\nStarted: {started}"
+
+        if _HAS_APPKIT:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(f"{task_id}: {title}")
+            alert.setInformativeText_(body)
+            if log_path:
+                alert.addButtonWithTitle_("Open Log")   # response 1000
+            alert.addButtonWithTitle_("Close")           # response 1000 or 1001
+            if alert.runModal() == 1000 and log_path:
+                subprocess.run(["open", log_path], check=False)
+
+    def _spawn_single_task(self, task: Any) -> None:
+        """Spawn a Claude agent for a single user-selected task."""
+        desc = get_task_description(task)
+        record = spawn_claude_agent(task, desc)
+        self.state.setdefault("agents_running", []).append(record)
+        save_state(self.state)
+        self._update_ui()
+        if self.config.get("notifications", {}).get("spawn", True):
+            send_notification(
+                "Nae Nae",
+                f"Starting agent — {task.task_id}: {task.title} ({task.project_name})",
+            )
+
     def _stop_agent(self, pid: int | None) -> None:
         """Stop a running agent and remove it from state immediately.
 
@@ -256,10 +506,6 @@ class NaeNaeApp(rumps.App):
         self._run_cycle()
 
     # ── Actions ───────────────────────────────────────────────────────────
-
-    @rumps.clicked("Run Now")
-    def run_now(self, _: Any) -> None:
-        self._run_cycle(force=True)
 
     @rumps.clicked("View Full Report")
     def view_report(self, _: Any) -> None:
@@ -423,6 +669,7 @@ class NaeNaeApp(rumps.App):
 
         projects = self.config.get("projects", [])
         all_tasks = get_ready_tasks(projects)
+        self._all_ready_tasks = all_tasks
         self._ready_tasks = filter_tasks(all_tasks, self.state, self.config)
 
     def _spawn_agents(self, force: bool = False) -> None:
@@ -466,14 +713,15 @@ class NaeNaeApp(rumps.App):
 
         bar = get_usage_bar(pred.pct_all)
         self._set_display_title(
-            self.menu["📊 Usage This Week"],
-            f"📊 All models: {bar} {pred.pct_all:.0f}%",
+            self.menu["  All models: —"],
+            f"  All models: {bar} {pred.pct_all:.0f}%",
+            secondary=True,
         )
 
         bar_s = get_usage_bar(pred.pct_sonnet)
         self._set_display_title(
             self.menu["  Sonnet: —"],
-            f"  Sonnet only: {bar_s} {pred.pct_sonnet:.0f}%",
+            f"  Sonnet: {bar_s} {pred.pct_sonnet:.0f}%",
             secondary=True,
         )
 
@@ -486,8 +734,7 @@ class NaeNaeApp(rumps.App):
 
         self._set_display_title(
             self.menu["  Session resets: —"],
-            f"  Resets {pred.session_reset_label}  ({pred.session_hours_remaining:.1f}h, "
-            f"{pred.sessions_remaining_week} sessions left)",
+            f"  Resets {pred.session_reset_label}  ({pred.session_hours_remaining:.1f}h)",
             secondary=True,
         )
 
@@ -497,24 +744,46 @@ class NaeNaeApp(rumps.App):
             secondary=True,
         )
 
-        all_tasks_count = len(get_ready_tasks(self.config.get("projects", [])))
-        self._set_display_title(
-            self.menu["📋 Task Queue (—)"],
-            f"📋 Task Queue ({all_tasks_count} ready)",
-        )
-
         self._set_display_title(
             self.menu["✅ Completed This Week (—)"],
             f"✅ Completed This Week ({len(spawned)})",
         )
 
+        self._rebuild_task_queue_menu()
+        self._rebuild_completed_tasks_menu()
         self._rebuild_agents_menu(agents_running)
 
 
+def _acquire_pid_lock() -> None:
+    """Ensure only one instance runs. Exits immediately if another is alive."""
+    pid_file = data_dir() / "naenae.pid"
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text().strip())
+            os.kill(old_pid, 0)  # raises if process is gone
+            print(f"Nae Nae already running (PID {old_pid}). Exiting.")
+            raise SystemExit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # stale PID — overwrite below
+    pid_file.write_text(str(os.getpid()))
+
+
+def _release_pid_lock() -> None:
+    pid_file = data_dir() / "naenae.pid"
+    try:
+        pid_file.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def main() -> None:
-    setproctitle.setproctitle("Nae Nae")
-    app = NaeNaeApp()
-    app.run()
+    _acquire_pid_lock()
+    try:
+        setproctitle.setproctitle("Nae Nae")
+        app = NaeNaeApp()
+        app.run()
+    finally:
+        _release_pid_lock()
 
 
 if __name__ == "__main__":
