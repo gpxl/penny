@@ -1,16 +1,23 @@
 """Fetch accurate session/weekly usage by running claude interactively
-and parsing the /status output.
+and parsing the /status Usage tab output.
 
 Uses pexpect to drive a claude subprocess in a pseudo-terminal, sends
-/status, captures the terminal output (including ANSI escape codes),
-strips them, and extracts the three percentage values and reset times
-with regex. Results are cached for 30 minutes.
+/status, navigates to the Usage tab (the dialog has four tabs:
+Settings | Status | Config | Usage), captures the terminal output via
+the pyte terminal emulator (which tracks screen state cleanly, avoiding
+mangled text from interleaved cursor-positioning sequences), and extracts
+the three percentage values and reset times with regex.
+
+Results are cached for 30 minutes.
+
+Requirements: pexpect>=4.8, pyte>=0.8
 """
 from __future__ import annotations
 
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -22,53 +29,57 @@ _CACHE_TTL_SECONDS = 30 * 60
 
 _cache: LiveStatus | None = None
 
+# Terminal dimensions for the spawned claude process.
+# Dialog requires at least 40 rows; 200 cols avoids line-wrapping.
+_ROWS = 50
+_COLS = 200
+
 
 @dataclass
 class LiveStatus:
-    """Parsed data from claude /status, all values ground-truth from Anthropic."""
-    session_pct: float          # "9% used"
-    session_reset_label: str    # "2pm (Europe/Amsterdam)" → converted to label
-    weekly_pct_all: float       # "29% used"
-    weekly_pct_sonnet: float    # "39% used"
-    weekly_reset_label: str     # "Mar 6 at 9pm (Europe/Amsterdam)"
+    """Parsed data from claude /status Usage tab, all values ground-truth from Anthropic."""
+    session_pct: float          # "16% used"
+    session_reset_label: str    # "2pm" (extracted from "Resets 2pm (Europe/Amsterdam)")
+    weekly_pct_all: float       # "30% used"
+    weekly_pct_sonnet: float    # "41% used"
+    weekly_reset_label: str     # "Mar 6 at 9pm"
     fetched_at: datetime
 
 
-_ANSI_RE = re.compile(
-    r'\x1b(?:'
-    r'\[[0-9;?]*[A-Za-z]'   # CSI sequences (colors, cursor movement)
-    r'|[=>]'                 # two-char sequences
-    r'|\][^\x07\x1b]*(?:\x07|\x1b\\)'  # OSC sequences
-    r'|[^[\\]'               # single-char sequences
-    r')'
-)
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove all ANSI/VT100 escape sequences from terminal output."""
-    return _ANSI_RE.sub("", text)
-
-
-def _parse_status_output(raw: str) -> LiveStatus | None:
+def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     """
-    Extract percentages and reset times from stripped /status terminal output.
+    Parse percentages and reset labels from the pyte-rendered Usage tab text.
 
-    /status shows (in order):
+    The Usage tab shows (in order):
       Current session    → N% used  →  Resets TIME (Europe/Amsterdam)
       Current week (all) → N% used  →  Resets DATE at TIME (Europe/Amsterdam)
-      Current week (Sonnet) → N% used (same reset)
-    """
-    text = _strip_ansi(raw)
+      Current week (Sonnet) → N% used (same reset line)
 
-    pcts = re.findall(r"(\d+(?:\.\d+)?)\s*%\s*used", text)
-    resets = re.findall(r"Resets\s+(.+?)\s*\(Europe/Amsterdam\)", text)
+    The pyte screen may contain remnants of the previous tab above the tab bar.
+    We locate the tab bar line ("Usage" with "Config" also visible) and parse
+    only the content below it.
+    """
+    lines = screen_txt.splitlines()
+
+    # Find the tab bar: the line that contains both "Config" and "Usage"
+    # (when Usage tab is active, the tab bar renders something like:
+    #  ")            Status   Config   Usage")
+    tab_bar_idx = -1
+    for i, line in enumerate(lines):
+        if "Usage" in line and ("Config" in line or "Status" in line):
+            tab_bar_idx = i
+            break
+
+    section = "\n".join(lines[tab_bar_idx:]) if tab_bar_idx != -1 else screen_txt
+
+    pcts = re.findall(r"(\d+(?:\.\d+)?)\s*%\s*used", section)
+    resets = re.findall(r"Resets\s+(.+?)\s*\(Europe/Amsterdam\)", section)
 
     if len(pcts) < 3 or len(resets) < 1:
         return None
 
-    # Session reset is short form: "2pm" or "9am"
-    # Weekly reset is long form: "Mar 6 at 9pm"
-    # Use the first reset as session, last distinct one as weekly.
+    # Values appear in order: session, all-models week, sonnet week.
+    # Resets appear: session reset (short: "2pm"), weekly reset (long: "Mar 6 at 9pm").
     session_reset = resets[0].strip()
     weekly_reset = resets[-1].strip()
 
@@ -82,12 +93,35 @@ def _parse_status_output(raw: str) -> LiveStatus | None:
     )
 
 
+def _feed_child(child: Any, stream: Any, secs: float) -> None:
+    """Read from child for up to secs seconds and feed bytes to the pyte stream."""
+    try:
+        import pexpect  # type: ignore[import]
+    except ImportError:
+        return
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        try:
+            child.expect(pexpect.TIMEOUT, timeout=0.1)
+            if child.before:
+                stream.feed(child.before)
+        except Exception:
+            break
+
+
 def fetch_live_status(force: bool = False) -> LiveStatus | None:
     """
-    Run claude interactively, send /status, parse and return the result.
+    Run claude interactively, navigate /status → Usage tab, parse and return the result.
 
     Returns None on any failure so callers can fall back gracefully.
     Caches results for 30 minutes to avoid spawning claude on every refresh.
+
+    Interaction flow:
+      1. Spawn claude, wait for ❯ prompt
+      2. Send /status + second Enter (first Enter selects autocomplete, second executes)
+      3. Wait for dialog navigation hint ("to cycle")
+      4. Press Right Arrow × 2 to reach Usage tab (Settings | Status | Config | Usage)
+      5. Read clean screen text via pyte, parse
     """
     global _cache
 
@@ -104,72 +138,84 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
     except ImportError:
         return None
 
+    try:
+        import pyte  # type: ignore[import]
+    except ImportError:
+        return None
+
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE", None)
 
-    collected: list[str] = []
+    screen = pyte.Screen(_COLS, _ROWS)
+    pyte_stream = pyte.ByteStream(screen)
+
+    result: LiveStatus | None = None
 
     try:
         child = pexpect.spawn(
             "claude",
-            args=["--no-session-persistence"],
+            # No extra flags — interactive mode only.
+            # --no-session-persistence only works with --print and errors otherwise.
             env=env,
             timeout=45,
-            encoding="utf-8",
-            codec_errors="replace",
-            dimensions=(40, 120),   # rows × cols — wide enough for dialog
+            encoding=None,             # bytes mode required for pyte
+            dimensions=(_ROWS, _COLS),
         )
 
-        # Phase 1: wait for the interactive prompt to appear.
-        # Claude prints a styled prompt when it's ready for input.
+        # Phase 1: wait for the interactive prompt (❯ = U+276F, UTF-8: e2 9d af).
         idx = child.expect(
-            [
-                r"❯",
-                r"\$",
-                r">",
-                r"Human:",
-                r"claude>",
-                pexpect.TIMEOUT,
-                pexpect.EOF,
-            ],
+            [b"\xe2\x9d\xaf", pexpect.TIMEOUT, pexpect.EOF],
             timeout=30,
         )
-        if idx >= 5:  # TIMEOUT or EOF — claude didn't start cleanly
+        pyte_stream.feed(child.before or b"")
+        pyte_stream.feed(child.after or b"")
+        if idx != 0:   # TIMEOUT or EOF — claude didn't start cleanly
             child.close(force=True)
             return None
 
-        collected.append(child.before or "")
-        collected.append(child.after or "")
+        # Let the TUI fully stabilize (hint text, etc.)
+        _feed_child(child, pyte_stream, 1.5)
 
         # Phase 2: send /status.
-        child.sendline("/status")
+        # In the claude TUI, the first Enter (\n from sendline) selects the
+        # highlighted autocomplete item but does NOT execute the command.
+        # A second Enter (\r) executes it.
+        child.send(b"/status\n")
+        time.sleep(0.3)
+        child.send(b"\r")
 
-        # Phase 3: wait for the status dialog content.
-        # "Europe/Amsterdam" appears in every reset label — reliable signal.
+        # Phase 3: wait for the /status dialog to open.
+        # Every tab of the dialog shows navigation hints.
         idx2 = child.expect(
-            [r"Europe/Amsterdam", r"Current session", pexpect.TIMEOUT, pexpect.EOF],
-            timeout=20,
+            [b"to cycle", b"Esc to cancel", pexpect.TIMEOUT, pexpect.EOF],
+            timeout=15,
         )
-        collected.append(child.before or "")
-        collected.append(child.after or "")
-
-        if idx2 >= 2:  # TIMEOUT or EOF
+        pyte_stream.feed(child.before or b"")
+        pyte_stream.feed(child.after or b"")
+        if idx2 >= 2:   # dialog didn't open
             child.close(force=True)
             return None
 
-        # Wait a moment for the full dialog to paint, then drain the buffer.
-        try:
-            child.expect(pexpect.TIMEOUT, timeout=1.5)
-            collected.append(child.before or "")
-        except Exception:
-            pass
+        _feed_child(child, pyte_stream, 1.5)
 
-        # Phase 4: close gracefully.
-        child.sendcontrol("c")
+        # Phase 4: navigate to the Usage tab.
+        # Tab order: Settings(1) | Status(2) | Config(3) | Usage(4)
+        # Claude opens on the Status tab; Right Arrow × 2 reaches Usage.
+        child.send(b"\x1b[C")   # Right Arrow → Config tab
+        _feed_child(child, pyte_stream, 0.8)
+        child.send(b"\x1b[C")   # Right Arrow → Usage tab
+        _feed_child(child, pyte_stream, 2.5)
+
+        # Phase 5: extract clean screen text from pyte.
+        screen_txt = "\n".join(row.rstrip() for row in screen.display)
+        result = _parse_usage_screen(screen_txt)
+
+        # Phase 6: close gracefully.
+        child.send(b"\x03")   # Ctrl-C
         try:
             child.expect(pexpect.EOF, timeout=5)
-            collected.append(child.before or "")
+            pyte_stream.feed(child.before or b"")
         except Exception:
             pass
         child.close(force=True)
@@ -177,8 +223,6 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
     except Exception:
         return None
 
-    raw = "".join(collected)
-    result = _parse_status_output(raw)
     if result:
         _cache = result
 
