@@ -57,7 +57,7 @@ class BackgroundWorker:
         # Check for newly completed agents before building prediction
         newly_done = check_running_agents(state)
 
-        prediction = build_prediction(state)
+        prediction = build_prediction(state, force=force)
         projects = []  # populated by app delegate from config
 
         return {

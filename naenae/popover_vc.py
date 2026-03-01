@@ -27,7 +27,7 @@ from Foundation import NSEdgeInsets, NSMakeRect, NSObject
 from .ui_components import ProgressBarView, make_label
 
 # Popover width (fixed). Height is dynamic.
-_WIDTH: float = 340.0
+_WIDTH: float = 380.0
 _PADDING: float = 16.0
 _BAR_HEIGHT: float = 8.0
 _SECTION_SPACING: float = 10.0
@@ -192,6 +192,7 @@ class ControlCenterViewController(NSViewController):
         self._tasks_stack.setAlignment_(9)
         self._tasks_stack.setSpacing_(4.0)
         self._tasks_stack.setDistribution_(0)
+        self._tasks_stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
         stack.addArrangedSubview_(self._tasks_stack)
         stack.addArrangedSubview_(_make_separator())
 
@@ -203,6 +204,7 @@ class ControlCenterViewController(NSViewController):
         self._agents_stack.setAlignment_(9)
         self._agents_stack.setSpacing_(4.0)
         self._agents_stack.setDistribution_(0)
+        self._agents_stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
         stack.addArrangedSubview_(self._agents_stack)
         stack.addArrangedSubview_(_make_separator())
 
@@ -332,6 +334,9 @@ class ControlCenterViewController(NSViewController):
         id_lbl = make_label(f"{task.task_id}", size=11.0, bold=True)
         title_lbl = make_label(task.title[:50], size=12.0)
         title_lbl.setLineBreakMode_(4)   # NSLineBreakByTruncatingTail
+        title_lbl.setMaximumNumberOfLines_(1)
+        # Allow title to be compressed so the row never overflows the popover width
+        title_lbl.setContentCompressionResistancePriority_forOrientation_(249, 0)
 
         title_row.addArrangedSubview_(pri_badge)
         title_row.addArrangedSubview_(id_lbl)
@@ -436,9 +441,17 @@ class ControlCenterViewController(NSViewController):
 
     @objc.python_method
     def _relayout(self) -> None:
-        """Resize the popover to fit the current content."""
+        """Resize the popover to fit the current content.
+
+        Two layout passes ensure the stack has resolved its intrinsic sizes
+        before we ask for fittingSize, preventing the popover from resizing
+        to a stale height and then snapping again on the next event loop tick.
+        """
         if self.view() is None:
             return
+        # First pass: resolve pending layout so fittingSize is accurate
+        self.view().layoutSubtreeIfNeeded()
+        # Second pass: accommodate any layout-triggered changes
         self.view().layoutSubtreeIfNeeded()
         size = self._root_stack.fittingSize()
         new_height = max(200.0, size.height)
@@ -451,7 +464,7 @@ class ControlCenterViewController(NSViewController):
 
     def refreshNow_(self, sender: Any) -> None:
         if self._app:
-            self._app._timerFired_(None)
+            self._app.refreshNow_(sender)
 
     def newTask_(self, sender: Any) -> None:
         if self._app:

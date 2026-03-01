@@ -113,13 +113,17 @@ class NaeNaeApp(NSObject):
                 self._popover.showRelativeToRect_ofView_preferredEdge_(
                     btn.bounds(), btn, 3  # NSRectEdgeMaxY = bottom edge of menu bar
                 )
-                # Trigger a background refresh when the popover opens
-                self._worker.fetch()
+                # Force-fetch fresh stats every time the popover opens
+                self._worker.fetch(force=True)
 
     # ── Timer ─────────────────────────────────────────────────────────────
 
     def _timerFired_(self, timer: Any) -> None:
         self._worker.fetch()
+
+    def refreshNow_(self, sender: Any) -> None:
+        """Refresh button: force-bypass cache and fetch live /status data."""
+        self._worker.fetch(force=True)
 
     # ── Background → main thread callback ────────────────────────────────
 

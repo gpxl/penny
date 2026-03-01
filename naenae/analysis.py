@@ -436,7 +436,7 @@ class Prediction:
     session_reset_label: str = ""
 
 
-def build_prediction(state: dict[str, Any]) -> Prediction:
+def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
     """Compute the full prediction from current token usage + budget estimate.
 
     Percentages and reset labels are overridden with ground-truth values from
@@ -456,7 +456,7 @@ def build_prediction(state: dict[str, Any]) -> Prediction:
     session = build_session_info(state)
 
     # --- Override with live /status data when available ---
-    live = fetch_live_status()
+    live = fetch_live_status(force=force)
     if live is not None:
         pct_all = live.weekly_pct_all
         pct_sonnet = live.weekly_pct_sonnet

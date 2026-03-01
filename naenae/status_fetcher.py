@@ -23,9 +23,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-# Cache TTL: /status data changes at most every few minutes.
-# 30 minutes is safe — any drift is temporary.
-_CACHE_TTL_SECONDS = 30 * 60
+# Cache TTL: match the background refresh interval so opening the popover
+# always shows data no older than one refresh cycle.
+_CACHE_TTL_SECONDS = 5 * 60
 
 _cache: LiveStatus | None = None
 
