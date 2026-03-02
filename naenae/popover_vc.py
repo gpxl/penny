@@ -448,7 +448,7 @@ class ControlCenterViewController(NSViewController):
         row = NSStackView.alloc().init()
         row.setOrientation_(0)   # horizontal
         row.setSpacing_(8.0)
-        row.setDistribution_(2)  # NSStackViewDistributionEqualSpacing
+        row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
 
         refresh_btn = _make_button("↻ Refresh", self, "refreshNow:")
         last_refresh_lbl = make_label("—", size=11.0, secondary=True)
@@ -793,10 +793,9 @@ class ControlCenterViewController(NSViewController):
         if self.view() is None:
             return
         self.view().layoutSubtreeIfNeeded()
-        self.view().layoutSubtreeIfNeeded()
         size = self._root_stack.fittingSize()
         new_height = max(200.0, size.height)
-        self.view().setFrame_(((0, 0), (_WIDTH, new_height)))
+        self.view().setFrameSize_((_WIDTH, new_height))
         if self._app and hasattr(self._app, "_popover"):
             self._app._popover.setContentSize_((_WIDTH, new_height))
 

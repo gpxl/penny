@@ -196,6 +196,16 @@ class NaeNaeApp(NSObject):
     # ── Status item title ─────────────────────────────────────────────────
 
     @objc.python_method
+    def _compact_reset_time(self, label: str) -> str:
+        """Compress 'Today at 12:00 PM' → '12pm', 'Mon at 5:30 PM' → '5:30pm'."""
+        import re
+        m = re.search(r"at (\d+):(\d+) (AM|PM)", label)
+        if not m:
+            return ""
+        h, mins, ampm = m.group(1), m.group(2), m.group(3).lower()
+        return f"{h}:{mins}{ampm}" if mins != "00" else f"{h}{ampm}"
+
+    @objc.python_method
     def _update_status_title(self) -> None:
         pred = self._prediction
         agents_running = self.state.get("agents_running", [])
@@ -204,7 +214,9 @@ class NaeNaeApp(NSObject):
         if btn is None:
             return
         if pred:
-            stats = f"{pred.session_pct_all:.0f} {pred.pct_all:.0f}/{pred.pct_sonnet:.0f}"
+            reset_time = self._compact_reset_time(pred.session_reset_label)
+            session = f"{pred.session_pct_all:.0f}/{reset_time}" if reset_time else f"{pred.session_pct_all:.0f}"
+            stats = f"{session} {pred.pct_all:.0f}/{pred.pct_sonnet:.0f}"
             if n_running > 0:
                 btn.setTitle_(f"{stats} \u2728{n_running}")
             else:
