@@ -46,6 +46,10 @@ def _logs_dir() -> Path:
     return d
 
 
+def _tmux_available() -> bool:
+    return shutil.which("tmux") is not None
+
+
 def _get_screen_pid(session_name: str) -> int | None:
     """Return the PID of a running detached screen session, or None if not found."""
     result = subprocess.run(
@@ -55,6 +59,29 @@ def _get_screen_pid(session_name: str) -> int | None:
     # screen -ls output: "\t12345.naenae-sa-xxx\t(Detached)"
     m = re.search(r"\t(\d+)\." + re.escape(session_name) + r"\t", result.stdout)
     return int(m.group(1)) if m else None
+
+
+def _get_tmux_pid(session_name: str) -> int | None:
+    """Return the PID of the main pane process in a tmux session, or None."""
+    result = subprocess.run(
+        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _get_session_pid(session_name: str) -> int | None:
+    """Return the main process PID for a tmux or screen session."""
+    if _tmux_available():
+        pid = _get_tmux_pid(session_name)
+        if pid is not None:
+            return pid
+    return _get_screen_pid(session_name)
 
 
 def spawn_claude_agent(
@@ -128,18 +155,29 @@ def spawn_claude_agent(
         encoding="utf-8",
     )
 
-    proc = subprocess.Popen(
-        ["screen", "-dmS", session_name, "-h", "10000",
-         sys.executable, str(runner_file)],
-        cwd=task.project_path,
-        env=env,
-        start_new_session=True,
-    )
-    proc.wait()  # screen's parent process exits immediately after forking the session
+    if _tmux_available():
+        # tmux: fixed terminal size ensures the TUI always has a drawable area,
+        # and tmux attach-session redraws the full screen on connect (no blank terminal).
+        proc = subprocess.Popen(
+            ["tmux", "new-session", "-d", "-s", session_name, "-x", "220", "-y", "50",
+             sys.executable, str(runner_file)],
+            cwd=task.project_path,
+            env=env,
+            start_new_session=True,
+        )
+    else:
+        proc = subprocess.Popen(
+            ["screen", "-dmS", session_name, "-h", "10000",
+             sys.executable, str(runner_file)],
+            cwd=task.project_path,
+            env=env,
+            start_new_session=True,
+        )
+    proc.wait()  # multiplexer parent exits immediately after forking the session
 
-    # Resolve the actual PID of the detached screen session process
+    # Resolve the actual PID of the detached session process
     time.sleep(0.5)
-    screen_pid = _get_screen_pid(session_name) or 0
+    screen_pid = _get_session_pid(session_name) or 0
     record["pid"] = screen_pid
     return record
 
@@ -181,9 +219,9 @@ def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
             completed.append({**agent, "status": "completed"})
             continue
 
-        # pid=0 means screen PID lookup failed at spawn time; check session by name
+        # pid=0 means session PID lookup failed at spawn time; check session by name
         if pid == 0:
-            if session and _get_screen_pid(session):
+            if session and _get_session_pid(session):
                 still_running.append(agent)
             else:
                 completed.append({**agent, "status": "completed"})

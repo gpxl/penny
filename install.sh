@@ -121,6 +121,15 @@ if [[ "$SKIP_DEP_CHECK" -eq 0 ]]; then
     echo "✓ bd found at $BD_BIN"
   fi
 
+  # Ghostty: recommended (non-blocking) — used as the control-window terminal
+  if [[ -d "/Applications/Ghostty.app" ]]; then
+    echo "✓ Ghostty.app found"
+  else
+    echo "⚠  Ghostty.app not found — Terminal.app will be used as fallback."
+    echo "   Recommended: install Ghostty from https://ghostty.org"
+    echo "   (avoids blank-window race when attaching to agent sessions)"
+  fi
+
   if [[ "$DEP_ERRORS" -ne 0 ]]; then
     echo ""
     echo "Fix the missing tools above, then re-run install.sh."
@@ -210,9 +219,7 @@ cat > "$PLIST_FILE" <<PLIST
   <string>$PLIST_NAME</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$PYTHON</string>
-    <string>-m</string>
-    <string>naenae.app</string>
+    <string>$SCRIPT_DIR/NaeNae.app/Contents/MacOS/NaeNae</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$SCRIPT_DIR</string>

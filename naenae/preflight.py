@@ -51,6 +51,14 @@ def run_preflight(config: dict[str, Any]) -> list[PreflightIssue]:
                 fix_hint="Run `claude --version` in a terminal to diagnose.",
             ))
 
+    if not Path("/Applications/Ghostty.app").exists():
+        issues.append(PreflightIssue(
+            severity="warning",
+            message="Ghostty.app not found at /Applications/Ghostty.app.",
+            fix_hint="Install Ghostty from https://ghostty.org for a better agent control "
+                     "terminal (no blank-window race on attach). Terminal.app is used as fallback.",
+        ))
+
     bd_bin = shutil.which("bd")
     if bd_bin is None:
         issues.append(PreflightIssue(

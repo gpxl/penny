@@ -6,6 +6,7 @@ Layout via NSStackView. Live updates via updateWithData_().
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
@@ -174,6 +175,7 @@ class ControlCenterViewController(NSViewController):
         self._lbl_session_pct: NSTextField | None = None
         self._lbl_weekly_reset: NSTextField | None = None
         self._lbl_session_reset: NSTextField | None = None
+        self._lbl_outage_warning: NSTextField | None = None
         # Inner stacks for paginated sections
         self._tasks_stack: NSStackView | None = None
         self._agents_stack: NSStackView | None = None
@@ -263,6 +265,14 @@ class ControlCenterViewController(NSViewController):
             self._lbl_session_reset.setStringValue_(
                 f"Resets {pred.session_reset_label}" if pred.session_reset_label else "—"
             )
+            if self._lbl_outage_warning is not None:
+                if pred.outage:
+                    self._lbl_outage_warning.setStringValue_(
+                        "\u26a0\ufe0f Claude API outage \u2014 usage data may be stale"
+                    )
+                    self._lbl_outage_warning.setHidden_(False)
+                else:
+                    self._lbl_outage_warning.setHidden_(True)
 
         self._rebuild_tasks_section(ready_tasks, agents_running)
         self._rebuild_agents_section(agents_running)
@@ -378,6 +388,12 @@ class ControlCenterViewController(NSViewController):
         header = self._make_header_row()
         stack.addArrangedSubview_(header)
         stack.addArrangedSubview_(_make_separator())
+
+        # ── Outage warning (hidden by default) ───────────────────────────────
+        self._lbl_outage_warning = make_label("", size=11.0)
+        self._lbl_outage_warning.setTextColor_(NSColor.systemOrangeColor())
+        self._lbl_outage_warning.setHidden_(True)
+        stack.addArrangedSubview_(self._lbl_outage_warning)
 
         # ── Session Budget ───────────────────────────────────────────────────
         stack.addArrangedSubview_(make_label("Session Budget", size=11.0, secondary=True))
@@ -937,14 +953,35 @@ class ControlCenterViewController(NSViewController):
         return task.project_path if task else ""
 
     def _controlAgent_(self, sender: Any) -> None:
+        import shutil
         session = str(sender.representedObject() or "")
         if not session:
             return
-        script = (
-            'tell application "Terminal" to activate\n'
-            f'tell application "Terminal" to do script "screen -x {shlex.quote(session)}"'
-        )
-        subprocess.run(["osascript", "-e", script], check=False)
+        # Prefer tmux: attach-session always redraws the TUI correctly.
+        # Fall back to screen -x for sessions spawned before tmux was preferred.
+        if shutil.which("tmux") and subprocess.run(
+            ["tmux", "has-session", "-t", session],
+            capture_output=True,
+        ).returncode == 0:
+            attach_args = ["tmux", "attach-session", "-t", session]
+        else:
+            attach_args = ["screen", "-x", session]
+
+        # Prefer Ghostty: opens with the command as the initial process (no blank
+        # window race), and renders tmux TUI cleanly. Fall back to Terminal.app.
+        ghostty_bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
+        if os.path.exists(ghostty_bin):
+            subprocess.Popen(
+                [ghostty_bin, "-e"] + attach_args,
+                start_new_session=True,
+            )
+        else:
+            attach_cmd = shlex.join(attach_args)
+            script = (
+                'tell application "Terminal" to activate\n'
+                f'tell application "Terminal" to do script {shlex.quote(attach_cmd)}'
+            )
+            subprocess.run(["osascript", "-e", script], check=False)
 
     def _stopAgent_(self, sender: Any) -> None:
         task_id = str(sender.representedObject() or "")
