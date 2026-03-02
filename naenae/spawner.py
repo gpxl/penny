@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -88,13 +89,21 @@ def spawn_claude_agent(
     task: Any,
     task_description: str,
     dry_run: bool = False,
+    interactive: bool = False,
 ) -> dict[str, Any]:
     """
-    Spawn a Claude agent for a task inside a named screen session.
+    Spawn a Claude agent for a task inside a named tmux session.
 
-    The agent runs as: screen -dmS naenae-{task_id} bash -c "claude -p ..."
-    Screen provides a real TTY so claude streams output line-by-line.
-    Users can attach with `screen -r naenae-{task_id}` to observe and interact.
+    interactive=True  — "Run Now" / user-triggered:
+        Starts Claude in interactive mode (no -p), waits ~5 s for the TUI to
+        render, then injects the task prompt via `tmux send-keys`.  Opens
+        Ghostty attached so the user lands in a live session mid-response.
+        Single continuous session — no blank-terminal wait, no context loss.
+
+    interactive=False — scheduled background spawn:
+        Runs `claude -p <prompt>` via a Python runner script in a detached
+        tmux session.  Claude exits when the task completes; PID tracking in
+        check_running_agents() detects completion automatically.
     """
     prompt = AGENT_PROMPT_TEMPLATE.format(
         project_path=task.project_path,
@@ -120,6 +129,8 @@ def spawn_claude_agent(
         "log": str(log_file),
         "session": session_name,
         "pid": None,
+        "tmux_bin": None,
+        "interactive": interactive,
     }
 
     if dry_run:
@@ -127,45 +138,97 @@ def spawn_claude_agent(
         record["status"] = "dry_run"
         return record
 
-    # Resolve the claude binary at spawn time so screen's PATH doesn't matter
+    # Resolve binaries at spawn time so terminal PATH gaps don't matter
     claude_bin = shutil.which("claude") or "claude"
+    tmux_bin = shutil.which("tmux") or "tmux"
 
     # Build environment: unset CLAUDECODE so nested sessions are allowed
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE", None)
 
-    # Write prompt to a file to avoid shell quoting issues with long/special-char prompts
+    # Write prompt to a file — avoids shell quoting issues and lets Claude read it directly.
     prompt_file.write_text(prompt, encoding="utf-8")
 
-    # Write a Python runner script — avoids all bash quoting issues with the prompt.
-    # The prompt is passed to claude as a direct argv argument (no shell interpretation).
-    # After the batch run completes, exec into interactive claude so the user can
-    # give follow-up instructions rather than landing on a blank bash prompt.
-    runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
-    runner_file.write_text(
-        "import subprocess, sys, os\n"
-        f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
-        "    prompt = f.read()\n"
-        f"subprocess.run([{repr(claude_bin)}, '--dangerously-skip-permissions', '-p', prompt])\n"
-        "print()\n"
-        "print('\\u2500\\u2500\\u2500 Task done \u2014 starting interactive Claude \\u2500\\u2500\\u2500')\n"
-        "sys.stdout.flush()\n"
-        f"os.execlp({repr(claude_bin)}, {repr(claude_bin)}, '--dangerously-skip-permissions')\n",
-        encoding="utf-8",
-    )
+    # Kill any stale session with this name before creating a new one.
+    subprocess.run([tmux_bin, "kill-session", "-t", session_name],
+                   capture_output=True, check=False)
 
     if _tmux_available():
-        # tmux: fixed terminal size ensures the TUI always has a drawable area,
-        # and tmux attach-session redraws the full screen on connect (no blank terminal).
-        proc = subprocess.Popen(
-            ["tmux", "new-session", "-d", "-s", session_name, "-x", "220", "-y", "50",
-             sys.executable, str(runner_file)],
-            cwd=task.project_path,
-            env=env,
-            start_new_session=True,
-        )
+        record["tmux_bin"] = tmux_bin
+
+        if interactive:
+            # ── Interactive path: tmux send-keys injection ─────────────────────────
+            # Start Claude in interactive mode (no -p) — one continuous session from
+            # the start. No blank-terminal wait, no context loss between phases.
+            proc = subprocess.Popen(
+                [tmux_bin, "new-session", "-d", "-s", session_name,
+                 "-x", "220", "-y", "50", claude_bin, "--dangerously-skip-permissions"],
+                cwd=task.project_path, env=env, start_new_session=True,
+            )
+            proc.wait()
+
+            # Wait for Claude's TUI to render its input prompt (~5 s on M-series).
+            time.sleep(5)
+
+            # Inject a single-line message that references the prompt file.
+            # Newlines in the full prompt would each trigger Enter and break injection,
+            # so we point Claude at the file instead of embedding the text directly.
+            inject_msg = (
+                f"Read the task description from {prompt_file} and follow every "
+                "instruction in it. Work autonomously end-to-end without asking "
+                "for confirmation."
+            )
+            # Claude Code's TUI requires text and Enter as separate send-keys calls;
+            # combining them in one call leaves the text stuck in the input buffer.
+            subprocess.run([tmux_bin, "send-keys", "-t", session_name, inject_msg],
+                           check=False)
+            subprocess.run([tmux_bin, "send-keys", "-t", session_name, "", "Enter"],
+                           check=False)
+
+            # Open Ghostty attached — user lands in a live session mid-response.
+            ghostty_bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
+            if os.path.exists(ghostty_bin):
+                subprocess.Popen(
+                    [ghostty_bin, "-e", tmux_bin, "attach-session", "-t", session_name],
+                    start_new_session=True,
+                )
+            else:
+                cmd = shlex.join([tmux_bin, "attach-session", "-t", session_name])
+                script = ('tell application "Terminal" to activate\n'
+                          f'tell application "Terminal" to do script {shlex.quote(cmd)}')
+                subprocess.run(["osascript", "-e", script], check=False)
+
+        else:
+            # ── Background path: batch runner ──────────────────────────────────────
+            # claude -p runs to completion and exits; PID tracking detects when done.
+            runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
+            runner_file.write_text(
+                "import subprocess\n"
+                f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
+                "    prompt = f.read()\n"
+                f"subprocess.run([{repr(claude_bin)}, '--dangerously-skip-permissions',"
+                " '-p', prompt])\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.Popen(
+                [tmux_bin, "new-session", "-d", "-s", session_name,
+                 "-x", "220", "-y", "50", sys.executable, str(runner_file)],
+                cwd=task.project_path, env=env, start_new_session=True,
+            )
+            proc.wait()
+
     else:
+        # ── Screen fallback (background only) ──────────────────────────────────────
+        runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
+        runner_file.write_text(
+            "import subprocess\n"
+            f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
+            "    prompt = f.read()\n"
+            f"subprocess.run([{repr(claude_bin)}, '--dangerously-skip-permissions',"
+            " '-p', prompt])\n",
+            encoding="utf-8",
+        )
         proc = subprocess.Popen(
             ["screen", "-dmS", session_name, "-h", "10000",
              sys.executable, str(runner_file)],
@@ -173,7 +236,7 @@ def spawn_claude_agent(
             env=env,
             start_new_session=True,
         )
-    proc.wait()  # multiplexer parent exits immediately after forking the session
+        proc.wait()
 
     # Resolve the actual PID of the detached session process
     time.sleep(0.5)
