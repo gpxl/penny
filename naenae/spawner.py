@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,14 +46,28 @@ def _logs_dir() -> Path:
     return d
 
 
+def _get_screen_pid(session_name: str) -> int | None:
+    """Return the PID of a running detached screen session, or None if not found."""
+    result = subprocess.run(
+        ["screen", "-ls"],
+        capture_output=True, text=True,
+    )
+    # screen -ls output: "\t12345.naenae-sa-xxx\t(Detached)"
+    m = re.search(r"\t(\d+)\." + re.escape(session_name) + r"\t", result.stdout)
+    return int(m.group(1)) if m else None
+
+
 def spawn_claude_agent(
     task: Any,
     task_description: str,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """
-    Spawn a Claude agent for a task as a background process.
-    Returns a dict with PID, task metadata, and log path.
+    Spawn a Claude agent for a task inside a named screen session.
+
+    The agent runs as: screen -dmS naenae-{task_id} bash -c "claude -p ..."
+    Screen provides a real TTY so claude streams output line-by-line.
+    Users can attach with `screen -r naenae-{task_id}` to observe and interact.
     """
     prompt = AGENT_PROMPT_TEMPLATE.format(
         project_path=task.project_path,
@@ -61,6 +79,8 @@ def spawn_claude_agent(
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     log_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.log"
+    prompt_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.prompt"
+    session_name = f"naenae-{task.task_id}"
 
     record: dict[str, Any] = {
         "task_id": task.task_id,
@@ -71,6 +91,7 @@ def spawn_claude_agent(
         "spawned_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",
         "log": str(log_file),
+        "session": session_name,
         "pid": None,
     }
 
@@ -79,36 +100,47 @@ def spawn_claude_agent(
         record["status"] = "dry_run"
         return record
 
+    # Resolve the claude binary at spawn time so screen's PATH doesn't matter
+    claude_bin = shutil.which("claude") or "claude"
+
     # Build environment: unset CLAUDECODE so nested sessions are allowed
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE", None)
 
-    log_fh = log_file.open("w")
-    log_fh.write(f"# Nae Nae agent — {task.task_id}\n")
-    log_fh.write(f"# Spawned at {record['spawned_at']}\n")
-    log_fh.write(f"# Project: {task.project_path}\n\n")
-    log_fh.write("=== PROMPT ===\n")
-    log_fh.write(prompt)
-    log_fh.write("\n=== OUTPUT ===\n")
-    log_fh.flush()
+    # Write prompt to a file to avoid shell quoting issues with long/special-char prompts
+    prompt_file.write_text(prompt, encoding="utf-8")
 
-    proc = subprocess.Popen(
-        [
-            "claude",
-            "--dangerously-skip-permissions",
-            "-p",
-            prompt,
-        ],
-        cwd=task.project_path,
-        env=env,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,  # detach from parent process group
+    # Write a Python runner script — avoids all bash quoting issues with the prompt.
+    # The prompt is passed to claude as a direct argv argument (no shell interpretation).
+    # After the batch run completes, exec into interactive claude so the user can
+    # give follow-up instructions rather than landing on a blank bash prompt.
+    runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
+    runner_file.write_text(
+        "import subprocess, sys, os\n"
+        f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
+        "    prompt = f.read()\n"
+        f"subprocess.run([{repr(claude_bin)}, '--dangerously-skip-permissions', '-p', prompt])\n"
+        "print()\n"
+        "print('\\u2500\\u2500\\u2500 Task done \u2014 starting interactive Claude \\u2500\\u2500\\u2500')\n"
+        "sys.stdout.flush()\n"
+        f"os.execlp({repr(claude_bin)}, {repr(claude_bin)}, '--dangerously-skip-permissions')\n",
+        encoding="utf-8",
     )
 
-    record["pid"] = proc.pid
-    record["_proc_handle"] = proc  # ephemeral — not serialised to JSON
+    proc = subprocess.Popen(
+        ["screen", "-dmS", session_name, "-h", "10000",
+         sys.executable, str(runner_file)],
+        cwd=task.project_path,
+        env=env,
+        start_new_session=True,
+    )
+    proc.wait()  # screen's parent process exits immediately after forking the session
+
+    # Resolve the actual PID of the detached screen session process
+    time.sleep(0.5)
+    screen_pid = _get_screen_pid(session_name) or 0
+    record["pid"] = screen_pid
     return record
 
 
@@ -143,8 +175,18 @@ def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
 
     for agent in state.get("agents_running", []):
         pid = agent.get("pid")
+        session = agent.get("session", "")
+
         if pid is None or pid == -1:
             completed.append({**agent, "status": "completed"})
+            continue
+
+        # pid=0 means screen PID lookup failed at spawn time; check session by name
+        if pid == 0:
+            if session and _get_screen_pid(session):
+                still_running.append(agent)
+            else:
+                completed.append({**agent, "status": "completed"})
             continue
 
         if _pid_is_alive(pid):

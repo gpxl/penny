@@ -674,10 +674,10 @@ class ControlCenterViewController(NSViewController):
         lbl = make_label(f"⚙ {task_id} · {title}", size=12.0)
         lbl.setContentCompressionResistancePriority_forOrientation_(250, 0)
 
-        log_btn = _make_button("📋 Log", self, "_openAgentLog:")
-        log_btn.setRepresentedObject_(agent.get("log", ""))
+        log_btn = _make_button("Control", self, "_controlAgent:")
+        log_btn.setRepresentedObject_(agent.get("session", ""))
         stop_btn = _make_button("■ Stop", self, "_stopAgent:")
-        stop_btn.setRepresentedObject_(str(agent.get("pid", 0)))
+        stop_btn.setRepresentedObject_(agent.get("task_id", ""))
 
         row.addArrangedSubview_(lbl)
         row.addArrangedSubview_(log_btn)
@@ -936,20 +936,21 @@ class ControlCenterViewController(NSViewController):
         task = next((t for t in self._all_ready_tasks if t.task_id == tid), None)
         return task.project_path if task else ""
 
-    def _openAgentLog_(self, sender: Any) -> None:
-        log_path = str(sender.representedObject() or "")
-        if not log_path:
+    def _controlAgent_(self, sender: Any) -> None:
+        session = str(sender.representedObject() or "")
+        if not session:
             return
         script = (
             'tell application "Terminal" to activate\n'
-            f'tell application "Terminal" to do script "tail -f {shlex.quote(log_path)}"'
+            f'tell application "Terminal" to do script "screen -x {shlex.quote(session)}"'
         )
         subprocess.run(["osascript", "-e", script], check=False)
 
     def _stopAgent_(self, sender: Any) -> None:
-        try:
-            pid = int(sender.representedObject() or 0)
-        except (ValueError, TypeError):
+        task_id = str(sender.representedObject() or "")
+        if not task_id:
             return
-        if pid > 0 and self._app:
-            self._app.stopAgent_(pid)
+        sender.setTitle_("Stopping\u2026")
+        sender.setEnabled_(False)
+        if self._app:
+            self._app.stopAgentByTaskId_(task_id)

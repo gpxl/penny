@@ -197,13 +197,22 @@ class NaeNaeApp(NSObject):
 
     @objc.python_method
     def _compact_reset_time(self, label: str) -> str:
-        """Compress 'Today at 12:00 PM' → '12pm', 'Mon at 5:30 PM' → '5:30pm'."""
+        """Return a compact reset time string from a reset label.
+
+        Handles two formats:
+        - Already compact from live /status data: "4:59pm", "2pm" → return as-is
+        - Long form from local estimation: "Today at 4:59 PM" → "4:59pm"
+        """
         import re
-        m = re.search(r"at (\d+):(\d+) (AM|PM)", label)
-        if not m:
+        if not label or label == "—":
             return ""
-        h, mins, ampm = m.group(1), m.group(2), m.group(3).lower()
-        return f"{h}:{mins}{ampm}" if mins != "00" else f"{h}{ampm}"
+        # Long form: "Today at 12:00 PM" or "Mon at 5:30 PM"
+        m = re.search(r"at (\d+):(\d+) (AM|PM)", label)
+        if m:
+            h, mins, ampm = m.group(1), m.group(2), m.group(3).lower()
+            return f"{h}:{mins}{ampm}" if mins != "00" else f"{h}{ampm}"
+        # Already compact from live data (e.g. "4:59pm", "2pm")
+        return label
 
     @objc.python_method
     def _update_status_title(self) -> None:
@@ -250,19 +259,57 @@ class NaeNaeApp(NSObject):
         })
         self._worker.fetch()
 
-    def stopAgent_(self, pid: int) -> None:
-        if pid is None or pid <= 0:
+    def stopAgentByTaskId_(self, task_id: str) -> None:
+        if not task_id:
             return
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+        agent = next(
+            (a for a in self.state.get("agents_running", []) if a.get("task_id") == task_id),
+            None,
+        )
+        if agent is None:
+            return
+        session = agent.get("session", "")
+        pid = agent.get("pid") or 0
+        if session:
+            subprocess.run(
+                ["screen", "-X", "-S", session, "quit"],
+                capture_output=True, check=False,
+            )
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
         self.state["agents_running"] = [
-            a for a in self.state.get("agents_running", []) if a.get("pid") != pid
+            a for a in self.state.get("agents_running", []) if a.get("task_id") != task_id
         ]
         save_state(self.state)
         self._update_status_title()
+        # Immediately refresh the VC so the agent row disappears without waiting for fetch
+        self._vc.updateWithData_({
+            "prediction": self._prediction,
+            "state": self.state,
+            "ready_tasks": self._all_ready_tasks,
+            "fetched_at": self._last_fetch_at,
+        })
         self._worker.fetch()
+
+    def stopAgent_(self, pid: int) -> None:
+        """Backwards-compatibility shim — looks up by pid then delegates to stopAgentByTaskId_."""
+        if pid is None or pid <= 0:
+            return
+        agent = next(
+            (a for a in self.state.get("agents_running", []) if a.get("pid") == pid),
+            None,
+        )
+        if agent:
+            self.stopAgentByTaskId_(agent.get("task_id", ""))
+        else:
+            # No matching agent; clean up by pid directly as before
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
 
     def dismissCompleted_(self, task_id: str) -> None:
         rc = self.state.get("recently_completed", [])
