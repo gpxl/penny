@@ -38,10 +38,8 @@ _WIDTH: float = 380.0
 _PADDING: float = 16.0
 _BAR_HEIGHT: float = 8.0
 _SECTION_SPACING: float = 10.0
-_TASK_LIMIT = 20          # max ready tasks fetched (all shown, scroll handles overflow)
-_ROW_H: float = 26.0      # estimated height per collapsed row
-_MAX_VISIBLE_ROWS: int = 5
-_MAX_SCROLL_H: float = _ROW_H * _MAX_VISIBLE_ROWS
+_TASK_LIMIT = 20          # max ready tasks fetched
+_PAGE_SIZE: int = 5       # items shown per page in paginated sections
 
 # ── Markdown helpers ───────────────────────────────────────────────────────────
 
@@ -117,7 +115,6 @@ def _make_desc_scroll_view(text: str) -> NSScrollView:
     """Return a width-constrained NSScrollView containing a markdown-rendered NSTextView."""
     inner_w = _WIDTH - _PADDING * 2
 
-    # Build text view with a known width so layout can compute height.
     tv = NSTextView.alloc().initWithFrame_(((0, 0), (inner_w, 400.0)))
     tv.textStorage().setAttributedString_(_markdown_to_attrstr(text))
     tv.setEditable_(False)
@@ -128,7 +125,6 @@ def _make_desc_scroll_view(text: str) -> NSScrollView:
     tv.textContainer().setWidthTracksTextView_(True)
     tv.textContainer().setContainerSize_((inner_w, 1e7))
 
-    # Force layout so we can measure the actual content height.
     lm = tv.layoutManager()
     lm.ensureLayoutForTextContainer_(tv.textContainer())
     used = lm.usedRectForTextContainer_(tv.textContainer())
@@ -139,7 +135,7 @@ def _make_desc_scroll_view(text: str) -> NSScrollView:
     sv.setHasVerticalScroller_(True)
     sv.setHasHorizontalScroller_(False)
     sv.setAutohidesScrollers_(True)
-    # Fixed-size constraints so the stack view never collapses this view.
+    sv.setDrawsBackground_(False)   # transparent — matches popover material
     sv.setTranslatesAutoresizingMaskIntoConstraints_(False)
     sv.widthAnchor().constraintEqualToConstant_(inner_w).setActive_(True)
     sv.heightAnchor().constraintEqualToConstant_(content_h).setActive_(True)
@@ -149,7 +145,7 @@ def _make_desc_scroll_view(text: str) -> NSScrollView:
 def _make_separator() -> NSView:
     from AppKit import NSBox
     sep = NSBox.alloc().initWithFrame_(((0, 0), (_WIDTH - _PADDING * 2, 1)))
-    sep.setBoxType_(2)   # NSBoxSeparator — renders as a native hairline separator
+    sep.setBoxType_(2)   # NSBoxSeparator
     return sep
 
 
@@ -169,7 +165,7 @@ class ControlCenterViewController(NSViewController):
         self = objc.super(ControlCenterViewController, self).init()
         if self is None:
             return self
-        # Strong refs to all live elements so PyObjC doesn't GC them
+        # Progress bars and labels
         self._bar_all: ProgressBarView | None = None
         self._bar_sonnet: ProgressBarView | None = None
         self._bar_session: ProgressBarView | None = None
@@ -178,20 +174,47 @@ class ControlCenterViewController(NSViewController):
         self._lbl_session_pct: NSTextField | None = None
         self._lbl_weekly_reset: NSTextField | None = None
         self._lbl_session_reset: NSTextField | None = None
+        # Inner stacks for paginated sections
         self._tasks_stack: NSStackView | None = None
         self._agents_stack: NSStackView | None = None
+        self._completed_stack: NSStackView | None = None
+        # Running Agents section chrome (hidden when empty)
+        self._agents_header_lbl: Any = None
+        self._agents_sep: Any = None
+        # Pagination nav rows
+        self._tasks_nav_row: Any = None
+        self._agents_nav_row: Any = None
+        self._completed_nav_row: Any = None
+        # Pagination buttons & labels — tasks
+        self._tasks_prev_btn: Any = None
+        self._tasks_next_btn: Any = None
+        self._tasks_page_lbl: Any = None
+        # Pagination buttons & labels — agents
+        self._agents_prev_btn: Any = None
+        self._agents_next_btn: Any = None
+        self._agents_page_lbl: Any = None
+        # Pagination buttons & labels — completed
+        self._completed_prev_btn: Any = None
+        self._completed_next_btn: Any = None
+        self._completed_page_lbl: Any = None
+        # Pagination state
+        self._tasks_page: int = 0
+        self._agents_page: int = 0
+        self._completed_page: int = 0
+        self._tasks_total_pages: int = 1
+        self._agents_total_pages: int = 1
+        self._completed_total_pages: int = 1
+        # Item view lists (for cleanup on rebuild)
         self._task_views: list[Any] = []
         self._agent_views: list[Any] = []
         self._completed_views: list[Any] = []
+        # Completed section chrome
         self._completed_header_row: Any = None
-        self._completed_stack: NSStackView | None = None
         self._completed_sep: Any = None
+        # UI state
         self._expanded_task_id: str | None = None
         self._last_refresh_at: datetime | None = None
         self._last_refresh_lbl: NSTextField | None = None
-        self._tasks_scroll_h_c: Any = None
-        self._agents_scroll_h_c: Any = None
-        self._completed_scroll_h_c: Any = None
         self._app: Any = None      # set by app.py after construction
         self._config: dict = {}
         self._state: dict = {}
@@ -222,6 +245,10 @@ class ControlCenterViewController(NSViewController):
         self._state = state
         self._all_ready_tasks = ready_tasks
         self._agents_running = agents_running
+
+        # Guard: views not yet created (loadView not called yet)
+        if self._bar_all is None:
+            return
 
         if pred:
             self._bar_all.setPct(pred.pct_all)
@@ -280,47 +307,69 @@ class ControlCenterViewController(NSViewController):
         self._populate_stack(stack)
 
     @objc.python_method
-    def _make_section_scroll_view(self) -> tuple:
-        """Return (inner_stack, scroll_view, height_constraint).
-
-        The inner NSStackView is the document view of a fixed-height NSScrollView.
-        Callers update the height_constraint constant to shrink/grow the visible area
-        (capped at _MAX_SCROLL_H so the popover never becomes too tall).
-        """
-        inner_w = _WIDTH - _PADDING * 2
-
+    def _make_inner_stack(self) -> NSStackView:
+        """Return a plain vertical NSStackView for a paginated section."""
         inner = NSStackView.alloc().init()
         inner.setOrientation_(1)
         inner.setAlignment_(9)
         inner.setSpacing_(4.0)
         inner.setDistribution_(0)
         inner.setTranslatesAutoresizingMaskIntoConstraints_(False)
-
-        scroll = NSScrollView.alloc().initWithFrame_(((0, 0), (inner_w, _MAX_SCROLL_H)))
-        scroll.setDocumentView_(inner)
-        scroll.setHasVerticalScroller_(True)
-        scroll.setHasHorizontalScroller_(False)
-        scroll.setAutohidesScrollers_(True)
-        scroll.setTranslatesAutoresizingMaskIntoConstraints_(False)
-
-        # Pin inner stack width to the scroll view's content view so it never
-        # scrolls horizontally — only the height grows beyond the clip rect.
-        inner.widthAnchor().constraintEqualToAnchor_(
-            scroll.contentView().widthAnchor()
-        ).setActive_(True)
-
-        scroll.widthAnchor().constraintEqualToConstant_(inner_w).setActive_(True)
-        h_c = scroll.heightAnchor().constraintEqualToConstant_(_MAX_SCROLL_H)
-        h_c.setActive_(True)
-
-        return inner, scroll, h_c
+        inner.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
+        return inner
 
     @objc.python_method
-    def _set_scroll_height(self, constraint: Any, n_rows: int) -> None:
-        """Resize a section scroll view to fit n_rows, capped at _MAX_SCROLL_H."""
-        h = min(max(n_rows, 1) * _ROW_H, _MAX_SCROLL_H)
-        if constraint is not None:
-            constraint.setConstant_(h)
+    def _make_pagination_nav(self, section: str) -> NSView:
+        """Return a nav row with ◀ Page X/N ▶ controls for the given section."""
+        row = NSStackView.alloc().init()
+        row.setOrientation_(0)
+        row.setSpacing_(8.0)
+        row.setDistribution_(2)  # NSStackViewDistributionEqualSpacing
+
+        cap = section.capitalize()
+        prev_btn = _make_button("◀", self, f"_prev{cap}Page:")
+        page_lbl = make_label("1 / 1", size=11.0, secondary=True)
+        page_lbl.setAlignment_(1)  # NSTextAlignmentCenter
+        next_btn = _make_button("▶", self, f"_next{cap}Page:")
+
+        row.addArrangedSubview_(prev_btn)
+        row.addArrangedSubview_(page_lbl)
+        row.addArrangedSubview_(next_btn)
+
+        if section == "tasks":
+            self._tasks_prev_btn = prev_btn
+            self._tasks_page_lbl = page_lbl
+            self._tasks_next_btn = next_btn
+        elif section == "agents":
+            self._agents_prev_btn = prev_btn
+            self._agents_page_lbl = page_lbl
+            self._agents_next_btn = next_btn
+        elif section == "completed":
+            self._completed_prev_btn = prev_btn
+            self._completed_page_lbl = page_lbl
+            self._completed_next_btn = next_btn
+
+        row.setHidden_(True)  # shown only when total_pages > 1
+        return row
+
+    @objc.python_method
+    def _update_pagination_nav(
+        self,
+        nav_row: Any,
+        prev_btn: Any,
+        next_btn: Any,
+        page_lbl: Any,
+        page: int,
+        total_pages: int,
+    ) -> None:
+        """Refresh pagination nav controls for a section."""
+        if total_pages <= 1:
+            nav_row.setHidden_(True)
+            return
+        nav_row.setHidden_(False)
+        page_lbl.setStringValue_(f"{page + 1} / {total_pages}")
+        prev_btn.setEnabled_(page > 0)
+        next_btn.setEnabled_(page < total_pages - 1)
 
     @objc.python_method
     def _populate_stack(self, stack: NSStackView) -> None:
@@ -330,7 +379,7 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(header)
         stack.addArrangedSubview_(_make_separator())
 
-        # ── Session Budget (first) ───────────────────────────────────────────
+        # ── Session Budget ───────────────────────────────────────────────────
         stack.addArrangedSubview_(make_label("Session Budget", size=11.0, secondary=True))
         self._bar_session, self._lbl_session_pct = self._add_bar_row(
             stack, "This session", 0.0
@@ -339,14 +388,10 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(self._lbl_session_reset)
         stack.addArrangedSubview_(_make_separator())
 
-        # ── Weekly Budget (second) ───────────────────────────────────────────
+        # ── Weekly Budget ────────────────────────────────────────────────────
         stack.addArrangedSubview_(make_label("Weekly Budget", size=11.0, secondary=True))
-        self._bar_all, self._lbl_all_pct = self._add_bar_row(
-            stack, "All models", 0.0
-        )
-        self._bar_sonnet, self._lbl_sonnet_pct = self._add_bar_row(
-            stack, "Sonnet", 0.0
-        )
+        self._bar_all, self._lbl_all_pct = self._add_bar_row(stack, "All models", 0.0)
+        self._bar_sonnet, self._lbl_sonnet_pct = self._add_bar_row(stack, "Sonnet", 0.0)
         self._lbl_weekly_reset = make_label("—", size=11.0, secondary=True)
         stack.addArrangedSubview_(self._lbl_weekly_reset)
         stack.addArrangedSubview_(_make_separator())
@@ -355,29 +400,43 @@ class ControlCenterViewController(NSViewController):
         tasks_header = self._make_tasks_header_row()
         stack.addArrangedSubview_(tasks_header)
 
-        self._tasks_stack, tasks_scroll, self._tasks_scroll_h_c = self._make_section_scroll_view()
-        stack.addArrangedSubview_(tasks_scroll)
+        self._tasks_stack = self._make_inner_stack()
+        stack.addArrangedSubview_(self._tasks_stack)
+
+        self._tasks_nav_row = self._make_pagination_nav("tasks")
+        stack.addArrangedSubview_(self._tasks_nav_row)
         stack.addArrangedSubview_(_make_separator())
 
-        # ── Running Agents ───────────────────────────────────────────────────
-        stack.addArrangedSubview_(make_label("Running Agents", size=11.0, secondary=True))
+        # ── Running Agents (hidden when empty) ───────────────────────────────
+        self._agents_header_lbl = make_label("Running Agents", size=11.0, secondary=True)
+        self._agents_header_lbl.setHidden_(True)
+        stack.addArrangedSubview_(self._agents_header_lbl)
 
-        self._agents_stack, agents_scroll, self._agents_scroll_h_c = self._make_section_scroll_view()
-        stack.addArrangedSubview_(agents_scroll)
-        stack.addArrangedSubview_(_make_separator())
+        self._agents_stack = self._make_inner_stack()
+        self._agents_stack.setHidden_(True)
+        stack.addArrangedSubview_(self._agents_stack)
+
+        self._agents_nav_row = self._make_pagination_nav("agents")
+        stack.addArrangedSubview_(self._agents_nav_row)
+
+        self._agents_sep = _make_separator()
+        self._agents_sep.setHidden_(True)
+        stack.addArrangedSubview_(self._agents_sep)
 
         # ── Recently Completed (hidden when empty) ───────────────────────────
         self._completed_header_row = self._make_completed_header_row()
-        self._completed_stack, completed_scroll, self._completed_scroll_h_c = self._make_section_scroll_view()
-        self._completed_scroll = completed_scroll
+        self._completed_stack = self._make_inner_stack()
+        self._completed_nav_row = self._make_pagination_nav("completed")
         self._completed_sep = _make_separator()
 
         self._completed_header_row.setHidden_(True)
-        completed_scroll.setHidden_(True)
+        self._completed_stack.setHidden_(True)
+        self._completed_nav_row.setHidden_(True)
         self._completed_sep.setHidden_(True)
 
         stack.addArrangedSubview_(self._completed_header_row)
-        stack.addArrangedSubview_(completed_scroll)
+        stack.addArrangedSubview_(self._completed_stack)
+        stack.addArrangedSubview_(self._completed_nav_row)
         stack.addArrangedSubview_(self._completed_sep)
 
         # ── Footer ───────────────────────────────────────────────────────────
@@ -397,7 +456,6 @@ class ControlCenterViewController(NSViewController):
 
         row.addArrangedSubview_(refresh_btn)
         row.addArrangedSubview_(last_refresh_lbl)
-        # Keep refs
         self._refresh_btn = refresh_btn
         self._last_refresh_lbl = last_refresh_lbl
         return row
@@ -421,7 +479,6 @@ class ControlCenterViewController(NSViewController):
         for btn in (report_btn, prefs_btn, quit_btn):
             row.addArrangedSubview_(btn)
 
-        # Keep refs
         self._footer_btns = [report_btn, prefs_btn, quit_btn]
         return row
 
@@ -467,14 +524,12 @@ class ControlCenterViewController(NSViewController):
 
     @objc.python_method
     def _rebuild_tasks_section(self, tasks: list, agents_running: list) -> None:
-        """Rebuild the ready-tasks stack with inline action buttons."""
-        # Clear existing
+        """Rebuild the ready-tasks stack with pagination."""
         for v in self._task_views:
             v.removeFromSuperview()
         self._task_views = []
 
         running_ids = {a.get("task_id") for a in agents_running}
-        # Exclude running tasks — they belong in Running Agents, not Ready Tasks
         shown = [t for t in tasks if t.task_id not in running_ids][:_TASK_LIMIT]
 
         if not shown:
@@ -482,24 +537,47 @@ class ControlCenterViewController(NSViewController):
             self._tasks_stack.addArrangedSubview_(placeholder)
             self._task_views.append(placeholder)
             self._tasks_header_lbl.setStringValue_("Ready Tasks")
-            self._set_scroll_height(self._tasks_scroll_h_c, 1)
+            self._tasks_nav_row.setHidden_(True)
             return
 
-        # Count only non-running shown tasks as "ready"
-        ready_count = sum(1 for t in shown if t.task_id not in running_ids)
+        ready_count = len(shown)
         self._tasks_header_lbl.setStringValue_(f"Ready Tasks ({ready_count})")
 
-        for task in shown:
+        total_pages = max(1, (len(shown) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+        self._tasks_total_pages = total_pages
+        self._tasks_page = min(self._tasks_page, total_pages - 1)
+
+        start = self._tasks_page * _PAGE_SIZE
+        page_tasks = shown[start:start + _PAGE_SIZE]
+
+        # Collapse expanded task if it's not on this page
+        if self._expanded_task_id and not any(
+            t.task_id == self._expanded_task_id for t in page_tasks
+        ):
+            self._expanded_task_id = None
+
+        for task in page_tasks:
             is_expanded = (task.task_id == self._expanded_task_id)
             row_view = self._make_task_row(task, is_expanded, running_ids)
             self._tasks_stack.addArrangedSubview_(row_view)
             self._task_views.append(row_view)
 
-        self._set_scroll_height(self._tasks_scroll_h_c, len(shown))
+        self._update_pagination_nav(
+            self._tasks_nav_row,
+            self._tasks_prev_btn,
+            self._tasks_next_btn,
+            self._tasks_page_lbl,
+            self._tasks_page,
+            total_pages,
+        )
 
     @objc.python_method
     def _make_task_row(self, task: Any, expanded: bool, running_ids: set) -> NSView:
-        """Build one task row (collapsed or expanded)."""
+        """Build one task row (collapsed or expanded).
+
+        Layout: [priority] [id] [title — clickable to expand] [▶ Run | ⚙ Running…]
+        Expanded: description view shown below the title row (no separate action buttons).
+        """
         container = NSStackView.alloc().init()
         container.setOrientation_(1)
         container.setAlignment_(9)
@@ -507,54 +585,43 @@ class ControlCenterViewController(NSViewController):
 
         is_running = task.task_id in running_ids
 
-        # Header line: [priority] id · title
         title_row = NSStackView.alloc().init()
         title_row.setOrientation_(0)
         title_row.setSpacing_(6.0)
 
         pri_badge = make_label(f"[{task.priority}]", size=11.0, secondary=True)
         id_lbl = make_label(f"{task.task_id}", size=11.0, bold=True)
-        title_lbl = make_label(task.title[:50], size=12.0)
-        title_lbl.setLineBreakMode_(4)   # NSLineBreakByTruncatingTail
-        title_lbl.setMaximumNumberOfLines_(1)
-        # Allow title to be compressed so the row never overflows the popover width
-        title_lbl.setContentCompressionResistancePriority_forOrientation_(249, 0)
+
+        # Clickable title button — borderless, looks like a label
+        title_btn = NSButton.buttonWithTitle_target_action_(
+            task.title[:50], self, "_toggleTask:"
+        )
+        title_btn.setRepresentedObject_(task.task_id)
+        title_btn.setBordered_(False)
+        title_btn.setBezelStyle_(0)
+        title_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+        title_btn.setAlignment_(0)   # NSTextAlignmentLeft
+        title_btn.setLineBreakMode_(4)   # NSLineBreakByTruncatingTail
+        title_btn.setContentCompressionResistancePriority_forOrientation_(249, 0)
 
         title_row.addArrangedSubview_(pri_badge)
         title_row.addArrangedSubview_(id_lbl)
-        title_row.addArrangedSubview_(title_lbl)
+        title_row.addArrangedSubview_(title_btn)
 
         if is_running:
-            # Running tasks: show status inline, no expand toggle
             status_lbl = make_label("⚙ Running…", size=11.0, secondary=True)
             title_row.addArrangedSubview_(status_lbl)
         else:
-            # Ready tasks: expand/collapse toggle on right
-            toggle_btn = _make_button("▼" if expanded else "▶", self, "_toggleTask:")
-            toggle_btn.setRepresentedObject_(task.task_id)
-            title_row.addArrangedSubview_(toggle_btn)
+            run_btn = _make_button("▶ Run", self, "_runTask:")
+            run_btn.setRepresentedObject_(task.task_id)
+            title_row.addArrangedSubview_(run_btn)
 
         container.addArrangedSubview_(title_row)
 
         if expanded and not is_running:
-            # Markdown-rendered description in a scrollable view
             desc = getattr(task, "_cached_desc", task.title)
             desc_view = _make_desc_scroll_view(_extract_description(desc))
             container.addArrangedSubview_(desc_view)
-
-            # Action buttons: Run and Close only
-            actions = NSStackView.alloc().init()
-            actions.setOrientation_(0)
-            actions.setSpacing_(6.0)
-
-            run_btn = _make_button("▶ Run", self, "_runTask:")
-            run_btn.setRepresentedObject_(task.task_id)
-            close_btn = _make_button("✕ Close", self, "_closeTask:")
-            close_btn.setRepresentedObject_(task.task_id)
-
-            for btn in (run_btn, close_btn):
-                actions.addArrangedSubview_(btn)
-            container.addArrangedSubview_(actions)
 
         return container
 
@@ -566,19 +633,35 @@ class ControlCenterViewController(NSViewController):
             v.removeFromSuperview()
         self._agent_views = []
 
-        if not agents:
-            placeholder = make_label("No agents running", size=12.0, secondary=True)
-            self._agents_stack.addArrangedSubview_(placeholder)
-            self._agent_views.append(placeholder)
-            self._set_scroll_height(self._agents_scroll_h_c, 1)
+        hidden = not agents
+        self._agents_header_lbl.setHidden_(hidden)
+        self._agents_stack.setHidden_(hidden)
+        self._agents_sep.setHidden_(hidden)
+
+        if hidden:
+            self._agents_nav_row.setHidden_(True)
             return
 
-        for agent in agents:
+        total_pages = max(1, (len(agents) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+        self._agents_total_pages = total_pages
+        self._agents_page = min(self._agents_page, total_pages - 1)
+
+        start = self._agents_page * _PAGE_SIZE
+        page_agents = agents[start:start + _PAGE_SIZE]
+
+        for agent in page_agents:
             row = self._make_agent_row(agent)
             self._agents_stack.addArrangedSubview_(row)
             self._agent_views.append(row)
 
-        self._set_scroll_height(self._agents_scroll_h_c, len(agents))
+        self._update_pagination_nav(
+            self._agents_nav_row,
+            self._agents_prev_btn,
+            self._agents_next_btn,
+            self._agents_page_lbl,
+            self._agents_page,
+            total_pages,
+        )
 
     @objc.python_method
     def _make_agent_row(self, agent: dict) -> NSView:
@@ -643,19 +726,35 @@ class ControlCenterViewController(NSViewController):
 
         hidden = not completed
         self._completed_header_row.setHidden_(hidden)
-        self._completed_scroll.setHidden_(hidden)
+        self._completed_stack.setHidden_(hidden)
         self._completed_sep.setHidden_(hidden)
 
         if hidden:
+            self._completed_nav_row.setHidden_(True)
             return
 
         items = list(reversed(completed[-20:]))   # newest first
-        for agent in items:
+
+        total_pages = max(1, (len(items) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+        self._completed_total_pages = total_pages
+        self._completed_page = min(self._completed_page, total_pages - 1)
+
+        start = self._completed_page * _PAGE_SIZE
+        page_items = items[start:start + _PAGE_SIZE]
+
+        for agent in page_items:
             row = self._make_completed_row(agent)
             self._completed_stack.addArrangedSubview_(row)
             self._completed_views.append(row)
 
-        self._set_scroll_height(self._completed_scroll_h_c, len(items))
+        self._update_pagination_nav(
+            self._completed_nav_row,
+            self._completed_prev_btn,
+            self._completed_next_btn,
+            self._completed_page_lbl,
+            self._completed_page,
+            total_pages,
+        )
 
     @objc.python_method
     def _make_completed_row(self, agent: dict) -> NSView:
@@ -690,24 +789,54 @@ class ControlCenterViewController(NSViewController):
 
     @objc.python_method
     def _relayout(self) -> None:
-        """Resize the popover to fit the current content.
-
-        Two layout passes ensure the stack has resolved its intrinsic sizes
-        before we ask for fittingSize, preventing the popover from resizing
-        to a stale height and then snapping again on the next event loop tick.
-        """
+        """Resize the popover to fit the current content."""
         if self.view() is None:
             return
-        # First pass: resolve pending layout so fittingSize is accurate
         self.view().layoutSubtreeIfNeeded()
-        # Second pass: accommodate any layout-triggered changes
         self.view().layoutSubtreeIfNeeded()
         size = self._root_stack.fittingSize()
         new_height = max(200.0, size.height)
         self.view().setFrame_(((0, 0), (_WIDTH, new_height)))
-        # Resize the popover (if we are presented inside one)
         if self._app and hasattr(self._app, "_popover"):
             self._app._popover.setContentSize_((_WIDTH, new_height))
+
+    # ── Pagination action selectors ─────────────────────────────────────────
+
+    def _prevTasksPage_(self, sender: Any) -> None:
+        if self._tasks_page > 0:
+            self._tasks_page -= 1
+            self._rebuild_tasks_section(self._all_ready_tasks, self._agents_running)
+            self._relayout()
+
+    def _nextTasksPage_(self, sender: Any) -> None:
+        if self._tasks_page < self._tasks_total_pages - 1:
+            self._tasks_page += 1
+            self._rebuild_tasks_section(self._all_ready_tasks, self._agents_running)
+            self._relayout()
+
+    def _prevAgentsPage_(self, sender: Any) -> None:
+        if self._agents_page > 0:
+            self._agents_page -= 1
+            self._rebuild_agents_section(self._agents_running)
+            self._relayout()
+
+    def _nextAgentsPage_(self, sender: Any) -> None:
+        if self._agents_page < self._agents_total_pages - 1:
+            self._agents_page += 1
+            self._rebuild_agents_section(self._agents_running)
+            self._relayout()
+
+    def _prevCompletedPage_(self, sender: Any) -> None:
+        if self._completed_page > 0:
+            self._completed_page -= 1
+            self._rebuild_completed_section(self._state.get("recently_completed", []))
+            self._relayout()
+
+    def _nextCompletedPage_(self, sender: Any) -> None:
+        if self._completed_page < self._completed_total_pages - 1:
+            self._completed_page += 1
+            self._rebuild_completed_section(self._state.get("recently_completed", []))
+            self._relayout()
 
     # ── Button action selectors ────────────────────────────────────────────
 
@@ -740,7 +869,6 @@ class ControlCenterViewController(NSViewController):
             self._expanded_task_id = None
         else:
             self._expanded_task_id = task_id
-            # Pre-fetch description so it's available for the rebuild
             task = next((t for t in self._all_ready_tasks if t.task_id == task_id), None)
             if task and not getattr(task, "_cached_desc", None):
                 from .tasks import get_task_description
@@ -754,7 +882,6 @@ class ControlCenterViewController(NSViewController):
         title = (sender.title() or "").strip()
         if title.startswith(prefix):
             return title[len(prefix):].strip() or None
-        # Fallback: last token
         parts = title.rsplit(" ", 1)
         return parts[-1] if parts else None
 
@@ -800,7 +927,6 @@ class ControlCenterViewController(NSViewController):
     def _closeTask_(self, sender: Any) -> None:
         task_id = str(sender.representedObject() or "")
         if task_id:
-            # Optimistically remove so the row disappears immediately
             self._all_ready_tasks = [t for t in self._all_ready_tasks if t.task_id != task_id]
             self._collapse_and_act(task_id, ["close", task_id],
                                    self._task_project_path(task_id))
@@ -815,7 +941,6 @@ class ControlCenterViewController(NSViewController):
         log_path = str(sender.representedObject() or "")
         if not log_path:
             return
-        # Open Terminal and stream the log live with tail -f
         script = (
             'tell application "Terminal" to activate\n'
             f'tell application "Terminal" to do script "tail -f {shlex.quote(log_path)}"'

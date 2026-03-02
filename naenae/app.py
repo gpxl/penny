@@ -111,6 +111,8 @@ class NaeNaeApp(NSObject):
         else:
             btn = self._status_item.button()
             if btn:
+                # Activate so the popover renders at full opacity immediately
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
                 self._popover.showRelativeToRect_ofView_preferredEdge_(
                     btn.bounds(), btn, 3  # NSRectEdgeMaxY = bottom edge of menu bar
                 )
@@ -123,6 +125,9 @@ class NaeNaeApp(NSObject):
                     "ready_tasks": self._all_ready_tasks,
                     "fetched_at": self._last_fetch_at,
                 })
+                # Auto-refresh on first open if no data has loaded yet
+                if self._prediction is None:
+                    self._worker.fetch(force=True)
 
     # ── Timer ─────────────────────────────────────────────────────────────
 
