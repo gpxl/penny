@@ -435,6 +435,9 @@ class Prediction:
     session_hours_remaining: float = 0.0
     session_reset_label: str = ""
 
+    # True when the last /status fetch returned an API error
+    outage: bool = False
+
 
 def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
     """Compute the full prediction from current token usage + budget estimate.
@@ -457,6 +460,7 @@ def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
 
     # --- Override with live /status data when available ---
     live = fetch_live_status(force=force)
+    outage = live.outage if live is not None else False
     if live is not None:
         pct_all = live.weekly_pct_all
         pct_sonnet = live.weekly_pct_sonnet
@@ -513,6 +517,7 @@ def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
         session_pct_sonnet=session.pct_sonnet,
         session_hours_remaining=session.hours_remaining,
         session_reset_label=session_reset_label,
+        outage=outage,
     )
 
 

@@ -226,10 +226,11 @@ class NaeNaeApp(NSObject):
             reset_time = self._compact_reset_time(pred.session_reset_label)
             session = f"{pred.session_pct_all:.0f}/{reset_time}" if reset_time else f"{pred.session_pct_all:.0f}"
             stats = f"{session} {pred.pct_all:.0f}/{pred.pct_sonnet:.0f}"
+            prefix = "\u26a0\ufe0f " if pred.outage else ""
             if n_running > 0:
-                btn.setTitle_(f"{stats} \u2728{n_running}")
+                btn.setTitle_(f"{prefix}{stats} \u2728{n_running}")
             else:
-                btn.setTitle_(stats)
+                btn.setTitle_(f"{prefix}{stats}")
         elif n_running > 0:
             btn.setTitle_(f"\u2728{n_running}")
         else:

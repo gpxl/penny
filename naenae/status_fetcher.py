@@ -28,6 +28,8 @@ from typing import Any
 # Cache TTL: match the background refresh interval so opening the popover
 # always shows data no older than one refresh cycle.
 _CACHE_TTL_SECONDS = 5 * 60
+# Shorter TTL when the last fetch hit an outage — retry sooner.
+_OUTAGE_RETRY_SECONDS = 2 * 60
 
 _cache: LiveStatus | None = None
 
@@ -38,7 +40,19 @@ def _cache_file() -> Path:
     return d / "status_cache.json"
 
 
+def _detect_api_error(screen_txt: str) -> bool:
+    """Return True if the /status Usage tab is showing an API error instead of data."""
+    return (
+        "api_error" in screen_txt
+        or "Internal server error" in screen_txt
+        or "Failed to load usage data" in screen_txt
+        or '"type":"error"' in screen_txt
+    )
+
+
 def _save_cache(status: "LiveStatus") -> None:
+    if status.outage:
+        return  # don't persist outage state to disk — restart should try fresh
     try:
         path = _cache_file()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,6 +106,7 @@ class LiveStatus:
     weekly_reset_label: str     # "Mar 6 at 9pm"
     weekly_reset_tz: str        # "Europe/Amsterdam" (timezone shown in /status)
     fetched_at: datetime
+    outage: bool = False        # True when /status returned an API error instead of data
 
 
 def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
@@ -182,8 +197,9 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
     global _cache
 
     if not force and _cache is not None:
+        ttl = _OUTAGE_RETRY_SECONDS if _cache.outage else _CACHE_TTL_SECONDS
         age = (datetime.now(timezone.utc) - _cache.fetched_at).total_seconds()
-        if age < _CACHE_TTL_SECONDS:
+        if age < ttl:
             return _cache
 
     # On cold start (no in-memory cache) try the disk cache first.
@@ -275,6 +291,31 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
 
         # Phase 5: extract clean screen text from pyte.
         screen_txt = "\n".join(row.rstrip() for row in screen.display)
+
+        # Detect API outage before attempting to parse percentages.
+        if _detect_api_error(screen_txt):
+            prev = _cache  # may be None or a previous good result
+            good = prev if (prev is not None and not prev.outage) else None
+            result = LiveStatus(
+                session_pct=good.session_pct if good else 0.0,
+                session_reset_label=good.session_reset_label if good else "—",
+                session_reset_tz=good.session_reset_tz if good else "",
+                weekly_pct_all=good.weekly_pct_all if good else 0.0,
+                weekly_pct_sonnet=good.weekly_pct_sonnet if good else 0.0,
+                weekly_reset_label=good.weekly_reset_label if good else "—",
+                weekly_reset_tz=good.weekly_reset_tz if good else "",
+                fetched_at=datetime.now(timezone.utc),
+                outage=True,
+            )
+            _cache = result  # in-memory only — _save_cache skips outage states
+            child.send(b"\x03")
+            try:
+                child.expect(pexpect.EOF, timeout=5)
+            except Exception:
+                pass
+            child.close(force=True)
+            return result
+
         result = _parse_usage_screen(screen_txt)
 
         # Phase 6: close gracefully.
