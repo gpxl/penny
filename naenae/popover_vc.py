@@ -215,6 +215,7 @@ class ControlCenterViewController(NSViewController):
         self._completed_sep: Any = None
         # UI state
         self._expanded_task_id: str | None = None
+        self._refresh_btn: Any = None
         self._last_refresh_at: datetime | None = None
         self._last_refresh_lbl: NSTextField | None = None
         self._app: Any = None      # set by app.py after construction
@@ -691,7 +692,7 @@ class ControlCenterViewController(NSViewController):
         lbl.setContentCompressionResistancePriority_forOrientation_(250, 0)
 
         log_btn = _make_button("Control", self, "_controlAgent:")
-        log_btn.setRepresentedObject_(agent.get("session", ""))
+        log_btn.setRepresentedObject_(agent.get("task_id", ""))
         stop_btn = _make_button("■ Stop", self, "_stopAgent:")
         stop_btn.setRepresentedObject_(agent.get("task_id", ""))
 
@@ -953,28 +954,38 @@ class ControlCenterViewController(NSViewController):
         return task.project_path if task else ""
 
     def _controlAgent_(self, sender: Any) -> None:
-        import shutil
-        session = str(sender.representedObject() or "")
+        task_id = str(sender.representedObject() or "")
+        if not task_id:
+            return
+
+        agent = next((a for a in self._agents_running if a.get("task_id") == task_id), None)
+        if agent is None:
+            return
+
+        session = agent.get("session", "")
         if not session:
             return
-        # Prefer tmux: attach-session always redraws the TUI correctly.
-        # Fall back to screen -x for sessions spawned before tmux was preferred.
-        if shutil.which("tmux") and subprocess.run(
-            ["tmux", "has-session", "-t", session],
-            capture_output=True,
-        ).returncode == 0:
-            attach_args = ["tmux", "attach-session", "-t", session]
-        else:
-            attach_args = ["screen", "-x", session]
 
-        # Prefer Ghostty: opens with the command as the initial process (no blank
-        # window race), and renders tmux TUI cleanly. Fall back to Terminal.app.
+        # Full path stored at spawn time — bypasses Ghostty's login-PATH gap
+        tmux_bin = agent.get("tmux_bin") or "/opt/homebrew/bin/tmux"
+
+        if subprocess.run([tmux_bin, "has-session", "-t", session],
+                          capture_output=True).returncode == 0:
+            attach_args = [tmux_bin, "attach-session", "-t", session]
+        else:
+            attach_args = ["screen", "-x", session]  # legacy fallback
+
         ghostty_bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
         if os.path.exists(ghostty_bin):
-            subprocess.Popen(
-                [ghostty_bin, "-e"] + attach_args,
-                start_new_session=True,
-            )
+            if attach_args[0] == "screen":
+                # Ghostty sets TERM=xterm-ghostty which screen has no terminfo for.
+                # Wrap in a shell to override TERM before screen inspects it.
+                ghostty_cmd = [ghostty_bin, "-e", "bash", "-c",
+                               "TERM=xterm-256color " + shlex.join(attach_args)]
+            else:
+                # Absolute tmux path → no PATH lookup needed by Ghostty's login shell
+                ghostty_cmd = [ghostty_bin, "-e"] + attach_args
+            subprocess.Popen(ghostty_cmd, start_new_session=True)
         else:
             attach_cmd = shlex.join(attach_args)
             script = (

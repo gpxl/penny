@@ -13,6 +13,7 @@ from __future__ import annotations
 import glob
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, time as _time, timedelta, timezone
 from pathlib import Path
@@ -62,11 +63,38 @@ def days_until_reset() -> float:
     return max(0.0, remaining / 86400)
 
 
+def uses_24h_time() -> bool:
+    """Return True if the OS is configured for 24-hour time (macOS).
+
+    Uses NSDateFormatter with the ICU 'j' skeleton, which returns the
+    locale-preferred hour format ('H' = 24h, 'h' = 12h).  This correctly
+    handles both the explicit AppleICUForce24HourTime override and the
+    implicit preference that comes from the system region (e.g. nl_NL).
+    """
+    try:
+        from Foundation import NSDateFormatter, NSLocale  # type: ignore[import]
+        fmt = NSDateFormatter.dateFormatFromTemplate_options_locale_(
+            "j", 0, NSLocale.currentLocale()
+        )
+        return "H" in (fmt or "")
+    except Exception:
+        # Fallback: check the explicit override key via defaults(1)
+        try:
+            r = subprocess.run(
+                ["defaults", "read", "NSGlobalDomain", "AppleICUForce24HourTime"],
+                capture_output=True, text=True, timeout=2,
+            )
+            return r.stdout.strip() == "1"
+        except Exception:
+            return False
+
+
 def reset_label() -> str:
-    """Human-readable reset date/time in local time, e.g. 'Fri Mar 6 at 9:00 PM'."""
+    """Human-readable reset date/time in local time, e.g. 'Fri Mar 6 at 21:00'."""
     _, end = current_billing_period()
     local = end.astimezone()
-    return local.strftime("%a %b %-d at %-I:%M %p")
+    time_fmt = "%-H:%M" if uses_24h_time() else "%-I:%M %p"
+    return local.strftime(f"%a %b %-d at {time_fmt}")
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +408,11 @@ def build_session_info(state: dict[str, Any]) -> SessionInfo:
         hours_remaining = max(0.0, (estimated_next_reset - now).total_seconds() / 3600)
 
         local_reset = estimated_next_reset.astimezone()
+        time_fmt = "%-H:%M" if uses_24h_time() else "%-I:%M %p"
         if local_reset.date() == datetime.now().date():
-            session_reset_label = "Today at " + local_reset.strftime("%-I:%M %p")
+            session_reset_label = "Today at " + local_reset.strftime(time_fmt)
         else:
-            session_reset_label = local_reset.strftime("%a at %-I:%M %p")
+            session_reset_label = local_reset.strftime(f"%a at {time_fmt}")
     else:
         # No observed boundaries — live /status will provide the real label
         hours_remaining = 0.0

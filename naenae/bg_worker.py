@@ -32,6 +32,7 @@ class BackgroundWorker:
         try:
             result = self._fetch_data(force)
         except Exception as exc:
+            print(f"[naenae] _fetch_data exception: {exc}", flush=True)
             result = {"error": str(exc)}
         finally:
             with self._lock:

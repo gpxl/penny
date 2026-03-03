@@ -22,7 +22,7 @@ from AppKit import (
 )
 from Foundation import NSObject, NSTimer
 
-from .analysis import build_prediction, get_usage_bar, should_trigger
+from .analysis import build_prediction, get_usage_bar, should_trigger, uses_24h_time
 from .bg_worker import BackgroundWorker
 from .onboarding import fix_missing_beads, needs_onboarding, run_onboarding
 from .paths import data_dir
@@ -199,19 +199,38 @@ class NaeNaeApp(NSObject):
     def _compact_reset_time(self, label: str) -> str:
         """Return a compact reset time string from a reset label.
 
-        Handles two formats:
-        - Already compact from live /status data: "4:59pm", "2pm" → return as-is
-        - Long form from local estimation: "Today at 4:59 PM" → "4:59pm"
+        Handles multiple formats, converting to 24h if the OS is set that way:
+        - Long form 12h (local estimation): "Today at 4:59 PM" → "4:59pm" / "16:59"
+        - Long form 24h (local estimation): "Today at 16:59" → "16:59"
+        - Compact from live /status data: "4:59pm", "2pm" → convert if 24h mode
         """
         import re
         if not label or label == "—":
             return ""
-        # Long form: "Today at 12:00 PM" or "Mon at 5:30 PM"
-        m = re.search(r"at (\d+):(\d+) (AM|PM)", label)
+        use_24h = uses_24h_time()
+
+        # Long form 12h: "Today at 12:00 PM" or "Mon at 5:30 PM"
+        m = re.search(r"at (\d+):(\d+) (AM|PM)", label, re.IGNORECASE)
         if m:
-            h, mins, ampm = m.group(1), m.group(2), m.group(3).lower()
-            return f"{h}:{mins}{ampm}" if mins != "00" else f"{h}{ampm}"
-        # Already compact from live data (e.g. "4:59pm", "2pm")
+            h, mins, ampm = int(m.group(1)), m.group(2), m.group(3).upper()
+            if use_24h:
+                h24 = (0 if h == 12 else h) if ampm == "AM" else (12 if h == 12 else h + 12)
+                return f"{h24}:{mins}" if mins != "00" else str(h24)
+            return f"{h}:{mins}{ampm.lower()}" if mins != "00" else f"{h}{ampm.lower()}"
+
+        # Long form 24h: "Today at 16:59" or "Mon at 0:00"
+        m = re.search(r"at (\d+):(\d+)$", label)
+        if m:
+            h, mins = m.group(1), m.group(2)
+            return f"{h}:{mins}" if mins != "00" else h
+
+        # Compact live /status data: "4:59pm", "2pm", "12:30am"
+        m = re.match(r"^(\d+)(?::(\d+))?(am|pm)$", label, re.IGNORECASE)
+        if m and use_24h:
+            h, mins, ampm = int(m.group(1)), m.group(2) or "00", m.group(3).upper()
+            h24 = (0 if h == 12 else h) if ampm == "AM" else (12 if h == 12 else h + 12)
+            return f"{h24}:{mins}" if mins != "00" else str(h24)
+
         return label
 
     @objc.python_method
@@ -240,7 +259,7 @@ class NaeNaeApp(NSObject):
 
     def spawnTask_(self, task: Any) -> None:
         desc = get_task_description(task)
-        record = spawn_claude_agent(task, desc)
+        record = spawn_claude_agent(task, desc, interactive=True)
         self.state.setdefault("agents_running", []).append(record)
         # Remove from ready list immediately so the popover reflects the change now
         self._all_ready_tasks = [t for t in self._all_ready_tasks if t.task_id != task.task_id]
@@ -271,11 +290,13 @@ class NaeNaeApp(NSObject):
             return
         session = agent.get("session", "")
         pid = agent.get("pid") or 0
+        # Use stored tmux_bin (full path) from agent record to bypass login-PATH gap
+        tmux_bin = agent.get("tmux_bin") or "/opt/homebrew/bin/tmux"
         if session:
-            subprocess.run(
-                ["screen", "-X", "-S", session, "quit"],
-                capture_output=True, check=False,
-            )
+            subprocess.run([tmux_bin, "kill-session", "-t", session],
+                           capture_output=True, check=False)
+            subprocess.run(["screen", "-X", "-S", session, "quit"],
+                           capture_output=True, check=False)
         if pid > 0:
             try:
                 os.killpg(pid, signal.SIGTERM)
@@ -437,7 +458,7 @@ class NaeNaeApp(NSObject):
         spawned = []
         for task in self._ready_tasks:
             desc = get_task_description(task)
-            record = spawn_claude_agent(task, desc)
+            record = spawn_claude_agent(task, desc, interactive=False)
             self.state.setdefault("agents_running", []).append(record)
             spawned.append(f"{task.project_name}/{task.task_id}")
         if spawned:
@@ -501,11 +522,6 @@ def main() -> None:
 
         delegate = NaeNaeApp.alloc().init()
         app.setDelegate_(delegate)
-
-        # Trigger startup after run loop starts
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.1, delegate, "_startup:", None, False
-        )
 
         app.run()
     finally:
