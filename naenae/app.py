@@ -14,6 +14,7 @@ import setproctitle
 import yaml
 from AppKit import (
     NSApplication,
+    NSEvent,
     NSPopover,
     NSStatusBar,
     NSVariableStatusItemLength,
@@ -61,6 +62,7 @@ class NaeNaeApp(NSObject):
         self._ready_tasks: list[Any] = []
         self._has_setup_issues: bool = False
         self._last_fetch_at: datetime | None = None
+        self._event_monitor: Any = None
 
         # Build status item (icon in menu bar)
         status_bar = NSStatusBar.systemStatusBar()
@@ -77,7 +79,7 @@ class NaeNaeApp(NSObject):
 
         self._popover = NSPopover.alloc().init()
         self._popover.setContentViewController_(self._vc)
-        self._popover.setBehavior_(1)   # NSPopoverBehaviorTransient
+        self._popover.setBehavior_(0)   # NSPopoverBehaviorApplicationDefined — avoids click-eating on macOS 26+
 
         # Background data worker
         self._worker = BackgroundWorker(self)
@@ -108,6 +110,7 @@ class NaeNaeApp(NSObject):
     def togglePopover_(self, sender: Any) -> None:
         if self._popover.isShown():
             self._popover.performClose_(sender)
+            self._remove_event_monitor()
         else:
             btn = self._status_item.button()
             if btn:
@@ -128,6 +131,32 @@ class NaeNaeApp(NSObject):
                 # Auto-refresh on first open if no data has loaded yet
                 if self._prediction is None:
                     self._worker.fetch(force=True)
+                # Global monitor to close on outside click (ApplicationDefined behavior
+                # requires manual dismissal — avoids the click-eating bug on macOS 26+).
+                self._add_event_monitor()
+
+    # ── Event monitor (outside-click dismissal) ───────────────────────────
+
+    @objc.python_method
+    def _add_event_monitor(self) -> None:
+        if self._event_monitor is not None:
+            return
+
+        def _on_outside_click(event: Any) -> None:
+            if self._popover.isShown():
+                self._popover.performClose_(None)
+            self._remove_event_monitor()
+
+        # NSEventMaskLeftMouseDown = 1 << 1
+        self._event_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            1 << 1, _on_outside_click
+        )
+
+    @objc.python_method
+    def _remove_event_monitor(self) -> None:
+        if self._event_monitor is not None:
+            NSEvent.removeMonitor_(self._event_monitor)
+            self._event_monitor = None
 
     # ── Timer ─────────────────────────────────────────────────────────────
 
