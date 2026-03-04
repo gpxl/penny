@@ -191,9 +191,12 @@ class NaeNaeApp(NSObject):
 
         # Handle newly-completed agents
         for agent in newly_done:
-            state.setdefault("spawned_this_week", []).append(agent)
+            sw = state.setdefault("spawned_this_week", [])
+            if not any(a.get("task_id") == agent.get("task_id") for a in sw):
+                sw.append(agent)
             rc = state.setdefault("recently_completed", [])
-            rc.append(agent)
+            if not any(a.get("task_id") == agent.get("task_id") for a in rc):
+                rc.append(agent)
             state["recently_completed"] = rc[-20:]  # keep last 20
             if self.config.get("notifications", {}).get("completion", True):
                 send_notification(

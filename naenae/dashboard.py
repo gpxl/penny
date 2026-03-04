@@ -88,11 +88,23 @@ def _snapshot(app) -> dict[str, Any]:
     # (_project_priority is a dynamic attr, not a field — excluded automatically)
     ready = [dataclasses.asdict(t) for t in (app._all_ready_tasks or [])]
 
+    # Deduplicate spawned_this_week by task_id (most recent entry wins)
+    seen: set[str] = set()
+    completed: list = []
+    for agent in reversed(state.get("spawned_this_week", [])):
+        tid = agent.get("task_id", "")
+        if tid not in seen:
+            seen.add(tid)
+            completed.append(agent)
+    completed.reverse()
+
     return {
         "generated_at": datetime.now().isoformat(),
         "state": state,
         "prediction": pred_dict,
         "ready_tasks": ready,
+        "completed_this_period": completed,
+        "session_history": state.get("session_history", []),
     }
 
 
@@ -136,7 +148,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card" id="card-period"><h2>Billing Period Usage</h2><p>…</p></div>
   <div class="card" id="card-session"><h2>Current Sub-Session</h2><p>…</p></div>
 </div>
-<div class="card" id="card-history" style="margin-bottom:12px"><h2>Period History</h2><p>…</p></div>
+<div class="card" id="card-history" style="margin-bottom:12px"><h2>Session History</h2><p>…</p></div>
 <div class="card" id="card-tasks" style="margin-bottom:12px"><h2>Task Queue</h2><p>…</p></div>
 <div class="grid">
   <div class="card" id="card-agents"><h2>Agents Running</h2><p>…</p></div>
@@ -180,21 +192,22 @@ function renderSession(pred) {
 }
 
 function renderHistory(history) {
-  if (!history || !history.length) return '<p style="color:#9ca3af;font-size:12px">No history yet.</p>';
+  if (!history || !history.length) return '<p style="color:#9ca3af;font-size:12px">No sub-session data yet.</p>';
   const max = Math.max(...history.map(h => h.output_all||0), 1);
   const W = 480, H = 80, n = history.length;
-  const bw = Math.floor((W - 20) / n) - 2;
+  const bw = Math.max(Math.floor((W - 20) / n) - 2, 4);
   let bars = '';
   history.forEach((h, i) => {
     const val = h.output_all || 0;
-    const bh = Math.round((val / max) * H);
+    const bh = Math.max(Math.round((val / max) * H), 2);
     const x = 10 + i * (bw + 2);
     const y = H - bh;
-    const pct = max > 0 ? val / max * 100 : 0;
+    const pct = val / max * 100;
     const fill = pct < 70 ? '#10b981' : pct < 90 ? '#3b82f6' : '#ef4444';
-    const label = (h.date||'').slice(5); // MM-DD
-    bars += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${fill}" rx="2"/>`;
-    if (i % Math.ceil(n/8) === 0) bars += `<text x="${x + bw/2}" y="${H+14}" text-anchor="middle">${label}</text>`;
+    const startLabel = (h.start||'').slice(5, 10); // MM-DD
+    const kTokens = Math.round(val / 1000);
+    bars += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${fill}" rx="2"><title>${startLabel}: ${kTokens}k tokens</title></rect>`;
+    if (n <= 8 || i % Math.ceil(n/6) === 0) bars += `<text x="${x + bw/2}" y="${H+14}" text-anchor="middle">${startLabel}</text>`;
   });
   return `<svg viewBox="0 0 ${W} ${H+20}" style="width:100%;height:auto">${bars}</svg>`;
 }
@@ -229,10 +242,11 @@ function render(data) {
   const state = data.state || {};
   document.getElementById('card-period').innerHTML = '<h2>Billing Period Usage</h2>' + renderPeriod(pred);
   document.getElementById('card-session').innerHTML = '<h2>Current Sub-Session</h2>' + renderSession(pred);
-  document.getElementById('card-history').innerHTML = '<h2>Period History</h2>' + renderHistory(state.period_history);
+  document.getElementById('card-history').innerHTML = '<h2>Session History</h2>' + renderHistory(data.session_history);
   document.getElementById('card-tasks').innerHTML = '<h2>Task Queue (' + (data.ready_tasks||[]).length + ' ready)</h2>' + renderTasks(data.ready_tasks);
   document.getElementById('card-agents').innerHTML = '<h2>Agents Running (' + (state.agents_running||[]).length + ')</h2>' + renderAgents(state.agents_running);
-  document.getElementById('card-completed').innerHTML = '<h2>Completed This Period</h2>' + renderCompleted(state.spawned_this_week);
+  const completed = data.completed_this_period || [];
+  document.getElementById('card-completed').innerHTML = '<h2>Completed This Period (' + completed.length + ')</h2>' + renderCompleted(completed);
 }
 
 async function refresh() {
