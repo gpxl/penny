@@ -61,6 +61,25 @@ def run_preflight(config: dict[str, Any]) -> list[PreflightIssue]:
                      "Then re-run install.sh so launchd picks up the new PATH.",
         ))
 
+    if shutil.which("tmux") is None and shutil.which("screen") is None:
+        issues.append(PreflightIssue(
+            severity="error",
+            message="Neither `tmux` nor `screen` found in PATH.",
+            fix_hint="Install tmux: brew install tmux\n"
+                     "Agent spawning requires tmux (or screen) to run background sessions.",
+        ))
+
+    # ── Claude auth check ──────────────────────────────────────────────────
+
+    auth_path = Path("~/.claude/auth.json").expanduser()
+    if not auth_path.exists():
+        issues.append(PreflightIssue(
+            severity="warning",
+            message="Claude authentication not detected (~/.claude/auth.json missing).",
+            fix_hint="Run `claude auth login` in a terminal to authenticate.\n"
+                     "Without auth, agent spawning will time out after 45 seconds.",
+        ))
+
     # ── Stats cache check ──────────────────────────────────────────────────
 
     stats_path_str: str = config.get("stats_cache_path", "~/.claude/stats-cache.json")
@@ -73,7 +92,7 @@ def run_preflight(config: dict[str, Any]) -> list[PreflightIssue]:
         ))
 
     projects_dir = Path("~/.claude/projects").expanduser()
-    if not any(projects_dir.rglob("*.jsonl")):
+    if not projects_dir.exists() or not any(projects_dir.rglob("*.jsonl")):
         issues.append(PreflightIssue(
             severity="warning",
             message="No Claude session files found in ~/.claude/projects/.",
@@ -127,7 +146,7 @@ def has_errors(issues: list[PreflightIssue]) -> bool:
 
 
 def format_issues_for_alert(issues: list[PreflightIssue]) -> str:
-    """Format issues for a rumps.alert() dialog body."""
+    """Format issues for an NSAlert dialog body."""
     lines: list[str] = []
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity == "warning"]

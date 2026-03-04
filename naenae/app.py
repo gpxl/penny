@@ -456,11 +456,19 @@ class NaeNaeApp(NSObject):
                 save_state(self.state)
                 btn = self._status_item.button()
                 btn and btn.setTitle_("\u25cf Setup")
+                # Surface a non-blocking hint so the user knows how to resume
+                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.5, self, "_showSetupHint:", None, False
+                )
                 return
 
         self.config = config
 
-        issues = run_preflight(config)
+        try:
+            issues = run_preflight(config)
+        except Exception as exc:
+            print(f"[naenae] preflight error: {exc}", flush=True)
+            issues = []
         tool_errors = [
             i for i in issues
             if i.severity == "error" and "project" not in i.message.lower()
@@ -500,6 +508,13 @@ class NaeNaeApp(NSObject):
                     + f"{pred.days_remaining:.1f} days left."
                 )
                 send_notification("Nae Nae", msg)
+
+    def _showSetupHint_(self, timer: Any) -> None:
+        """Non-blocking hint shown after the user clicks 'Set Up Later'."""
+        self._show_alert(
+            "Nae Nae \u2014 Setup Deferred",
+            "Click \u201c\u25cf Setup\u201d in the menu bar to complete configuration whenever you\u2019re ready.",
+        )
 
     @objc.python_method
     def _show_alert(self, title: str, message: str) -> None:

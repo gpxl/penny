@@ -27,7 +27,11 @@ for arg in "$@"; do
     --check)        CHECK_ONLY=1 ;;
     --defer-start)  DEFER_START=1 ;;
     --help|-h)
-      sed -n '2,14p' "$0" | sed 's/^# \?//'
+      if [[ -f "$0" ]]; then
+        sed -n '2,14p' "$0" | sed 's/^# \?//'
+      else
+        echo "Nae Nae installer — run: bash install.sh [--check] [--defer-start]"
+      fi
       exit 0
       ;;
     *)
@@ -46,6 +50,14 @@ SCRIPT_DIR="$(cd "$(dirname "${_src:-$0}")" 2>/dev/null && pwd || pwd)"
 if [[ ! -f "$SCRIPT_DIR/naenae/app.py" ]]; then
   INSTALL_DIR="${NAENAE_INSTALL_DIR:-$HOME/.naenae/src}"
   echo "=== Nae Nae Bootstrap ==="
+
+  # git is required for cloning/updating
+  if ! command -v git &>/dev/null; then
+    echo "❌ 'git' not found. Install Xcode Command Line Tools and try again:"
+    echo "   xcode-select --install"
+    exit 1
+  fi
+
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "→ Updating existing clone at $INSTALL_DIR…"
     git -C "$INSTALL_DIR" pull --ff-only
@@ -101,14 +113,33 @@ SKIP_DEP_CHECK="${SKIP_DEP_CHECK:-0}"
 DEP_ERRORS=0
 
 if [[ "$SKIP_DEP_CHECK" -eq 0 ]]; then
+  # Node.js / npm are required for claude and bd
+  NODE_BIN=$(command -v node 2>/dev/null || true)
+  NPM_BIN=$(command -v npm 2>/dev/null || true)
+  if [[ -z "$NODE_BIN" || -z "$NPM_BIN" ]]; then
+    echo "❌ Node.js / npm not found."
+    echo "   Install Node.js from https://nodejs.org (LTS recommended)"
+    echo "   or via Homebrew: brew install node"
+    DEP_ERRORS=1
+  else
+    echo "✓ Node.js $(node --version) / npm $(npm --version) found"
+  fi
+
   CLAUDE_BIN=$(command -v claude 2>/dev/null || true)
   if [[ -z "$CLAUDE_BIN" ]]; then
     echo "❌ 'claude' CLI not found in PATH."
     echo "   Install: npm install -g @anthropic-ai/claude-code"
+    echo "   Then authenticate: claude auth login"
     echo "   Then re-run: bash install.sh"
     DEP_ERRORS=1
   else
     echo "✓ claude found at $CLAUDE_BIN"
+    # Auth hint — check for auth.json presence (non-blocking)
+    if [[ ! -f "$HOME/.claude/auth.json" ]]; then
+      echo "⚠  Claude authentication not detected."
+      echo "   Run: claude auth login"
+      echo "   (Without auth, agent spawning will time out after 45 s)"
+    fi
   fi
 
   BD_BIN=$(command -v bd 2>/dev/null || true)
@@ -119,6 +150,21 @@ if [[ "$SKIP_DEP_CHECK" -eq 0 ]]; then
     DEP_ERRORS=1
   else
     echo "✓ bd found at $BD_BIN"
+  fi
+
+  # tmux is required for agent spawning
+  TMUX_BIN=$(command -v tmux 2>/dev/null || true)
+  SCREEN_BIN=$(command -v screen 2>/dev/null || true)
+  if [[ -z "$TMUX_BIN" && -z "$SCREEN_BIN" ]]; then
+    echo "❌ Neither 'tmux' nor 'screen' found."
+    echo "   Install tmux: brew install tmux"
+    echo "   Agent spawning requires tmux (or screen) to run background sessions."
+    DEP_ERRORS=1
+  elif [[ -n "$TMUX_BIN" ]]; then
+    echo "✓ tmux found at $TMUX_BIN"
+  else
+    echo "⚠  tmux not found — screen will be used as fallback (tmux recommended)."
+    echo "   Install: brew install tmux"
   fi
 
   # Ghostty: recommended (non-blocking) — used as the control-window terminal
@@ -169,7 +215,10 @@ fi
 
 # Install Python dependencies
 echo "→ Installing Python dependencies…"
-"$PYTHON" -m pip install --quiet --break-system-packages -r "$SCRIPT_DIR/requirements.txt"
+if ! "$PYTHON" -m pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt"; then
+  echo "❌ Python dependency install failed. Check the errors above."
+  exit 1
+fi
 echo "✓ Dependencies installed"
 
 # Create data directories
@@ -258,13 +307,15 @@ fi
 
 # ── Load or defer ─────────────────────────────────────────────────────────────
 if [[ "$DEFER_START" -eq 0 ]]; then
-  # Unload existing service if running
+  # Unload existing service if running (bootout for macOS 13+, unload as fallback)
   if launchctl list | grep -q "$PLIST_NAME" 2>/dev/null; then
     echo "→ Unloading existing Nae Nae service…"
-    launchctl unload "$PLIST_DEST" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$PLIST_NAME" 2>/dev/null || \
+      launchctl unload "$PLIST_DEST" 2>/dev/null || true
   fi
 
-  launchctl load "$PLIST_DEST"
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST" 2>/dev/null || \
+    launchctl load "$PLIST_DEST"
   echo "✓ Nae Nae service loaded"
   echo ""
   echo "✅ Nae Nae is now running!"
@@ -280,10 +331,10 @@ else
   fi
   echo "   1. Edit config:  open $CONFIG_FILE"
   echo "   2. Verify setup: bash $SCRIPT_DIR/install.sh --check"
-  echo "   3. Then start:   launchctl load $PLIST_DEST"
+  echo "   3. Then start:   launchctl bootstrap gui/\$(id -u) $PLIST_DEST"
 fi
 
 echo ""
 echo "To uninstall:"
-echo "  launchctl unload $PLIST_DEST"
+echo "  launchctl bootout gui/\$(id -u)/$PLIST_NAME"
 echo "  rm $PLIST_DEST"

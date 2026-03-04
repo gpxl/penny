@@ -46,10 +46,19 @@ def _open_in_terminal(cmd: str) -> None:
 
     .command files are executed by Terminal.app natively — no AppleScript
     Automation permission required (unlike ``osascript do script``).
+    The temp file is removed 30 s after launch to avoid accumulation.
     """
     import stat
     import tempfile
-    script = f"#!/bin/sh\n{cmd}\n"
+    import threading
+
+    # Wrap the command so the .command file deletes itself after 30 s
+    script = (
+        "#!/bin/sh\n"
+        f"{cmd}\n"
+        # Background self-cleanup: wait 30 s then remove this file
+        f'( sleep 30 && rm -f "$0" ) &\n'
+    )
     fd, path = tempfile.mkstemp(suffix=".command")
     try:
         with os.fdopen(fd, "w") as f:
@@ -175,7 +184,14 @@ def spawn_claude_agent(
         raise RuntimeError(
             "claude binary not found in PATH. Run preflight to diagnose."
         )
-    tmux_bin = shutil.which("tmux") or "tmux"
+    tmux_bin = shutil.which("tmux")
+    screen_bin = shutil.which("screen")
+    if tmux_bin is None and screen_bin is None:
+        raise RuntimeError(
+            "Neither tmux nor screen found in PATH. "
+            "Install tmux: brew install tmux"
+        )
+    tmux_bin = tmux_bin or "tmux"
 
     # Build a minimal environment from a whitelist of known-safe variables.
     # This prevents leakage of ANTHROPIC_API_KEY, AWS_*, DATABASE_URL, etc.
@@ -209,8 +225,9 @@ def spawn_claude_agent(
             )
             proc.wait()
 
-            # Wait for Claude's TUI to render its input prompt (~5 s on M-series).
-            time.sleep(5)
+            # Wait for Claude's TUI to render its input prompt.
+            # 7 s gives headroom on first launch (keychain prompt, slow disk).
+            time.sleep(7)
 
             # Inject a single-line message that references the prompt file.
             # Newlines in the full prompt would each trigger Enter and break injection,

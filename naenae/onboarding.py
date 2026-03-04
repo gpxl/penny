@@ -6,6 +6,7 @@ Uses NSAlert and NSOpenPanel so the experience matches standard macOS convention
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ def _pick_directory() -> Path | None:
     panel = NSOpenPanel.openPanel()
     panel.setTitle_("Select Project Folder")
     panel.setMessage_(
-        "Choose a project directory that has been initialised with Beads (bd init)."
+        "Choose your project folder \u2014 Nae Nae will set up Beads automatically if needed."
     )
     panel.setCanChooseFiles_(False)
     panel.setCanChooseDirectories_(True)
@@ -155,10 +156,56 @@ def run_onboarding(
         return None
 
     # ── Write config ──────────────────────────────────────────────────────
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_config_with_comments(config_path, collected, config)
+
     updated = dict(config)
     updated["projects"] = collected
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with config_path.open("w") as fh:
-        yaml.dump(updated, fh, default_flow_style=False, allow_unicode=True)
-
     return updated
+
+
+def _write_config_with_comments(
+    config_path: Path,
+    projects: list[dict[str, Any]],
+    existing_config: dict[str, Any],
+) -> None:
+    """Write config preserving template comments.
+
+    Finds config.yaml.template, replaces only the ``projects:`` block, and
+    writes the result — so all inline docs and checklist comments survive.
+    Falls back to yaml.dump if the template cannot be found.
+    """
+    # Build the projects YAML block
+    project_lines = ["projects:"]
+    for proj in projects:
+        project_lines.append(f"  - path: {proj['path']}")
+        project_lines.append(f"    priority: {proj['priority']}")
+    projects_yaml = "\n".join(project_lines)
+
+    # Search for the template in known locations
+    template_candidates = [
+        config_path.parent / "config.yaml.template",
+        Path(__file__).parent.parent / "config.yaml.template",
+    ]
+    template_text: str | None = None
+    for candidate in template_candidates:
+        if candidate.exists():
+            template_text = candidate.read_text(encoding="utf-8")
+            break
+
+    if template_text is not None:
+        # Replace the ``projects:`` block (from the key up to the next top-level key)
+        new_text = re.sub(
+            r"(?m)^projects:.*?(?=^\w|\Z)",
+            projects_yaml + "\n\n",
+            template_text,
+            count=1,
+            flags=re.DOTALL,
+        )
+        config_path.write_text(new_text, encoding="utf-8")
+    else:
+        # Fallback: yaml.dump (loses comments but stays correct)
+        updated = dict(existing_config)
+        updated["projects"] = projects
+        with config_path.open("w") as fh:
+            yaml.dump(updated, fh, default_flow_style=False, allow_unicode=True)
