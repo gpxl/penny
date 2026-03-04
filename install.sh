@@ -197,7 +197,7 @@ if [[ -n "$CLAUDE_BIN" ]]; then
 fi
 if [[ -n "$BD_BIN" ]]; then
   BD_DIR=$(dirname "$BD_BIN")
-  if [[ "$BD_DIR" != "$CLAUDE_DIR" ]] 2>/dev/null; then
+  if [[ -z "$CLAUDE_BIN" || "$BD_DIR" != "$CLAUDE_DIR" ]]; then
     EXTRA_DIRS="$EXTRA_DIRS:$BD_DIR"
   fi
 fi

@@ -49,7 +49,7 @@ pipx install git+https://github.com/gpxl/naenae.git
 Then register the launchd service manually:
 
 ```bash
-bash ~/.local/pipx/venvs/naenae/lib/python*/site-packages/../../../bin/../share/naenae/install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/gpxl/naenae/main/install.sh)
 ```
 
 ### Option 3 — Homebrew tap
@@ -185,32 +185,47 @@ rm -rf ~/.naenae
 
 Homebrew taps must live in a **separate GitHub repository** named `homebrew-<tap-name>`. The formula file in this repo (`Formula/naenae.rb`) is a reference copy only.
 
+### One-time tap repo setup
+
+1. Create `gpxl/homebrew-naenae` on GitHub (public repo).
+2. Clone it locally:
+   ```bash
+   git clone https://github.com/gpxl/homebrew-naenae ~/homebrew-naenae
+   mkdir -p ~/homebrew-naenae/Formula
+   ```
+3. After your first release (see below), copy the updated formula and push:
+   ```bash
+   cp Formula/naenae.rb ~/homebrew-naenae/Formula/naenae.rb
+   cd ~/homebrew-naenae && git add Formula/naenae.rb && git commit -m "naenae 0.1.0" && git push
+   ```
+
 ### Publish workflow
 
-1. Tag a release:
-   ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
+Use `scripts/release.sh` to cut a release in one command:
 
-2. Compute the sha256 of the release archive:
-   ```bash
-   curl -L https://github.com/gpxl/naenae/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
-   ```
+```bash
+bash scripts/release.sh 0.2.0
+```
 
-3. Compute sha256 for PyPI resources:
-   ```bash
-   pip download --no-deps --dest /tmp rumps==0.4.0 pyyaml==6.0.2
-   shasum -a 256 /tmp/*.tar.gz /tmp/*.whl
-   ```
+This script:
+1. Validates the working tree is clean
+2. Bumps the version in `pyproject.toml` and commits it
+3. Tags `vX.Y.Z` and pushes branch + tag to GitHub
+4. Downloads the release archive and computes its sha256
+5. Updates `Formula/naenae.rb` with the new url and sha256
+6. Prints copy-paste instructions to update the tap repo
 
-4. Create (or update) `github.com/gpxl/homebrew-naenae` with `Formula/naenae.rb`, filling in the computed sha256 values.
+Then follow the printed instructions to push the tap.
 
-5. Users can then install with:
-   ```bash
-   brew tap gpxl/naenae
-   brew install naenae
-   ```
+**Dry-run (no push):**
+```bash
+bash scripts/release.sh --dry-run 0.2.0
+```
+
+**Regenerating dependency sha256s** (only needed when pinned dep versions change):
+```bash
+brew update-python-resources gpxl/naenae/naenae
+```
 
 ---
 
@@ -218,7 +233,7 @@ Homebrew taps must live in a **separate GitHub repository** named `homebrew-<tap
 
 | Module | Purpose |
 |---|---|
-| `naenae/app.py` | `rumps` app, menus, timers, orchestration |
+| `naenae/app.py` | PyObjC/AppKit app, menus, timers, orchestration |
 | `naenae/analysis.py` | Stats parsing, 90th-percentile budget estimation, capacity prediction |
 | `naenae/preflight.py` | Startup validation (claude, bd, config, stats cache) |
 | `naenae/tasks.py` | `bd ready` task discovery, priority sorting, filtering |
