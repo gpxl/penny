@@ -515,6 +515,42 @@ class Prediction:
     outage: bool = False
 
 
+def _hours_until_reset_label(label: str, tz_name: str) -> float:
+    """Parse a live reset label like '2pm' or '2:30pm' and return hours until that time.
+
+    Uses the timezone from /status (e.g. 'Europe/Amsterdam') so the result is
+    accurate regardless of the local machine's timezone.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, KeyError):
+        return 0.0
+
+    now_tz = datetime.now(tz)
+    label = label.strip().lower()
+
+    # Match "2pm", "9am", "12pm"
+    m = re.match(r"^(\d{1,2})(am|pm)$", label)
+    if m:
+        hour, meridiem = int(m.group(1)), m.group(2)
+        hour_24 = (0 if hour == 12 else hour) if meridiem == "am" else (12 if hour == 12 else hour + 12)
+        minute = 0
+    else:
+        # Match "2:30pm", "12:00am"
+        m = re.match(r"^(\d{1,2}):(\d{2})(am|pm)$", label)
+        if not m:
+            return 0.0
+        hour, minute, meridiem = int(m.group(1)), int(m.group(2)), m.group(3)
+        hour_24 = (0 if hour == 12 else hour) if meridiem == "am" else (12 if hour == 12 else hour + 12)
+
+    reset = now_tz.replace(hour=hour_24, minute=minute, second=0, microsecond=0)
+    if reset <= now_tz:
+        reset += timedelta(days=1)
+    return max(0.0, (reset - now_tz).total_seconds() / 3600)
+
+
 def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
     """Compute the full prediction from current token usage + budget estimate.
 
@@ -543,6 +579,7 @@ def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
         session_pct_all = live.session_pct
         session_reset_label = live.session_reset_label
         live_weekly_reset = live.weekly_reset_label
+        session_hours_remaining = _hours_until_reset_label(live.session_reset_label, live.session_reset_tz)
 
         # Back-calculate budget from live percentage + observed token count
         # pct = tokens / budget * 100  →  budget = tokens / (pct / 100)
@@ -563,6 +600,7 @@ def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
         pct_sonnet = (usage.output_sonnet / max(budget_sonnet, 1)) * 100 if budget_sonnet else 0.0
         session_pct_all = session.pct_all
         session_reset_label = session.session_reset_label
+        session_hours_remaining = session.hours_remaining
         live_weekly_reset = reset_label()
 
     # Projection: if current rate continues (only meaningful when budget is known)
@@ -591,7 +629,7 @@ def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
         session_start=session.session_start.isoformat(),
         session_pct_all=round(session_pct_all, 1),
         session_pct_sonnet=session.pct_sonnet,
-        session_hours_remaining=session.hours_remaining,
+        session_hours_remaining=round(session_hours_remaining, 1),
         session_reset_label=session_reset_label,
         outage=outage,
     )
