@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 # Cache TTL: match the background refresh interval so opening the popover
 # always shows data no older than one refresh cycle.
 _CACHE_TTL_SECONDS = 5 * 60
@@ -50,7 +49,7 @@ def _detect_api_error(screen_txt: str) -> bool:
     )
 
 
-def _save_cache(status: "LiveStatus") -> None:
+def _save_cache(status: LiveStatus) -> None:
     if status.outage:
         return  # don't persist outage state to disk — restart should try fresh
     try:
@@ -70,7 +69,7 @@ def _save_cache(status: "LiveStatus") -> None:
         pass
 
 
-def _load_cache() -> "LiveStatus | None":
+def _load_cache() -> LiveStatus | None:
     try:
         path = _cache_file()
         if not path.exists():

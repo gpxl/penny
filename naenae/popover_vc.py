@@ -30,8 +30,9 @@ from AppKit import (
     NSView,
     NSViewController,
 )
-from Foundation import NSEdgeInsets, NSMakeRect, NSObject
+from Foundation import NSEdgeInsets
 
+from .analysis import format_reset_label
 from .ui_components import ProgressBarView, make_label
 
 # Popover width (fixed). Height is dynamic.
@@ -64,7 +65,7 @@ def _markdown_to_attrstr(text: str) -> Any:
     bold_font = NSFont.boldSystemFontOfSize_(12.0)
     code_font = NSFont.userFixedPitchFontOfSize_(11.0)
     hdr_font = NSFont.boldSystemFontOfSize_(11.0)
-    body_color = NSColor.labelColor()
+    _body_color = NSColor.labelColor()
     dim_color = NSColor.secondaryLabelColor()
 
     result = NSMutableAttributedString.alloc().init()
@@ -162,7 +163,7 @@ def _make_button(title: str, target: Any, action: str, small: bool = True) -> NS
 class ControlCenterViewController(NSViewController):
     """Popover view controller built entirely in code."""
 
-    def init(self) -> "ControlCenterViewController":
+    def init(self) -> ControlCenterViewController:
         self = objc.super(ControlCenterViewController, self).init()
         if self is None:
             return self
@@ -261,10 +262,10 @@ class ControlCenterViewController(NSViewController):
             self._lbl_sonnet_pct.setStringValue_(f"{pred.pct_sonnet:.0f}%")
             self._lbl_session_pct.setStringValue_(f"{pred.session_pct_all:.0f}%")
             self._lbl_weekly_reset.setStringValue_(
-                f"Resets {pred.reset_label}" if pred.reset_label else "—"
+                f"Resets at {format_reset_label(pred.reset_label)}" if pred.reset_label else "—"
             )
             self._lbl_session_reset.setStringValue_(
-                f"Resets {pred.session_reset_label}" if pred.session_reset_label else "—"
+                f"Resets at {format_reset_label(pred.session_reset_label)}" if pred.session_reset_label else "—"
             )
             if self._lbl_outage_warning is not None:
                 if pred.outage:
@@ -296,7 +297,7 @@ class ControlCenterViewController(NSViewController):
         outer.addSubview_(stack)
 
         # Pin stack to outer edges
-        for attr, val in [
+        for attr, _val in [
             (NSLayoutConstraint.constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant_(
                 stack, 1, 0, outer, 1, 1.0, 0.0
             ), None),  # leading
@@ -966,33 +967,27 @@ class ControlCenterViewController(NSViewController):
         if not session:
             return
 
-        # Full path stored at spawn time — bypasses Ghostty's login-PATH gap
         tmux_bin = agent.get("tmux_bin") or "/opt/homebrew/bin/tmux"
 
         if subprocess.run([tmux_bin, "has-session", "-t", session],
                           capture_output=True).returncode == 0:
-            attach_args = [tmux_bin, "attach-session", "-t", session]
+            attach_cmd = shlex.join([tmux_bin, "attach-session", "-t", session])
         else:
-            attach_args = ["screen", "-x", session]  # legacy fallback
+            attach_cmd = shlex.join(["screen", "-x", session])  # legacy fallback
 
-        ghostty_bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
-        if os.path.exists(ghostty_bin):
-            if attach_args[0] == "screen":
-                # Ghostty sets TERM=xterm-ghostty which screen has no terminfo for.
-                # Wrap in a shell to override TERM before screen inspects it.
-                ghostty_cmd = [ghostty_bin, "-e", "bash", "-c",
-                               "TERM=xterm-256color " + shlex.join(attach_args)]
-            else:
-                # Absolute tmux path → no PATH lookup needed by Ghostty's login shell
-                ghostty_cmd = [ghostty_bin, "-e"] + attach_args
-            subprocess.Popen(ghostty_cmd, start_new_session=True)
-        else:
-            attach_cmd = shlex.join(attach_args)
-            script = (
-                'tell application "Terminal" to activate\n'
-                f'tell application "Terminal" to do script {shlex.quote(attach_cmd)}'
-            )
-            subprocess.run(["osascript", "-e", script], check=False)
+        # .command files are opened by Terminal.app natively — no AppleScript
+        # Automation permission required (unlike osascript do script).
+        import stat
+        import tempfile
+        script_content = f"#!/bin/sh\n{attach_cmd}\n"
+        fd, tmp_path = tempfile.mkstemp(suffix=".command")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(script_content)
+            os.chmod(tmp_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
+            subprocess.Popen(["open", tmp_path], start_new_session=True)
+        except Exception as exc:
+            print(f"[naenae] _controlAgent_ open terminal failed: {exc}", flush=True)
 
     def _stopAgent_(self, sender: Any) -> None:
         task_id = str(sender.representedObject() or "")

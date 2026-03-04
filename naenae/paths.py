@@ -16,5 +16,5 @@ def data_dir() -> Path:
     """Return the writable data directory, creating it if needed."""
     env = os.environ.get("NAENAE_HOME")
     d = Path(env) if env else Path.home() / ".naenae"
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
     return d

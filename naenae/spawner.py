@@ -41,6 +41,25 @@ Work autonomously. Do not ask for confirmation. Complete the full task end-to-en
 """
 
 
+def _open_in_terminal(cmd: str) -> None:
+    """Open a shell command in a new Terminal.app window using a .command file.
+
+    .command files are executed by Terminal.app natively — no AppleScript
+    Automation permission required (unlike ``osascript do script``).
+    """
+    import stat
+    import tempfile
+    script = f"#!/bin/sh\n{cmd}\n"
+    fd, path = tempfile.mkstemp(suffix=".command")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        os.chmod(path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
+        subprocess.Popen(["open", path], start_new_session=True)
+    except Exception as exc:
+        print(f"[naenae] _open_in_terminal failed: {exc}", flush=True)
+
+
 def _logs_dir() -> Path:
     d = data_dir() / "logs"
     d.mkdir(parents=True, exist_ok=True)
@@ -60,6 +79,18 @@ def _get_screen_pid(session_name: str) -> int | None:
     # screen -ls output: "\t12345.naenae-sa-xxx\t(Detached)"
     m = re.search(r"\t(\d+)\." + re.escape(session_name) + r"\t", result.stdout)
     return int(m.group(1)) if m else None
+
+
+def _tmux_pane_command(session_name: str) -> str | None:
+    """Return the current command running in the first pane, or None if session is gone."""
+    result = subprocess.run(
+        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_current_command}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    return line or None
 
 
 def _get_tmux_pid(session_name: str) -> int | None:
@@ -97,7 +128,7 @@ def spawn_claude_agent(
     interactive=True  — "Run Now" / user-triggered:
         Starts Claude in interactive mode (no -p), waits ~5 s for the TUI to
         render, then injects the task prompt via `tmux send-keys`.  Opens
-        Ghostty attached so the user lands in a live session mid-response.
+        Terminal.app attached so the user lands in a live session mid-response.
         Single continuous session — no blank-terminal wait, no context loss.
 
     interactive=False — scheduled background spawn:
@@ -139,13 +170,25 @@ def spawn_claude_agent(
         return record
 
     # Resolve binaries at spawn time so terminal PATH gaps don't matter
-    claude_bin = shutil.which("claude") or "claude"
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        raise RuntimeError(
+            "claude binary not found in PATH. Run preflight to diagnose."
+        )
     tmux_bin = shutil.which("tmux") or "tmux"
 
-    # Build environment: unset CLAUDECODE so nested sessions are allowed
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-    env.pop("CLAUDE_CODE", None)
+    # Build a minimal environment from a whitelist of known-safe variables.
+    # This prevents leakage of ANTHROPIC_API_KEY, AWS_*, DATABASE_URL, etc.
+    # from the parent process into spawned agent processes.
+    _ENV_PASSTHROUGH = {
+        "HOME", "PATH", "USER", "LOGNAME", "SHELL",
+        "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+        "TMPDIR", "XDG_RUNTIME_DIR",
+        "SSH_AUTH_SOCK",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    }
+    env = {k: v for k, v in os.environ.items() if k in _ENV_PASSTHROUGH}
 
     # Write prompt to a file — avoids shell quoting issues and lets Claude read it directly.
     prompt_file.write_text(prompt, encoding="utf-8")
@@ -186,18 +229,9 @@ def spawn_claude_agent(
             subprocess.run([tmux_bin, "send-keys", "-t", session_name, "", "Enter"],
                            check=False)
 
-            # Open Ghostty attached — user lands in a live session mid-response.
-            ghostty_bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
-            if os.path.exists(ghostty_bin):
-                subprocess.Popen(
-                    [ghostty_bin, "-e", tmux_bin, "attach-session", "-t", session_name],
-                    start_new_session=True,
-                )
-            else:
-                cmd = shlex.join([tmux_bin, "attach-session", "-t", session_name])
-                script = ('tell application "Terminal" to activate\n'
-                          f'tell application "Terminal" to do script {shlex.quote(cmd)}')
-                subprocess.run(["osascript", "-e", script], check=False)
+            # Open Terminal.app attached via a .command file — Terminal opens these
+            # natively without requiring Automation/AppleScript permissions.
+            _open_in_terminal(shlex.join([tmux_bin, "attach-session", "-t", session_name]))
 
         else:
             # ── Background path: batch runner ──────────────────────────────────────
@@ -290,7 +324,30 @@ def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
                 completed.append({**agent, "status": "completed"})
             continue
 
-        if _pid_is_alive(pid):
+        # Interactive agents: check whether claude is still the active pane command.
+        # PID-only tracking is unreliable — the original PID can be recycled by the OS
+        # after Claude exits and the pane drops to a shell.
+        if agent.get("interactive") and session and _tmux_available():
+            # Grace period: spawnTask_ calls fetch() immediately after spawning, so
+            # the tmux session may not have claude running yet. Skip the check for
+            # agents spawned less than 90 seconds ago to avoid false completions.
+            spawned_at_str = agent.get("spawned_at", "")
+            try:
+                spawned_at = datetime.fromisoformat(spawned_at_str)
+                age_secs = (datetime.now(timezone.utc) - spawned_at).total_seconds()
+            except (ValueError, TypeError):
+                age_secs = 999
+            if age_secs < 90:
+                still_running.append(agent)
+                continue
+
+            pane_cmd = _tmux_pane_command(session)
+            if pane_cmd is None or "claude" not in pane_cmd.lower():
+                # Session gone or Claude no longer running in it → done
+                completed.append({**agent, "status": "completed"})
+            else:
+                still_running.append(agent)
+        elif _pid_is_alive(pid):
             still_running.append(agent)
         else:
             completed.append({**agent, "status": "completed"})

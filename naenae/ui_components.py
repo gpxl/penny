@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import objc
 from AppKit import (
     NSBezierPath,
     NSColor,
@@ -11,7 +12,6 @@ from AppKit import (
     NSTextField,
     NSView,
 )
-import objc
 
 
 class ProgressBarView(NSView):
@@ -25,7 +25,7 @@ class ProgressBarView(NSView):
     Call ``setPct_()`` to update and trigger a repaint.
     """
 
-    def initWithFrame_(self, frame: Any) -> "ProgressBarView":
+    def initWithFrame_(self, frame: Any) -> ProgressBarView:
         self = objc.super(ProgressBarView, self).initWithFrame_(frame)
         if self is None:
             return self

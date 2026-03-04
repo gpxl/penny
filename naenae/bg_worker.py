@@ -49,7 +49,6 @@ class BackgroundWorker:
         from .analysis import build_prediction
         from .spawner import check_running_agents
         from .state import load_state, reset_period_if_needed
-        from .tasks import filter_tasks, get_ready_tasks
 
         # Reload state each cycle so we pick up changes from spawner callbacks
         state = load_state()
@@ -59,7 +58,7 @@ class BackgroundWorker:
         newly_done = check_running_agents(state)
 
         prediction = build_prediction(state, force=force)
-        projects = []  # populated by app delegate from config
+        _projects = []  # populated by app delegate from config
 
         return {
             "state": state,

@@ -18,19 +18,17 @@ from AppKit import (
     NSPopover,
     NSStatusBar,
     NSVariableStatusItemLength,
-    NSUserNotification,
-    NSUserNotificationCenter,
 )
 from Foundation import NSObject, NSTimer
 
-from .analysis import build_prediction, get_usage_bar, should_trigger, uses_24h_time
+from .analysis import should_trigger, uses_24h_time
 from .bg_worker import BackgroundWorker
-from .onboarding import fix_missing_beads, needs_onboarding, run_onboarding
+from .onboarding import needs_onboarding, run_onboarding
 from .paths import data_dir
 from .popover_vc import ControlCenterViewController
-from .preflight import format_issues_for_alert, has_errors, run_preflight
+from .preflight import format_issues_for_alert, run_preflight
 from .report import generate_report, open_report
-from .spawner import check_running_agents, send_notification, spawn_claude_agent
+from .spawner import send_notification, spawn_claude_agent
 from .state import load_state, reset_period_if_needed, save_state
 from .tasks import filter_tasks, get_ready_tasks, get_task_description
 
@@ -50,7 +48,7 @@ def _safe_load_config() -> tuple[dict[str, Any], str | None]:
 class NaeNaeApp(NSObject):
     """Main application delegate — NSStatusItem + NSPopover, no RUMPS."""
 
-    def init(self) -> "NaeNaeApp":
+    def init(self) -> NaeNaeApp:
         self = objc.super(NaeNaeApp, self).init()
         if self is None:
             return self

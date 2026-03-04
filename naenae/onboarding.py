@@ -16,7 +16,7 @@ try:
     from AppKit import (
         NSAlert,
         NSAlertFirstButtonReturn,
-        NSAlertSecondButtonReturn,
+        NSAlertSecondButtonReturn,  # noqa: F401
         NSApp,
         NSOpenPanel,
     )
@@ -128,7 +128,7 @@ def run_onboarding(
             if not _init_beads(path):
                 # bd init failed — let the user decide
                 warn = NSAlert.alloc().init()
-                warn.setMessageText_("Couldn\u2019t Set Up Beads in \u201c{}\u201d".format(path.name))
+                warn.setMessageText_(f"Couldn\u2019t Set Up Beads in \u201c{path.name}\u201d")
                 warn.setInformativeText_(
                     "Nae Nae tried to run \u2018bd init\u2019 but it failed.\n\n"
                     "Make sure \u2018bd\u2019 is installed and try again, or pick a different folder."
@@ -143,7 +143,7 @@ def run_onboarding(
 
         # Offer to add another
         another = NSAlert.alloc().init()
-        another.setMessageText_("\u201c{}\u201d Added".format(path.name))
+        another.setMessageText_(f"\u201c{path.name}\u201d Added")
         another.setInformativeText_("Would you like to add another project folder?")
         another.addButtonWithTitle_("Add Another Folder\u2026")   # default
         another.addButtonWithTitle_("Done")

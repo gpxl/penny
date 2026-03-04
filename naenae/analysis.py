@@ -15,7 +15,8 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, time as _time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,46 @@ def reset_label() -> str:
     return local.strftime(f"%a %b %-d at {time_fmt}")
 
 
+def format_reset_label(label: str) -> str:
+    """Convert the time portion of a reset label to 24h if the OS is set that way.
+
+    Handles labels as they come from status_fetcher (always 12h) or from local
+    estimation (may be "Today at 5:59 PM" style):
+    - "5:59pm"           → "17:59"         (session reset, compact)
+    - "Mar 6 at 9pm"     → "Mar 6 at 21:00" (weekly reset with date)
+    - "Today at 5:59 PM" → "Today at 17:59" (local estimation style)
+    Returns label unchanged when OS is in 12h mode or format is unrecognised.
+    """
+    if not label or label == "—":
+        return label
+    if not uses_24h_time():
+        return label
+
+    def _to_24h(h: int, mins: str, ampm: str) -> str:
+        a = ampm.upper()
+        h24 = (0 if h == 12 else h) if a == "AM" else (12 if h == 12 else h + 12)
+        return f"{h24}:{mins}" if mins != "00" else str(h24)
+
+    # "at H:MM AM/PM" — long form from local estimation ("Today at 5:59 PM")
+    m = re.search(r"at (\d+):(\d+) (AM|PM)", label, re.IGNORECASE)
+    if m:
+        return label[: m.start()] + "at " + _to_24h(int(m.group(1)), m.group(2), m.group(3))
+
+    # "at Npm" or "at N:MMpm" — from status_fetcher ("Mar 6 at 9pm")
+    m = re.search(r"at (\d+)(?::(\d+))?(am|pm)", label, re.IGNORECASE)
+    if m:
+        mins = m.group(2) or "00"
+        return label[: m.start()] + "at " + _to_24h(int(m.group(1)), mins, m.group(3))
+
+    # Pure compact time — "5:59pm", "9pm" (session reset from status_fetcher)
+    m = re.match(r"^(\d+)(?::(\d+))?(am|pm)$", label, re.IGNORECASE)
+    if m:
+        mins = m.group(2) or "00"
+        return _to_24h(int(m.group(1)), mins, m.group(3))
+
+    return label
+
+
 # ---------------------------------------------------------------------------
 # Token counting from JSONL files
 # ---------------------------------------------------------------------------
@@ -125,8 +166,11 @@ def count_tokens_since(since: datetime, until: datetime | None = None) -> TokenU
     if not projects_dir.exists():
         return usage
 
+    since_ts = since.timestamp()
     for filepath in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True):
         try:
+            if Path(filepath).stat().st_mtime < since_ts:
+                continue  # file not modified since our window — no new entries possible
             with open(filepath, errors="ignore") as fh:
                 for raw in fh:
                     raw = raw.strip()
@@ -280,8 +324,11 @@ def find_session_boundaries(since: datetime) -> list[datetime]:
     if not projects_dir.exists():
         return boundaries
 
+    since_ts = since.timestamp()
     for filepath in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True):
         try:
+            if Path(filepath).stat().st_mtime < since_ts:
+                continue  # file not modified since our window — no new entries possible
             with open(filepath, errors="ignore") as fh:
                 for raw in fh:
                     raw = raw.strip()
