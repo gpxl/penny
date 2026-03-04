@@ -27,6 +27,7 @@ from .onboarding import needs_onboarding, run_onboarding
 from .paths import data_dir
 from .popover_vc import ControlCenterViewController
 from .preflight import format_issues_for_alert, run_preflight
+from .dashboard import DashboardServer
 from .report import generate_report, open_report
 from .spawner import send_notification, spawn_claude_agent
 from .state import load_state, reset_period_if_needed, save_state
@@ -78,6 +79,9 @@ class NaeNaeApp(NSObject):
         self._popover = NSPopover.alloc().init()
         self._popover.setContentViewController_(self._vc)
         self._popover.setBehavior_(0)   # NSPopoverBehaviorApplicationDefined — avoids click-eating on macOS 26+
+
+        # Live dashboard HTTP server (lazy-started on first "View Report")
+        self._dashboard = DashboardServer(self)
 
         # Background data worker
         self._worker = BackgroundWorker(self)
@@ -416,10 +420,14 @@ class NaeNaeApp(NSObject):
 
     def viewReport_(self, sender: Any) -> None:
         try:
-            path = generate_report(self.state, self.config)
-            open_report(path)
+            port = self._dashboard.ensure_started()
+            subprocess.run(["open", f"http://127.0.0.1:{port}/"], check=False)
         except Exception:
-            pass
+            try:  # fallback to static report
+                path = generate_report(self.state, self.config)
+                open_report(path)
+            except Exception:
+                pass
         if self._popover.isShown():
             self._popover.performClose_(sender)
 
