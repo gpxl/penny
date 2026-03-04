@@ -185,8 +185,6 @@ def spawn_claude_agent(
         "LANG", "LC_ALL", "LC_CTYPE", "TERM",
         "TMPDIR", "XDG_RUNTIME_DIR",
         "SSH_AUTH_SOCK",
-        "GITHUB_TOKEN",
-        "GH_TOKEN",
     }
     env = {k: v for k, v in os.environ.items() if k in _ENV_PASSTHROUGH}
 
