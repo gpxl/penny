@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Nae Nae — install or bootstrap
+# Penny — install or bootstrap
 #
 # One-liner install (no git clone needed):
-#   curl -fsSL https://raw.githubusercontent.com/gpxl/naenae/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/gpxl/penny/main/install.sh | bash
 #
 # Re-run from an existing clone to update the launchd registration:
 #   bash install.sh
@@ -13,7 +13,7 @@
 #   --help          Show this help.
 #
 # Environment overrides:
-#   NAENAE_HOME=/other/path   Override data directory.
+#   PENNY_HOME=/other/path   Override data directory.
 #   SKIP_DEP_CHECK=1          Skip claude/bd presence checks (escape hatch).
 #
 set -euo pipefail
@@ -30,7 +30,7 @@ for arg in "$@"; do
       if [[ -f "$0" ]]; then
         sed -n '2,14p' "$0" | sed 's/^# \?//'
       else
-        echo "Nae Nae installer — run: bash install.sh [--check] [--defer-start]"
+        echo "Penny installer — run: bash install.sh [--check] [--defer-start]"
       fi
       exit 0
       ;;
@@ -47,9 +47,9 @@ done
 _src="${BASH_SOURCE[0]:-}"
 SCRIPT_DIR="$(cd "$(dirname "${_src:-$0}")" 2>/dev/null && pwd || pwd)"
 
-if [[ ! -f "$SCRIPT_DIR/naenae/app.py" ]]; then
-  INSTALL_DIR="${NAENAE_INSTALL_DIR:-$HOME/.naenae/src}"
-  echo "=== Nae Nae Bootstrap ==="
+if [[ ! -f "$SCRIPT_DIR/penny/app.py" ]]; then
+  INSTALL_DIR="${NAENAE_INSTALL_DIR:-$HOME/.penny/src}"
+  echo "=== Penny Bootstrap ==="
 
   # git is required for cloning/updating
   if ! command -v git &>/dev/null; then
@@ -63,31 +63,31 @@ if [[ ! -f "$SCRIPT_DIR/naenae/app.py" ]]; then
     git -C "$INSTALL_DIR" pull --ff-only
   else
     echo "→ Cloning to $INSTALL_DIR…"
-    git clone https://github.com/gpxl/naenae.git "$INSTALL_DIR"
+    git clone https://github.com/gpxl/penny.git "$INSTALL_DIR"
   fi
-  # Re-run from the cloned repo; set NAENAE_HOME so data goes to ~/.naenae/
-  exec env NAENAE_HOME="$HOME/.naenae" bash "$INSTALL_DIR/install.sh" "$@"
+  # Re-run from the cloned repo; set PENNY_HOME so data goes to ~/.penny/
+  exec env PENNY_HOME="$HOME/.penny" bash "$INSTALL_DIR/install.sh" "$@"
 fi
 
 # ── Local install (running from inside the repo) ──────────────────────────────
 # Data dir defaults to SCRIPT_DIR so existing dev installs keep their data in
-# place. Override with: NAENAE_HOME=/other/path bash install.sh
-NAENAE_HOME="${NAENAE_HOME:-$HOME/.naenae}"
+# place. Override with: PENNY_HOME=/other/path bash install.sh
+PENNY_HOME="${PENNY_HOME:-$HOME/.penny}"
 
-PLIST_NAME="com.gpxl.naenae"
+PLIST_NAME="com.gpxl.penny"
 PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
-LOG_DIR="$NAENAE_HOME/logs"
+LOG_DIR="$PENNY_HOME/logs"
 LAUNCHD_LOG="$LOG_DIR/launchd.log"
-CONFIG_FILE="$NAENAE_HOME/config.yaml"
+CONFIG_FILE="$PENNY_HOME/config.yaml"
 TEMPLATE="$SCRIPT_DIR/config.yaml.template"
 
 # ── Check mode header ─────────────────────────────────────────────────────────
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
-  echo "=== Nae Nae — Dependency Check ==="
+  echo "=== Penny — Dependency Check ==="
 else
-  echo "=== Nae Nae Installer ==="
+  echo "=== Penny Installer ==="
   echo "   Source : $SCRIPT_DIR"
-  echo "   Data   : $NAENAE_HOME"
+  echo "   Data   : $PENNY_HOME"
 fi
 
 # ── Python check ──────────────────────────────────────────────────────────────
@@ -222,7 +222,7 @@ fi
 echo "✓ Dependencies installed"
 
 # Create data directories
-mkdir -p "$LOG_DIR" "$NAENAE_HOME/reports"
+mkdir -p "$LOG_DIR" "$PENNY_HOME/reports"
 
 # Copy template config if none exists yet
 FRESH_CONFIG=0
@@ -268,7 +268,7 @@ cat > "$PLIST_FILE" <<PLIST
   <string>$PLIST_NAME</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$SCRIPT_DIR/NaeNae.app/Contents/MacOS/NaeNae</string>
+    <string>$SCRIPT_DIR/Penny.app/Contents/MacOS/Penny</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$SCRIPT_DIR</string>
@@ -286,8 +286,8 @@ cat > "$PLIST_FILE" <<PLIST
     <string>$LAUNCHD_PATH</string>
     <key>HOME</key>
     <string>$HOME</string>
-    <key>NAENAE_HOME</key>
-    <string>$NAENAE_HOME</string>
+    <key>PENNY_HOME</key>
+    <string>$PENNY_HOME</string>
   </dict>
 </dict>
 </plist>
@@ -309,23 +309,23 @@ fi
 if [[ "$DEFER_START" -eq 0 ]]; then
   # Unload existing service if running (bootout for macOS 13+, unload as fallback)
   if launchctl list | grep -q "$PLIST_NAME" 2>/dev/null; then
-    echo "→ Unloading existing Nae Nae service…"
+    echo "→ Unloading existing Penny service…"
     launchctl bootout "gui/$(id -u)/$PLIST_NAME" 2>/dev/null || \
       launchctl unload "$PLIST_DEST" 2>/dev/null || true
   fi
 
   launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST" 2>/dev/null || \
     launchctl load "$PLIST_DEST"
-  echo "✓ Nae Nae service loaded"
+  echo "✓ Penny service loaded"
   echo ""
-  echo "✅ Nae Nae is now running!"
-  echo "   Look for '● Nae Nae' in your macOS menu bar."
+  echo "✅ Penny is now running!"
+  echo "   Look for '● Penny' in your macOS menu bar."
   echo "   Config : $CONFIG_FILE"
   echo "   Logs   : $LAUNCHD_LOG"
 else
   echo ""
   if [[ "$FRESH_CONFIG" -eq 1 ]]; then
-    echo "⚠  Config just created — edit it before starting Nae Nae."
+    echo "⚠  Config just created — edit it before starting Penny."
   else
     echo "⚠  Deferred start (--defer-start)."
   fi

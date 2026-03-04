@@ -1,4 +1,4 @@
-"""Nae Nae — native macOS first-run onboarding wizard.
+"""Penny — native macOS first-run onboarding wizard.
 
 Uses NSAlert and NSOpenPanel so the experience matches standard macOS conventions
 (Apple Human Interface Guidelines) rather than showing raw error messages.
@@ -45,7 +45,7 @@ def _pick_directory() -> Path | None:
     panel = NSOpenPanel.openPanel()
     panel.setTitle_("Select Project Folder")
     panel.setMessage_(
-        "Choose your project folder \u2014 Nae Nae will set up Beads automatically if needed."
+        "Choose your project folder \u2014 Penny will set up Beads automatically if needed."
     )
     panel.setCanChooseFiles_(False)
     panel.setCanChooseDirectories_(True)
@@ -104,9 +104,9 @@ def run_onboarding(
 
     # ── Welcome ───────────────────────────────────────────────────────────
     welcome = NSAlert.alloc().init()
-    welcome.setMessageText_("Welcome to Nae Nae")
+    welcome.setMessageText_("Welcome to Penny")
     welcome.setInformativeText_(
-        "Nae Nae watches your Claude Max usage and automatically runs Claude agents "
+        "Penny watches your Claude Max usage and automatically runs Claude agents "
         "on your Beads tasks when spare weekly capacity is about to expire.\n\n"
         "To get started, add a project folder that has been initialised with Beads."
     )
@@ -131,7 +131,7 @@ def run_onboarding(
                 warn = NSAlert.alloc().init()
                 warn.setMessageText_(f"Couldn\u2019t Set Up Beads in \u201c{path.name}\u201d")
                 warn.setInformativeText_(
-                    "Nae Nae tried to run \u2018bd init\u2019 but it failed.\n\n"
+                    "Penny tried to run \u2018bd init\u2019 but it failed.\n\n"
                     "Make sure \u2018bd\u2019 is installed and try again, or pick a different folder."
                 )
                 warn.addButtonWithTitle_("Pick a Different Folder")   # default

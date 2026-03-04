@@ -1,4 +1,4 @@
-"""Nae Nae — pre-flight validation checks."""
+"""Penny — pre-flight validation checks."""
 
 from __future__ import annotations
 
@@ -168,7 +168,7 @@ def format_issues_for_alert(issues: list[PreflightIssue]) -> str:
 
 
 def format_issues_for_cli(issues: list[PreflightIssue]) -> str:
-    """Format issues for terminal output (naenae doctor)."""
+    """Format issues for terminal output (penny doctor)."""
     if not issues:
         return "✅ All checks passed."
 

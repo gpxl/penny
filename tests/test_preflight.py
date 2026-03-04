@@ -1,4 +1,4 @@
-"""Unit tests for naenae/preflight.py."""
+"""Unit tests for penny/preflight.py."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from naenae.preflight import (
+from penny.preflight import (
     PreflightIssue,
     format_issues_for_cli,
     has_errors,
@@ -27,16 +27,16 @@ def _minimal_config(**overrides):
 
 class TestRunPreflight:
     def test_error_when_claude_not_in_path(self):
-        with patch("naenae.preflight.shutil.which", return_value=None):
+        with patch("penny.preflight.shutil.which", return_value=None):
             issues = run_preflight(_minimal_config())
         errors = [i for i in issues if i.severity == "error"]
         assert any("`claude`" in i.message for i in errors)
 
     def test_warning_when_claude_fails_to_execute(self, tmp_path):
         with (
-            patch("naenae.preflight.shutil.which", return_value="/usr/bin/claude"),
+            patch("penny.preflight.shutil.which", return_value="/usr/bin/claude"),
             patch(
-                "naenae.preflight.subprocess.run",
+                "penny.preflight.subprocess.run",
                 side_effect=FileNotFoundError,
             ),
         ):
@@ -45,9 +45,9 @@ class TestRunPreflight:
         assert any("claude" in i.message.lower() for i in warnings)
 
     def test_error_when_no_projects_configured(self):
-        with patch("naenae.preflight.shutil.which", return_value="/usr/bin/claude"):
+        with patch("penny.preflight.shutil.which", return_value="/usr/bin/claude"):
             with patch(
-                "naenae.preflight.subprocess.run",
+                "penny.preflight.subprocess.run",
                 return_value=MagicMock(returncode=0),
             ):
                 issues = run_preflight(_minimal_config(projects=[]))
@@ -59,9 +59,9 @@ class TestRunPreflight:
             projects=[{"path": str(tmp_path / "nonexistent")}]
         )
         with (
-            patch("naenae.preflight.shutil.which", return_value="/usr/bin/claude"),
+            patch("penny.preflight.shutil.which", return_value="/usr/bin/claude"),
             patch(
-                "naenae.preflight.subprocess.run",
+                "penny.preflight.subprocess.run",
                 return_value=MagicMock(returncode=0),
             ),
         ):

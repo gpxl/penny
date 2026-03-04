@@ -1,4 +1,4 @@
-"""Unit tests for naenae/tasks.py."""
+"""Unit tests for penny/tasks.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from naenae.tasks import Task, _parse_bd_ready, get_ready_tasks
+from penny.tasks import Task, _parse_bd_ready, get_ready_tasks
 
 
 BD_READY_SAMPLE = """\
@@ -63,7 +63,7 @@ class TestGetReadyTasks:
     def test_returns_empty_when_bd_fails(self, tmp_path):
         project = {"path": str(tmp_path), "priority": 1}
         # Make the path exist but bd returns non-zero
-        with patch("naenae.tasks.subprocess.run") as mock_run:
+        with patch("penny.tasks.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=1, stdout="", stderr="error"
             )
@@ -93,7 +93,7 @@ class TestGetReadyTasks:
             {"path": str(proj1), "priority": 1},
             {"path": str(proj2), "priority": 2},
         ]
-        with patch("naenae.tasks.subprocess.run", side_effect=fake_run):
+        with patch("penny.tasks.subprocess.run", side_effect=fake_run):
             tasks = get_ready_tasks(projects)
 
         # proj1 has priority 1 (wins) even though task is P2

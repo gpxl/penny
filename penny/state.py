@@ -1,4 +1,4 @@
-"""State persistence for Nae Nae."""
+"""State persistence for Penny."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def archive_completed_session(
     tokens_all: int,
     tokens_sonnet: int,
 ) -> None:
-    """Append a completed sub-session to session_history (keeps last 20)."""
+    """Append a completed sub-session to session_history (keeps last 200)."""
     history = state.setdefault("session_history", [])
     history.append({
         "start": session_start.isoformat(),
@@ -58,35 +58,45 @@ def archive_completed_session(
         "output_all": tokens_all,
         "output_sonnet": tokens_sonnet,
     })
-    state["session_history"] = history[-20:]
+    state["session_history"] = history[-200:]
 
 
 def detect_new_sessions(state: dict[str, Any], period_start: datetime) -> dict[str, Any]:
     """
-    Detect completed sub-sessions since period_start and archive their usage.
+    Detect completed sub-sessions across the last 12 billing periods and archive them.
     Called at the start of each analysis cycle so estimate_session_budget() improves
     over time as real rate-limit data accumulates.
     """
-    from .analysis import count_tokens_since, find_session_boundaries
+    from .analysis import count_tokens_since, find_session_boundaries, past_billing_periods
 
     now = datetime.now(timezone.utc)
-    boundaries = find_session_boundaries(period_start)
+
+    # Scan all historical billing periods (last 12 weeks) in a single JSONL pass.
+    periods = past_billing_periods(12)
+    oldest_start = periods[0][0]
+    all_boundaries = find_session_boundaries(oldest_start)
 
     already_archived = {s["start"] for s in state.get("session_history", [])}
 
-    # Each boundary is the START of a new session (= END of the previous one).
-    # Build completed session pairs: (session_start, session_end).
-    sess_starts = [period_start] + boundaries[:-1] if boundaries else []
-    sess_ends = boundaries
-
-    for sess_start, sess_end in zip(sess_starts, sess_ends):
-        if sess_end > now:
-            break  # Future boundary — session not completed yet
-        start_str = sess_start.isoformat()
-        if start_str in already_archived:
+    for p_start, p_end in periods:
+        # Rate-limit boundaries that fall within this billing period.
+        period_boundaries = [b for b in all_boundaries if p_start < b <= p_end]
+        if not period_boundaries:
             continue
-        usage = count_tokens_since(sess_start, until=sess_end)
-        archive_completed_session(state, sess_start, sess_end, usage.output_all, usage.output_sonnet)
+
+        # Each boundary is the END of a session; the previous boundary (or period
+        # start) is the START of that session.
+        sess_starts = [p_start] + period_boundaries[:-1]
+        sess_ends = period_boundaries
+
+        for sess_start, sess_end in zip(sess_starts, sess_ends):
+            if sess_end > now:
+                break  # Future boundary — session not completed yet
+            start_str = sess_start.isoformat()
+            if start_str in already_archived:
+                continue
+            usage = count_tokens_since(sess_start, until=sess_end)
+            archive_completed_session(state, sess_start, sess_end, usage.output_all, usage.output_sonnet)
 
     state["last_session_scan"] = now.isoformat()
     return state

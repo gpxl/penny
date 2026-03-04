@@ -1,4 +1,4 @@
-# Nae Nae
+# Penny
 
 macOS menu bar app that monitors your Claude Max token usage, predicts unused weekly capacity, and autonomously spawns Claude Code agents on [Beads](https://github.com/beads-cli/beads) tasks before your billing period resets.
 
@@ -35,29 +35,29 @@ Claude Max subscribers who also use [Beads](https://github.com/beads-cli/beads) 
 ### Option 1 — curl one-liner (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gpxl/naenae/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gpxl/penny/main/install.sh | bash
 ```
 
-This clones the repo to `~/.naenae/src/` and runs the installer automatically.
+This clones the repo to `~/.penny/src/` and runs the installer automatically.
 
 ### Option 2 — pipx
 
 ```bash
-pipx install git+https://github.com/gpxl/naenae.git
+pipx install git+https://github.com/gpxl/penny.git
 ```
 
 Then register the launchd service manually:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/gpxl/naenae/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/gpxl/penny/main/install.sh)
 ```
 
 ### Option 3 — Homebrew tap
 
 ```bash
-brew tap gpxl/naenae
-brew install naenae
-brew services start naenae
+brew tap gpxl/penny
+brew install penny
+brew services start penny
 ```
 
 > See [Homebrew tap](#homebrew-tap) below for the publish workflow.
@@ -66,7 +66,7 @@ brew services start naenae
 
 ## First-run setup
 
-Complete all steps before Nae Nae can run agents:
+Complete all steps before Penny can run agents:
 
 1. **Install claude CLI**
    ```bash
@@ -89,19 +89,19 @@ Complete all steps before Nae Nae can run agents:
    bd init
    ```
 
-5. **Edit config** — the installer creates `~/.naenae/config.yaml` from the template. Replace the placeholder path:
+5. **Edit config** — the installer creates `~/.penny/config.yaml` from the template. Replace the placeholder path:
    ```bash
-   open ~/.naenae/config.yaml
+   open ~/.penny/config.yaml
    ```
 
 6. **Verify setup**
    ```bash
-   bash ~/.naenae/src/install.sh --check
+   bash ~/.penny/src/install.sh --check
    ```
 
 7. **Start the service**
    ```bash
-   launchctl load ~/Library/LaunchAgents/com.gpxl.naenae.plist
+   launchctl load ~/Library/LaunchAgents/com.gpxl.penny.plist
    ```
 
 > The installer auto-defers step 7 when it creates a fresh config, so you won't accidentally start with unconfigured placeholders.
@@ -110,7 +110,7 @@ Complete all steps before Nae Nae can run agents:
 
 ## Config reference
 
-Config file: `~/.naenae/config.yaml` (or `$NAENAE_HOME/config.yaml`)
+Config file: `~/.penny/config.yaml` (or `$PENNY_HOME/config.yaml`)
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -134,7 +134,7 @@ Config file: `~/.naenae/config.yaml` (or `$NAENAE_HOME/config.yaml`)
 Open **Setup Issues…** from the menu to see a full list with fix hints. Common causes:
 
 - `claude` or `bd` not in launchd PATH → re-run `bash install.sh` after installing the tools
-- Config still has `PLACEHOLDER_PROJECT_PATH` → edit `~/.naenae/config.yaml`
+- Config still has `PLACEHOLDER_PROJECT_PATH` → edit `~/.penny/config.yaml`
 - No `.beads/` directory in a project → run `bd init` inside the repo
 
 ### `claude` or `bd` not found under launchd
@@ -142,7 +142,7 @@ Open **Setup Issues…** from the menu to see a full list with fix hints. Common
 launchd uses a minimal PATH that often omits npm binary directories. Re-running `install.sh` after installing the tools injects their directories into the plist automatically:
 
 ```bash
-bash ~/.naenae/src/install.sh
+bash ~/.penny/src/install.sh
 ```
 
 ### No tasks appearing
@@ -165,38 +165,38 @@ Changes to `config.yaml` are picked up on the next 4-hour cycle or immediately v
 ### Viewing logs
 
 ```bash
-tail -f ~/.naenae/logs/launchd.log          # service stdout/stderr
-tail -f ~/.naenae/logs/agent-*.log          # per-agent logs
+tail -f ~/.penny/logs/launchd.log          # service stdout/stderr
+tail -f ~/.penny/logs/agent-*.log          # per-agent logs
 ```
 
 ### Uninstall
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.gpxl.naenae.plist
-rm ~/Library/LaunchAgents/com.gpxl.naenae.plist
-rm -rf ~/.naenae/src   # if installed via curl
+launchctl unload ~/Library/LaunchAgents/com.gpxl.penny.plist
+rm ~/Library/LaunchAgents/com.gpxl.penny.plist
+rm -rf ~/.penny/src   # if installed via curl
 # Optionally remove data:
-rm -rf ~/.naenae
+rm -rf ~/.penny
 ```
 
 ---
 
 ## Homebrew tap
 
-Homebrew taps must live in a **separate GitHub repository** named `homebrew-<tap-name>`. The formula file in this repo (`Formula/naenae.rb`) is a reference copy only.
+Homebrew taps must live in a **separate GitHub repository** named `homebrew-<tap-name>`. The formula file in this repo (`Formula/penny.rb`) is a reference copy only.
 
 ### One-time tap repo setup
 
-1. Create `gpxl/homebrew-naenae` on GitHub (public repo).
+1. Create `gpxl/homebrew-penny` on GitHub (public repo).
 2. Clone it locally:
    ```bash
-   git clone https://github.com/gpxl/homebrew-naenae ~/homebrew-naenae
-   mkdir -p ~/homebrew-naenae/Formula
+   git clone https://github.com/gpxl/homebrew-penny ~/homebrew-penny
+   mkdir -p ~/homebrew-penny/Formula
    ```
 3. After your first release (see below), copy the updated formula and push:
    ```bash
-   cp Formula/naenae.rb ~/homebrew-naenae/Formula/naenae.rb
-   cd ~/homebrew-naenae && git add Formula/naenae.rb && git commit -m "naenae 0.1.0" && git push
+   cp Formula/penny.rb ~/homebrew-penny/Formula/penny.rb
+   cd ~/homebrew-penny && git add Formula/penny.rb && git commit -m "penny 0.1.0" && git push
    ```
 
 ### Publish workflow
@@ -212,7 +212,7 @@ This script:
 2. Bumps the version in `pyproject.toml` and commits it
 3. Tags `vX.Y.Z` and pushes branch + tag to GitHub
 4. Downloads the release archive and computes its sha256
-5. Updates `Formula/naenae.rb` with the new url and sha256
+5. Updates `Formula/penny.rb` with the new url and sha256
 6. Prints copy-paste instructions to update the tap repo
 
 Then follow the printed instructions to push the tap.
@@ -224,7 +224,7 @@ bash scripts/release.sh --dry-run 0.2.0
 
 **Regenerating dependency sha256s** (only needed when pinned dep versions change):
 ```bash
-brew update-python-resources gpxl/naenae/naenae
+brew update-python-resources gpxl/penny/penny
 ```
 
 ---
@@ -233,14 +233,14 @@ brew update-python-resources gpxl/naenae/naenae
 
 | Module | Purpose |
 |---|---|
-| `naenae/app.py` | PyObjC/AppKit app, menus, timers, orchestration |
-| `naenae/analysis.py` | Stats parsing, 90th-percentile budget estimation, capacity prediction |
-| `naenae/preflight.py` | Startup validation (claude, bd, config, stats cache) |
-| `naenae/tasks.py` | `bd ready` task discovery, priority sorting, filtering |
-| `naenae/spawner.py` | `claude --dangerously-skip-permissions -p` process management |
-| `naenae/report.py` | Self-contained HTML report with SVG weekly usage chart |
-| `naenae/state.py` | JSON state persistence (`$NAENAE_HOME/state.json`) |
-| `naenae/paths.py` | Resolves `NAENAE_HOME` env var → `~/.naenae/` |
+| `penny/app.py` | PyObjC/AppKit app, menus, timers, orchestration |
+| `penny/analysis.py` | Stats parsing, 90th-percentile budget estimation, capacity prediction |
+| `penny/preflight.py` | Startup validation (claude, bd, config, stats cache) |
+| `penny/tasks.py` | `bd ready` task discovery, priority sorting, filtering |
+| `penny/spawner.py` | `claude --dangerously-skip-permissions -p` process management |
+| `penny/report.py` | Self-contained HTML report with SVG weekly usage chart |
+| `penny/state.py` | JSON state persistence (`$PENNY_HOME/state.json`) |
+| `penny/paths.py` | Resolves `PENNY_HOME` env var → `~/.penny/` |
 
 ### Timers
 

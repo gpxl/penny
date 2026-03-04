@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/release.sh — cut a Nae Nae release and update the Homebrew formula
+# scripts/release.sh — cut a Penny release and update the Homebrew formula
 #
 # Usage:
 #   bash scripts/release.sh [--dry-run] [VERSION]
@@ -12,9 +12,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-FORMULA="$PROJECT_ROOT/Formula/naenae.rb"
+FORMULA="$PROJECT_ROOT/Formula/penny.rb"
 PYPROJECT="$PROJECT_ROOT/pyproject.toml"
-GITHUB_REPO="gpxl/naenae"
+GITHUB_REPO="gpxl/penny"
 
 DRY_RUN=false
 ARGS=()
@@ -83,15 +83,15 @@ else
   echo "    [dry-run] would download archive and compute sha256"
 fi
 
-# ── 5. Update Formula/naenae.rb ──────────────────────────────────────────────
+# ── 5. Update Formula/penny.rb ──────────────────────────────────────────────
 echo ""
-echo "==> Updating Formula/naenae.rb"
+echo "==> Updating Formula/penny.rb"
 
 if [[ "$DRY_RUN" == false ]]; then
   # Replace url and the sha256 that immediately follows it (main formula sha256,
   # not the resource sha256s) in a single awk pass.
   awk -v new_url="$ARCHIVE_URL" -v sha="$SHA256" '
-    /url "https:\/\/github.com\/gpxl\/naenae\/archive/ {
+    /url "https:\/\/github.com\/gpxl\/penny\/archive/ {
       print "  url \"" new_url "\""
       next_is_sha = 1
       next
@@ -115,10 +115,10 @@ echo ""
 echo "✅  $TAG tagged and pushed."
 echo ""
 echo "Next: update the tap repo"
-echo "  cd ~/homebrew-naenae   # or wherever you cloned gpxl/homebrew-naenae"
-echo "  cp \"$FORMULA\" Formula/naenae.rb"
-echo "  git commit -am \"naenae $VERSION\""
+echo "  cd ~/homebrew-penny   # or wherever you cloned gpxl/homebrew-penny"
+echo "  cp \"$FORMULA\" Formula/penny.rb"
+echo "  git commit -am \"penny $VERSION\""
 echo "  git push"
 echo ""
 echo "Then users can install with:"
-echo "  brew tap gpxl/naenae && brew install naenae"
+echo "  brew tap gpxl/penny && brew install penny"

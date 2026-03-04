@@ -1,4 +1,4 @@
-"""Unit tests for naenae/state.py."""
+"""Unit tests for penny/state.py."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ import pytest
 class TestLoadState:
     def test_returns_defaults_when_file_missing(self, tmp_path):
         state_file = tmp_path / "state.json"
-        with patch("naenae.state.STATE_PATH", state_file):
-            from naenae.state import load_state
+        with patch("penny.state.STATE_PATH", state_file):
+            from penny.state import load_state
             state = load_state()
         assert "agents_running" in state
         assert state["agents_running"] == []
@@ -25,8 +25,8 @@ class TestLoadState:
     def test_returns_defaults_on_invalid_json(self, tmp_path):
         state_file = tmp_path / "state.json"
         state_file.write_text("not json", encoding="utf-8")
-        with patch("naenae.state.STATE_PATH", state_file):
-            from naenae.state import load_state
+        with patch("penny.state.STATE_PATH", state_file):
+            from penny.state import load_state
             state = load_state()
         assert state["agents_running"] == []
 
@@ -34,8 +34,8 @@ class TestLoadState:
 class TestSaveState:
     def test_round_trip_preserves_all_keys(self, tmp_path):
         state_file = tmp_path / "state.json"
-        with patch("naenae.state.STATE_PATH", state_file):
-            from naenae.state import load_state, save_state
+        with patch("penny.state.STATE_PATH", state_file):
+            from penny.state import load_state, save_state
             original = load_state()
             original["agents_running"] = [{"task_id": "abc", "pid": 123}]
             original["period_history"] = [{"output_all": 500}]
@@ -48,8 +48,8 @@ class TestSaveState:
     def test_atomic_write_no_tmp_left_behind(self, tmp_path):
         state_file = tmp_path / "state.json"
         tmp_file = state_file.with_suffix(".tmp")
-        with patch("naenae.state.STATE_PATH", state_file):
-            from naenae.state import load_state, save_state
+        with patch("penny.state.STATE_PATH", state_file):
+            from penny.state import load_state, save_state
             state = load_state()
             save_state(state)
         # .tmp file should be gone (renamed to state.json)
@@ -58,8 +58,8 @@ class TestSaveState:
 
     def test_persists_custom_field(self, tmp_path):
         state_file = tmp_path / "state.json"
-        with patch("naenae.state.STATE_PATH", state_file):
-            from naenae.state import load_state, save_state
+        with patch("penny.state.STATE_PATH", state_file):
+            from penny.state import load_state, save_state
             state = load_state()
             state["last_check"] = "2025-01-01T00:00:00+00:00"
             save_state(state)

@@ -1,4 +1,4 @@
-"""Unit tests for naenae/analysis.py."""
+"""Unit tests for penny/analysis.py."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from naenae.analysis import (
+from penny.analysis import (
     count_tokens_since,
     current_billing_period,
     days_until_reset,
@@ -18,7 +18,7 @@ from naenae.analysis import (
     get_usage_bar,
     should_trigger,
 )
-from naenae.analysis import Prediction
+from penny.analysis import Prediction
 
 
 # ---------------------------------------------------------------------------
@@ -65,14 +65,14 @@ class TestCountTokensSince:
     def test_sums_output_tokens_from_jsonl(self, sample_jsonl_dir):
         # sample_jsonl_dir is tmp_path; fixture creates .claude/projects/proj-abc/session1.jsonl
         since = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-        with patch("naenae.analysis.Path.home", return_value=sample_jsonl_dir):
+        with patch("penny.analysis.Path.home", return_value=sample_jsonl_dir):
             usage = count_tokens_since(since)
         # 100 sonnet + 200 opus = 300 total output; 100 sonnet only
         assert usage.output_all == 300
         assert usage.output_sonnet == 100
 
     def test_returns_zeros_when_projects_dir_missing(self, tmp_path):
-        with patch("naenae.analysis.Path.home", return_value=tmp_path):
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
             since = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
             usage = count_tokens_since(since)
         assert usage.output_all == 0
@@ -85,7 +85,7 @@ class TestCountTokensSince:
         convo = projects_dir / "bad.jsonl"
         convo.write_text("not json\n{also bad\n", encoding="utf-8")
 
-        with patch("naenae.analysis.Path.home", return_value=tmp_path):
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
             since = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
             usage = count_tokens_since(since)
         assert usage.output_all == 0
@@ -103,7 +103,7 @@ class TestCountTokensSince:
         ]
         convo.write_text("\n".join(lines), encoding="utf-8")
 
-        with patch("naenae.analysis.Path.home", return_value=tmp_path):
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
             since = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
             usage = count_tokens_since(since)
         assert usage.output_all == 0
@@ -131,7 +131,7 @@ class TestCountTokensSince:
         os.utime(convo, (old_mtime, old_mtime))
 
         since = datetime(2025, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
-        with patch("naenae.analysis.Path.home", return_value=tmp_path):
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
             usage = count_tokens_since(since)
         assert usage.output_all == 0
 
@@ -238,23 +238,23 @@ class TestFormatResetLabel:
         assert format_reset_label("—") == "—"
 
     def test_passthrough_in_12h_mode(self):
-        with patch("naenae.analysis.uses_24h_time", return_value=False):
+        with patch("penny.analysis.uses_24h_time", return_value=False):
             assert format_reset_label("9pm") == "9pm"
 
     def test_compact_12h_to_24h(self):
-        with patch("naenae.analysis.uses_24h_time", return_value=True):
+        with patch("penny.analysis.uses_24h_time", return_value=True):
             assert format_reset_label("9pm") == "21"
 
     def test_compact_with_minutes(self):
-        with patch("naenae.analysis.uses_24h_time", return_value=True):
+        with patch("penny.analysis.uses_24h_time", return_value=True):
             assert format_reset_label("5:59pm") == "17:59"
 
     def test_date_prefix_preserved(self):
-        with patch("naenae.analysis.uses_24h_time", return_value=True):
+        with patch("penny.analysis.uses_24h_time", return_value=True):
             result = format_reset_label("Mar 6 at 9pm")
             assert result == "Mar 6 at 21"
 
     def test_today_prefix_preserved(self):
-        with patch("naenae.analysis.uses_24h_time", return_value=True):
+        with patch("penny.analysis.uses_24h_time", return_value=True):
             result = format_reset_label("Today at 5:59 PM")
             assert result == "Today at 17:59"

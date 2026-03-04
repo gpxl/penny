@@ -1,4 +1,4 @@
-"""Nae Nae — Claude Max Capacity Monitor. macOS menu bar app (PyObjC, no RUMPS)."""
+"""Penny — Claude Max Capacity Monitor. macOS menu bar app (PyObjC, no RUMPS)."""
 
 from __future__ import annotations
 
@@ -46,11 +46,11 @@ def _safe_load_config() -> tuple[dict[str, Any], str | None]:
         return {}, str(exc)
 
 
-class NaeNaeApp(NSObject):
+class PennyApp(NSObject):
     """Main application delegate — NSStatusItem + NSPopover, no RUMPS."""
 
-    def init(self) -> NaeNaeApp:
-        self = objc.super(NaeNaeApp, self).init()
+    def init(self) -> PennyApp:
+        self = objc.super(PennyApp, self).init()
         if self is None:
             return self
 
@@ -200,7 +200,7 @@ class NaeNaeApp(NSObject):
             state["recently_completed"] = rc[-20:]  # keep last 20
             if self.config.get("notifications", {}).get("completion", True):
                 send_notification(
-                    "Nae Nae",
+                    "Penny",
                     f"{agent['task_id']} completed \u2713 \u2014 {agent['title']} ({agent['project']})",
                 )
         if newly_done:
@@ -301,7 +301,7 @@ class NaeNaeApp(NSObject):
         self._update_status_title()
         if self.config.get("notifications", {}).get("spawn", True):
             send_notification(
-                "Nae Nae",
+                "Penny",
                 f"Starting agent \u2014 {task.task_id}: {task.title} ({task.project_name})",
             )
         # Immediately update UI — task moves from Ready → Running Agents without reopen
@@ -407,9 +407,9 @@ class NaeNaeApp(NSObject):
                     timeout=30,
                 )
                 if r.returncode != 0:
-                    print(f"[naenae] bd {str_args} failed (rc={r.returncode}): {r.stderr.strip()}", flush=True)
+                    print(f"[penny] bd {str_args} failed (rc={r.returncode}): {r.stderr.strip()}", flush=True)
             except Exception as exc:
-                print(f"[naenae] bd {str_args} exception: {exc}", flush=True)
+                print(f"[penny] bd {str_args} exception: {exc}", flush=True)
             finally:
                 self._worker.fetch(force=True)
 
@@ -447,11 +447,11 @@ class NaeNaeApp(NSObject):
         config, yaml_err = _safe_load_config()
         if yaml_err:
             self._show_alert(
-                "Nae Nae \u2014 Config Error",
+                "Penny \u2014 Config Error",
                 f"config.yaml syntax error:\n{yaml_err}\n\nFix: open {CONFIG_PATH}",
             )
             btn = self._status_item.button()
-            btn and btn.setTitle_("\u25cf Nae Nae \u26a0")
+            btn and btn.setTitle_("\u25cf Penny \u26a0")
             return
 
         self.state = load_state()
@@ -478,17 +478,17 @@ class NaeNaeApp(NSObject):
         try:
             issues = run_preflight(config)
         except Exception as exc:
-            print(f"[naenae] preflight error: {exc}", flush=True)
+            print(f"[penny] preflight error: {exc}", flush=True)
             issues = []
         tool_errors = [
             i for i in issues
             if i.severity == "error" and "project" not in i.message.lower()
         ]
         if tool_errors:
-            self._show_alert("Nae Nae \u2014 Setup Required",
+            self._show_alert("Penny \u2014 Setup Required",
                              format_issues_for_alert(tool_errors))
             btn = self._status_item.button()
-            btn and btn.setTitle_("\u25cf Nae Nae \u26a0")
+            btn and btn.setTitle_("\u25cf Penny \u26a0")
 
         self._has_setup_issues = bool(issues)
         save_state(self.state)
@@ -518,12 +518,12 @@ class NaeNaeApp(NSObject):
                     + f". {100 - pred.projected_pct_all:.0f}% capacity unused, "
                     + f"{pred.days_remaining:.1f} days left."
                 )
-                send_notification("Nae Nae", msg)
+                send_notification("Penny", msg)
 
     def _showSetupHint_(self, timer: Any) -> None:
         """Non-blocking hint shown after the user clicks 'Set Up Later'."""
         self._show_alert(
-            "Nae Nae \u2014 Setup Deferred",
+            "Penny \u2014 Setup Deferred",
             "Click \u201c\u25cf Setup\u201d in the menu bar to complete configuration whenever you\u2019re ready.",
         )
 
@@ -539,12 +539,12 @@ class NaeNaeApp(NSObject):
 # ── PID lock ──────────────────────────────────────────────────────────────────
 
 def _acquire_pid_lock() -> None:
-    pid_file = data_dir() / "naenae.pid"
+    pid_file = data_dir() / "penny.pid"
     if pid_file.exists():
         try:
             old_pid = int(pid_file.read_text().strip())
             os.kill(old_pid, 0)
-            print(f"Nae Nae already running (PID {old_pid}). Exiting.")
+            print(f"Penny already running (PID {old_pid}). Exiting.")
             raise SystemExit(1)
         except (ProcessLookupError, ValueError):
             pass
@@ -552,7 +552,7 @@ def _acquire_pid_lock() -> None:
 
 
 def _release_pid_lock() -> None:
-    pid_file = data_dir() / "naenae.pid"
+    pid_file = data_dir() / "penny.pid"
     try:
         # Only unlink if the file still belongs to this process.
         # Prevents a slow-dying old instance from deleting the new instance's lock.
@@ -568,12 +568,12 @@ def _release_pid_lock() -> None:
 def main() -> None:
     _acquire_pid_lock()
     try:
-        setproctitle.setproctitle("Nae Nae")
+        setproctitle.setproctitle("Penny")
 
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(1)   # NSApplicationActivationPolicyAccessory
 
-        delegate = NaeNaeApp.alloc().init()
+        delegate = PennyApp.alloc().init()
         app.setDelegate_(delegate)
 
         app.run()

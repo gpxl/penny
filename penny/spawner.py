@@ -66,7 +66,7 @@ def _open_in_terminal(cmd: str) -> None:
         os.chmod(path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
         subprocess.Popen(["open", path], start_new_session=True)
     except Exception as exc:
-        print(f"[naenae] _open_in_terminal failed: {exc}", flush=True)
+        print(f"[penny] _open_in_terminal failed: {exc}", flush=True)
 
 
 def _logs_dir() -> Path:
@@ -85,7 +85,7 @@ def _get_screen_pid(session_name: str) -> int | None:
         ["screen", "-ls"],
         capture_output=True, text=True,
     )
-    # screen -ls output: "\t12345.naenae-sa-xxx\t(Detached)"
+    # screen -ls output: "\t12345.penny-sa-xxx\t(Detached)"
     m = re.search(r"\t(\d+)\." + re.escape(session_name) + r"\t", result.stdout)
     return int(m.group(1)) if m else None
 
@@ -156,7 +156,7 @@ def spawn_claude_agent(
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     log_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.log"
     prompt_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.prompt"
-    session_name = f"naenae-{task.task_id}"
+    session_name = f"penny-{task.task_id}"
 
     record: dict[str, Any] = {
         "task_id": task.task_id,

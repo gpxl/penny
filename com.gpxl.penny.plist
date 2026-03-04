@@ -4,31 +4,31 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.gpxl.naenae</string>
+  <string>com.gpxl.penny</string>
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/python3</string>
     <string>-m</string>
-    <string>naenae.app</string>
+    <string>penny.app</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/gerlando/Documents/GitHub/watcher</string>
+  <string>/Users/gerlando/Documents/GitHub/penny</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Users/gerlando/.naenae/logs/launchd.log</string>
+  <string>/Users/gerlando/.penny/logs/launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/gerlando/.naenae/logs/launchd.log</string>
+  <string>/Users/gerlando/.penny/logs/launchd.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>/Users/gerlando/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key>
     <string>/Users/gerlando</string>
-    <key>NAENAE_HOME</key>
-    <string>/Users/gerlando/.naenae</string>
+    <key>PENNY_HOME</key>
+    <string>/Users/gerlando/.penny</string>
   </dict>
 </dict>
 </plist>

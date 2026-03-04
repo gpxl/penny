@@ -1,4 +1,4 @@
-"""Usage stats parsing and capacity prediction for Nae Nae.
+"""Usage stats parsing and capacity prediction for Penny.
 
 Billing period: Anthropic resets weekly at Friday 20:00 UTC (global epoch).
 This matches the "Resets Mar 6 at 9pm (Europe/Amsterdam)" display in /status
@@ -55,6 +55,18 @@ def current_billing_period() -> tuple[datetime, datetime]:
     start = _BILLING_EPOCH + timedelta(seconds=n * _WEEK_SECONDS)
     end = start + timedelta(seconds=_WEEK_SECONDS)
     return start, end
+
+
+def past_billing_periods(n: int = 12) -> list[tuple[datetime, datetime]]:
+    """Return the last n billing periods as (start, end) pairs, sorted oldest first."""
+    start, _ = current_billing_period()
+    periods = []
+    for i in range(n):
+        p_start = start - timedelta(seconds=i * _WEEK_SECONDS)
+        p_end = p_start + timedelta(seconds=_WEEK_SECONDS)
+        periods.append((p_start, p_end))
+    periods.sort()
+    return periods
 
 
 def days_until_reset() -> float:
@@ -637,7 +649,7 @@ def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
 
 def should_trigger(prediction: Prediction, config: dict[str, Any]) -> bool:
     """
-    Returns True if Nae Nae should spawn agents.
+    Returns True if Penny should spawn agents.
     Fires when predicted unused capacity >= threshold AND ≤ N days left.
     """
     cfg = config.get("trigger", {})

@@ -34,8 +34,8 @@ _cache: LiveStatus | None = None
 
 
 def _cache_file() -> Path:
-    env = os.environ.get("NAENAE_HOME")
-    d = Path(env) if env else Path.home() / ".naenae"
+    env = os.environ.get("PENNY_HOME")
+    d = Path(env) if env else Path.home() / ".penny"
     return d / "status_cache.json"
 
 
@@ -112,13 +112,14 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     """
     Parse percentages and reset labels from the pyte-rendered Usage tab text.
 
-    Actual render order on screen:
-      Current session       → N% used  →  Resets TIME (timezone)
-      Current week (all)    → N% used  →  Resets DATE at TIME (timezone)
-      Current week (Sonnet) → N% used  (same reset line as all)
+    Labels on screen (from /status Usage tab):
+      "Current session"              → N% used  →  Resets TIME (timezone)
+      "Current week (all models)"    → N% used  →  Resets DATE at TIME (timezone)
+      "Current week (Sonnet only)"   → N% used  (same reset as all models)
 
-    So: pcts[0]=session, pcts[1]=all-models, pcts[2]=sonnet.
-    Resets: resets[0] is the session reset (short: "2pm"), resets[-1] is the weekly reset (long: "Mar 6 at 9pm").
+    With _COLS=200 each row fits on one line, so label and "N% used" appear together.
+    We extract percentages by anchoring to label text to avoid misassignment when the
+    pyte screen contains residual content from a prior tab or partial render.
 
     The pyte screen may contain remnants of the previous tab above the tab bar.
     We locate the tab bar line ("Usage" with "Config" also visible) and parse
@@ -136,27 +137,52 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
             break
 
     section = "\n".join(lines[tab_bar_idx:]) if tab_bar_idx != -1 else screen_txt
+    section_lines = section.splitlines()
 
-    pcts = re.findall(r"(\d+(?:\.\d+)?)\s*%\s*used", section)
-    # Capture both the time label AND the timezone string — works for any timezone
-    resets = re.findall(r"Resets\s+(.+?)\s*\(([^)]+)\)", section)
+    # Label-anchored extraction: find the line containing the label, then extract
+    # "N% used" from that same line.  This is immune to screen bleed-through because
+    # we never rely on the positional order of all "N% used" matches on screen.
+    _pct_re = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*used")
 
-    if len(pcts) < 3 or len(resets) < 1:
+    def _extract_labeled_pct(label_pattern: str) -> float | None:
+        for line in section_lines:
+            if re.search(label_pattern, line, re.IGNORECASE):
+                m = _pct_re.search(line)
+                if m:
+                    return float(m.group(1))
         return None
 
-    # Actual screen order: session (pcts[0]), all-models week (pcts[1]), sonnet week (pcts[2]).
-    # Resets appear: session reset first (short: "2pm"), weekly reset last (long: "Mar 6 at 9pm").
+    session_pct = _extract_labeled_pct(r"current session")
+    pct_all     = _extract_labeled_pct(r"all models")
+    pct_sonnet  = _extract_labeled_pct(r"sonnet")
+
+    # Fallback: positional parsing when label anchoring fails (e.g. narrow terminal
+    # where label and value wrap to separate lines).
+    if session_pct is None or pct_all is None or pct_sonnet is None:
+        pcts = _pct_re.findall(section)
+        if len(pcts) < 3:
+            return None
+        session_pct = float(pcts[0])
+        pct_all     = float(pcts[1])
+        pct_sonnet  = float(pcts[2])
+
+    # Capture both the time label AND the timezone string — works for any timezone.
+    # Resets: session reset first (short: "2pm"), weekly reset last (long: "Mar 6 at 9pm").
+    resets = re.findall(r"Resets\s+(.+?)\s*\(([^)]+)\)", section)
+    if len(resets) < 1:
+        return None
+
     session_reset_label = resets[0][0].strip()
     session_reset_tz    = resets[0][1].strip()
     weekly_reset_label  = resets[-1][0].strip()
     weekly_reset_tz     = resets[-1][1].strip()
 
     return LiveStatus(
-        session_pct=float(pcts[0]),
+        session_pct=session_pct,
         session_reset_label=session_reset_label,
         session_reset_tz=session_reset_tz,
-        weekly_pct_all=float(pcts[1]),
-        weekly_pct_sonnet=float(pcts[2]),
+        weekly_pct_all=pct_all,
+        weekly_pct_sonnet=pct_sonnet,
         weekly_reset_label=weekly_reset_label,
         weekly_reset_tz=weekly_reset_tz,
         fetched_at=datetime.now(timezone.utc),

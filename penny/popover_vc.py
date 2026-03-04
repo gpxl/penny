@@ -1,4 +1,4 @@
-"""Control Center popover view controller for Nae Nae.
+"""Control Center popover view controller for Penny.
 
 Builds the entire UI programmatically — no NIB/XIB required.
 Layout via NSStackView. Live updates via updateWithData_().
@@ -987,7 +987,7 @@ class ControlCenterViewController(NSViewController):
             os.chmod(tmp_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
             subprocess.Popen(["open", tmp_path], start_new_session=True)
         except Exception as exc:
-            print(f"[naenae] _controlAgent_ open terminal failed: {exc}", flush=True)
+            print(f"[penny] _controlAgent_ open terminal failed: {exc}", flush=True)
 
     def _stopAgent_(self, sender: Any) -> None:
         task_id = str(sender.representedObject() or "")

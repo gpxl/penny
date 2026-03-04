@@ -5,7 +5,7 @@
 # Usage: bash test_interactive_inject.sh
 # Exit the session with: Ctrl-C or type /exit in claude, then Ctrl-D or 'exit' in bash
 
-SESSION="naenae-inject-test"
+SESSION="penny-inject-test"
 
 # Clean up any leftover session from a previous run
 tmux kill-session -t "$SESSION" 2>/dev/null || true

@@ -1,4 +1,4 @@
-"""HTML status report generation for Nae Nae."""
+"""HTML status report generation for Penny."""
 
 from __future__ import annotations
 
@@ -121,7 +121,7 @@ def generate_report(state: dict[str, Any], config: dict[str, Any]) -> Path:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nae Nae — Status Report</title>
+<title>Penny — Status Report</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -148,7 +148,7 @@ def generate_report(state: dict[str, Any], config: dict[str, Any]) -> Path:
 </style>
 </head>
 <body>
-<h1>● Nae Nae — Status Report</h1>
+<h1>● Penny — Status Report</h1>
 <p class="subtitle">Generated {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ·
 Last check: {state.get('last_check', 'never')[:19]}</p>
 

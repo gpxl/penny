@@ -1,7 +1,7 @@
 # ────────────────────────────────────────────────────────────────────────────
-# Nae Nae — First-run setup checklist
+# Penny — First-run setup checklist
 # ────────────────────────────────────────────────────────────────────────────
-# Before Nae Nae can run agents, complete each step:
+# Before Penny can run agents, complete each step:
 #
 #   [ ] 1. Install the claude CLI:  npm install -g @anthropic-ai/claude-code
 #   [ ] 2. Authenticate:            claude auth login

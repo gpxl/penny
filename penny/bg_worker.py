@@ -1,4 +1,4 @@
-"""Background worker thread for data fetching in Nae Nae.
+"""Background worker thread for data fetching in Penny.
 
 Runs analysis off the main thread and posts results back via
 performSelectorOnMainThread_withObject_waitUntilDone_ so the UI
@@ -15,7 +15,7 @@ class BackgroundWorker:
     """Fetch usage data off the main thread; post result to the app delegate."""
 
     def __init__(self, app: Any) -> None:
-        self._app = app          # NaeNaeApp NSObject instance
+        self._app = app          # PennyApp NSObject instance
         self._lock = threading.Lock()
         self._running = False
 
@@ -32,7 +32,7 @@ class BackgroundWorker:
         try:
             result = self._fetch_data(force)
         except Exception as exc:
-            print(f"[naenae] _fetch_data exception: {exc}", flush=True)
+            print(f"[penny] _fetch_data exception: {exc}", flush=True)
             result = {"error": str(exc)}
         finally:
             with self._lock:

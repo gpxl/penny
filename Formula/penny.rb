@@ -2,35 +2,35 @@
 #
 # IMPORTANT: This file is a REFERENCE COPY only.
 # The live formula must live in the tap repo:
-#   https://github.com/gpxl/homebrew-naenae  →  Formula/naenae.rb
+#   https://github.com/gpxl/homebrew-penny  →  Formula/penny.rb
 #
 # Publishing a new release:
 #   1. Tag:  git tag vX.Y.Z && git push origin vX.Y.Z
 #   2. Get the archive sha256:
-#        curl -L https://github.com/gpxl/naenae/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+#        curl -L https://github.com/gpxl/penny/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
 #   3. Update `url` + `sha256` in this file, then copy to the tap repo.
 #   4. If any dependency version changed, regenerate resource sha256s:
-#        brew update-python-resources gpxl/naenae/naenae
+#        brew update-python-resources gpxl/penny/penny
 #   5. Push the tap repo.
 #
 # Users install with:
-#   brew tap gpxl/naenae
-#   brew install naenae
+#   brew tap gpxl/penny
+#   brew install penny
 #
 # ──────────────────────────────────────────────────────────────────────────────
 
-class Naenae < Formula
+class Penny < Formula
   include Language::Python::Virtualenv
 
   desc "Claude Max usage monitor — macOS menu bar agent"
-  homepage "https://github.com/gpxl/naenae"
-  url "https://github.com/gpxl/naenae/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/gpxl/penny"
+  url "https://github.com/gpxl/penny/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "FILL_IN_AFTER_TAGGING"
   license "MIT"
 
   # Install the latest commit for development:
-  #   brew install --HEAD gpxl/naenae/naenae
-  head "https://github.com/gpxl/naenae.git", branch: "main"
+  #   brew install --HEAD gpxl/penny/penny
+  head "https://github.com/gpxl/penny.git", branch: "main"
 
   depends_on "python@3.12"
   depends_on :macos
@@ -43,7 +43,7 @@ class Naenae < Formula
   #   shasum -a 256 /tmp/nr/*.tar.gz
   #
   # To regenerate after a version bump:
-  #   brew update-python-resources gpxl/naenae/naenae
+  #   brew update-python-resources gpxl/penny/penny
 
   resource "pyobjc-core" do
     url "https://files.pythonhosted.org/packages/source/p/pyobjc-core/pyobjc_core-12.1.tar.gz"
@@ -86,19 +86,19 @@ class Naenae < Formula
     virtualenv_install_with_resources
 
     # Ship the config template for post_install and manual bootstrapping.
-    (share/"naenae").install "config.yaml.template"
+    (share/"penny").install "config.yaml.template"
   end
 
   # ── launchd service ─────────────────────────────────────────────────────────
-  # `brew services start naenae` installs a LaunchAgent that starts Nae Nae
+  # `brew services start penny` installs a LaunchAgent that starts Penny
   # at login. LaunchAgents run in the user's GUI session — required for
   # AppKit/menu bar apps. No .app bundle or code signing needed.
 
   service do
-    run [opt_bin/"naenae"]
+    run [opt_bin/"penny"]
     keep_alive true
-    log_path var/"log/naenae.log"
-    error_log_path var/"log/naenae.log"
+    log_path var/"log/penny.log"
+    error_log_path var/"log/penny.log"
     # Ensure `claude` and `bd` (npm global installs) are on PATH.
     # std_service_path_env provides /opt/homebrew/bin and standard system dirs.
     environment_variables PATH: std_service_path_env
@@ -107,33 +107,33 @@ class Naenae < Formula
   # ── First-run config ─────────────────────────────────────────────────────────
 
   def post_install
-    config = Pathname.new(Dir.home)/".naenae"/"config.yaml"
+    config = Pathname.new(Dir.home)/".penny"/"config.yaml"
     return if config.exist?
 
-    (Pathname.new(Dir.home)/".naenae").mkpath
-    config.write (share/"naenae/config.yaml.template").read
-    opoo "Config created at #{config} — edit it before starting Nae Nae."
+    (Pathname.new(Dir.home)/".penny").mkpath
+    config.write (share/"penny/config.yaml.template").read
+    opoo "Config created at #{config} — edit it before starting Penny."
   end
 
   # ── User-facing notes ────────────────────────────────────────────────────────
 
   def caveats
-    config = Pathname.new(Dir.home)/".naenae"/"config.yaml"
+    config = Pathname.new(Dir.home)/".penny"/"config.yaml"
     <<~EOS
       Before starting, set your project paths in the config:
         open #{config}
 
       Then start the menu bar app (auto-starts at login):
-        brew services start naenae
+        brew services start penny
 
       Or run once in the foreground (useful for debugging):
-        naenae
+        penny
 
       To stop:
-        brew services stop naenae
+        brew services stop penny
 
       Logs:
-        tail -f #{var}/log/naenae.log
+        tail -f #{var}/log/penny.log
 
       Prerequisites — must be in PATH before starting the service:
         claude  →  npm install -g @anthropic-ai/claude-code
@@ -145,6 +145,6 @@ class Naenae < Formula
 
   test do
     # Verify the virtualenv can import the package without a display server.
-    system libexec/"bin/python", "-c", "import naenae; print('ok')"
+    system libexec/"bin/python", "-c", "import penny; print('ok')"
   end
 end

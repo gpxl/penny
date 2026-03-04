@@ -112,7 +112,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Nae Nae — Live Dashboard</title>
+  <title>Penny — Live Dashboard</title>
   <style>
     /* Same design tokens as report.py */
     body { font-family: -apple-system,BlinkMacSystemFont,sans-serif; background:#f9fafb; color:#111827; margin:0; padding:16px; }
@@ -138,10 +138,13 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     td { padding:4px 8px; border-bottom:1px solid #f3f4f6; vertical-align:top; }
     .stale { color:#ef4444; font-size:11px; }
     svg text { font-size:10px; fill:#9ca3af; }
+    .filter-btns { display:flex; gap:4px; margin-bottom:10px; }
+    .filter-btn { background:#f3f4f6; border:1px solid #e5e7eb; border-radius:4px; color:#6b7280; cursor:pointer; font-size:11px; font-weight:600; padding:3px 10px; }
+    .filter-btn.active { background:#3b82f6; border-color:#3b82f6; color:#fff; }
   </style>
 </head>
 <body>
-<h1>Nae Nae — Live Dashboard</h1>
+<h1>Penny — Live Dashboard</h1>
 <p class="subtitle" id="subtitle">Loading…</p>
 
 <div class="grid">
@@ -157,6 +160,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
 <script>
 let lastOk = null;
+let lastData = null;
+let historyFilter = 'week';
 
 function barColor(pct) {
   if (pct < 70) return 'bar-green';
@@ -191,13 +196,40 @@ function renderSession(pred) {
     <div class="stat-row"><span>Hours remaining</span><span>${(pred.session_hours_remaining||0).toFixed(1)}</span></div>`;
 }
 
-function renderHistory(history) {
-  if (!history || !history.length) return '<p style="color:#9ca3af;font-size:12px">No sub-session data yet.</p>';
-  const max = Math.max(...history.map(h => h.output_all||0), 1);
-  const W = 480, H = 80, n = history.length;
+function filterHistory(history, periodStart) {
+  if (historyFilter === 'week') {
+    return history.filter(h => (h.start || '') >= (periodStart || ''));
+  }
+  if (historyFilter === '4w') {
+    const cutoff = new Date(Date.now() - 28 * 86400000).toISOString();
+    return history.filter(h => (h.start || '') >= cutoff);
+  }
+  return history; // 'all'
+}
+
+function setFilter(f) {
+  historyFilter = f;
+  if (lastData) {
+    const pred = lastData.prediction || {};
+    document.getElementById('card-history').innerHTML = '<h2>Session History</h2>' + renderHistory_card(lastData.session_history, pred.period_start);
+  }
+}
+
+function renderHistory_card(history, periodStart) {
+  const filtered = filterHistory(history || [], periodStart);
+  const btns = ['week','4w','all'].map(f => {
+    const label = {week:'This week', '4w':'4 weeks', all:'All time'}[f];
+    return `<button class="filter-btn ${historyFilter===f?'active':''}" onclick="setFilter('${f}')">${label}</button>`;
+  }).join('');
+  const btnRow = `<div class="filter-btns">${btns}</div>`;
+  if (!filtered.length) {
+    return btnRow + '<p style="color:#9ca3af;font-size:12px">No sub-session data for this range.</p>';
+  }
+  const max = Math.max(...filtered.map(h => h.output_all||0), 1);
+  const W = 480, H = 80, n = filtered.length;
   const bw = Math.max(Math.floor((W - 20) / n) - 2, 4);
   let bars = '';
-  history.forEach((h, i) => {
+  filtered.forEach((h, i) => {
     const val = h.output_all || 0;
     const bh = Math.max(Math.round((val / max) * H), 2);
     const x = 10 + i * (bw + 2);
@@ -209,7 +241,7 @@ function renderHistory(history) {
     bars += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${fill}" rx="2"><title>${startLabel}: ${kTokens}k tokens</title></rect>`;
     if (n <= 8 || i % Math.ceil(n/6) === 0) bars += `<text x="${x + bw/2}" y="${H+14}" text-anchor="middle">${startLabel}</text>`;
   });
-  return `<svg viewBox="0 0 ${W} ${H+20}" style="width:100%;height:auto">${bars}</svg>`;
+  return btnRow + `<svg viewBox="0 0 ${W} ${H+20}" style="width:100%;height:auto">${bars}</svg>`;
 }
 
 function renderTasks(tasks) {
@@ -238,11 +270,12 @@ function renderCompleted(items) {
 }
 
 function render(data) {
+  lastData = data;
   const pred = data.prediction || {};
   const state = data.state || {};
   document.getElementById('card-period').innerHTML = '<h2>Billing Period Usage</h2>' + renderPeriod(pred);
   document.getElementById('card-session').innerHTML = '<h2>Current Sub-Session</h2>' + renderSession(pred);
-  document.getElementById('card-history').innerHTML = '<h2>Session History</h2>' + renderHistory(data.session_history);
+  document.getElementById('card-history').innerHTML = '<h2>Session History</h2>' + renderHistory_card(data.session_history, pred.period_start);
   document.getElementById('card-tasks').innerHTML = '<h2>Task Queue (' + (data.ready_tasks||[]).length + ' ready)</h2>' + renderTasks(data.ready_tasks);
   document.getElementById('card-agents').innerHTML = '<h2>Agents Running (' + (state.agents_running||[]).length + ')</h2>' + renderAgents(state.agents_running);
   const completed = data.completed_this_period || [];

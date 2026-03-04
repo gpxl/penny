@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for Nae Nae tests."""
+"""Shared pytest fixtures for Penny tests."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def sample_jsonl_dir(tmp_path):
     """Create a temp dir with synthetic .jsonl files for token counting tests.
 
     Mirrors the real layout: <home>/.claude/projects/<proj>/<session>.jsonl
-    Use ``patch("naenae.analysis.Path.home", return_value=tmp_path)`` in tests.
+    Use ``patch("penny.analysis.Path.home", return_value=tmp_path)`` in tests.
     """
     projects_dir = tmp_path / ".claude" / "projects" / "proj-abc"
     projects_dir.mkdir(parents=True)

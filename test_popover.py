@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Visual layout test for the Nae Nae popover.
+"""Visual layout test for the Penny popover.
 
 Shows the ControlCenterViewController in a standalone NSWindow with dummy data
 so you can verify the layout without starting the full menu bar app.
@@ -22,8 +22,8 @@ from AppKit import (
 from Foundation import NSMakeRect, NSObject
 import objc
 
-from naenae.popover_vc import ControlCenterViewController
-from naenae.analysis import Prediction
+from penny.popover_vc import ControlCenterViewController
+from penny.analysis import Prediction
 
 
 class AppDelegate(NSObject):
@@ -35,7 +35,7 @@ class AppDelegate(NSObject):
         self._win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(100, 200, 340, 600), style, NSBackingStoreBuffered, False
         )
-        self._win.setTitle_("Nae Nae — Popover Test")
+        self._win.setTitle_("Penny — Popover Test")
 
         vc = ControlCenterViewController.alloc().init()
         vc.loadView()
@@ -55,7 +55,7 @@ class AppDelegate(NSObject):
             projected_pct_all=85.0,
         )
 
-        from naenae.tasks import Task
+        from penny.tasks import Task
         dummy_tasks = [
             Task(
                 task_id="SD-g3jj",

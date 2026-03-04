@@ -1,4 +1,4 @@
-"""Custom NSView subclasses and label factories for the Nae Nae popover UI."""
+"""Custom NSView subclasses and label factories for the Penny popover UI."""
 
 from __future__ import annotations
 
