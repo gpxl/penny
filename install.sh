@@ -48,7 +48,7 @@ _src="${BASH_SOURCE[0]:-}"
 SCRIPT_DIR="$(cd "$(dirname "${_src:-$0}")" 2>/dev/null && pwd || pwd)"
 
 if [[ ! -f "$SCRIPT_DIR/penny/app.py" ]]; then
-  INSTALL_DIR="${NAENAE_INSTALL_DIR:-$HOME/.penny/src}"
+  INSTALL_DIR="${PENNY_INSTALL_DIR:-$HOME/.penny/src}"
   echo "=== Penny Bootstrap ==="
 
   # git is required for cloning/updating
@@ -145,7 +145,7 @@ if [[ "$SKIP_DEP_CHECK" -eq 0 ]]; then
   BD_BIN=$(command -v bd 2>/dev/null || true)
   if [[ -z "$BD_BIN" ]]; then
     echo "❌ 'bd' (beads) CLI not found in PATH."
-    echo "   Install: npm install -g beads-cli"
+    echo "   Install: brew install beads  (or: npm install -g @beads/bd)"
     echo "   Then re-run: bash install.sh"
     DEP_ERRORS=1
   else
@@ -221,6 +221,28 @@ if ! "$PYTHON" -m pip install --break-system-packages -r "$SCRIPT_DIR/requiremen
 fi
 echo "✓ Dependencies installed"
 
+# ── Build native launcher binary ──────────────────────────────────────────────
+LAUNCHER_SRC="$SCRIPT_DIR/launcher/main.c"
+LAUNCHER_BIN="$SCRIPT_DIR/Penny.app/Contents/MacOS/Penny"
+if [[ -f "$LAUNCHER_SRC" ]]; then
+  # Rebuild if source is newer than binary, or binary doesn't exist / isn't Mach-O
+  if [[ ! -f "$LAUNCHER_BIN" ]] || [[ "$LAUNCHER_SRC" -nt "$LAUNCHER_BIN" ]] || \
+     ! file "$LAUNCHER_BIN" | grep -q "Mach-O"; then
+    echo "→ Compiling native Penny launcher…"
+    if clang "$LAUNCHER_SRC" -o "$LAUNCHER_BIN" -mmacosx-version-min=13.0 2>&1; then
+      echo "✓ Launcher compiled"
+      echo "→ Signing Penny.app…"
+      codesign --sign - --force --deep "$SCRIPT_DIR/Penny.app" 2>/dev/null && \
+        echo "✓ Penny.app signed (ad-hoc)" || echo "⚠️  codesign failed (non-fatal)"
+    else
+      echo "❌ Launcher compile failed — clang is required. Install Xcode Command Line Tools."
+      exit 1
+    fi
+  else
+    echo "✓ Launcher binary up to date"
+  fi
+fi
+
 # Create data directories
 mkdir -p "$LOG_DIR" "$PENNY_HOME/reports"
 
@@ -237,7 +259,7 @@ fi
 # ── Build dynamic launchd PATH ────────────────────────────────────────────────
 # launchd inherits a minimal PATH that often omits npm/node bin dirs.
 # We prepend the directories containing claude and bd so agents can find them.
-BASE_LAUNCHD_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
+BASE_LAUNCHD_PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
 
 EXTRA_DIRS=""
 if [[ -n "$CLAUDE_BIN" ]]; then
@@ -288,6 +310,8 @@ cat > "$PLIST_FILE" <<PLIST
     <string>$HOME</string>
     <key>PENNY_HOME</key>
     <string>$PENNY_HOME</string>
+    <key>PYTHONPATH</key>
+    <string>$SCRIPT_DIR</string>
   </dict>
 </dict>
 </plist>

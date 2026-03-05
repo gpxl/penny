@@ -137,7 +137,7 @@ class Penny < Formula
 
       Prerequisites — must be in PATH before starting the service:
         claude  →  npm install -g @anthropic-ai/claude-code
-        bd      →  npm install -g beads-cli
+        bd      →  brew install beads  (or: npm install -g @beads/bd)
     EOS
   end
 

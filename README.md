@@ -1,6 +1,6 @@
 # Penny
 
-macOS menu bar app that monitors your Claude Max token usage, predicts unused weekly capacity, and autonomously spawns Claude Code agents on [Beads](https://github.com/beads-cli/beads) tasks before your billing period resets.
+macOS menu bar app that monitors your Claude Max token usage, predicts unused weekly capacity, and autonomously spawns Claude Code agents on [Beads](https://github.com/steveyegge/beads) tasks before your billing period resets.
 
 ---
 
@@ -14,7 +14,7 @@ macOS menu bar app that monitors your Claude Max token usage, predicts unused we
 
 ## Who it's for
 
-Claude Max subscribers who also use [Beads](https://github.com/beads-cli/beads) (`bd`) for task management and want to put spare weekly capacity to work automatically.
+Claude Max subscribers who also use [Beads](https://github.com/steveyegge/beads) (`bd`) for task management and want to put spare weekly capacity to work automatically.
 
 ---
 
@@ -25,7 +25,7 @@ Claude Max subscribers who also use [Beads](https://github.com/beads-cli/beads) 
 | macOS 12+ | Menu bar requires macOS |
 | Python 3.9+ | `python3 --version` to check |
 | `claude` CLI (authenticated) | npm install -g @anthropic-ai/claude-code |
-| `bd` CLI | npm install -g beads-cli |
+| `bd` CLI | `brew install beads` or `npm install -g @beads/bd` |
 | Claude Max subscription | Required for the usage stats this app reads |
 
 ---
@@ -80,7 +80,8 @@ Complete all steps before Penny can run agents:
 
 3. **Install beads CLI**
    ```bash
-   npm install -g beads-cli
+   brew install beads
+   # or: npm install -g @beads/bd
    ```
 
 4. **Init beads in your project(s)**

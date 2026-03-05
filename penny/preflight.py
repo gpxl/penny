@@ -57,7 +57,7 @@ def run_preflight(config: dict[str, Any]) -> list[PreflightIssue]:
         issues.append(PreflightIssue(
             severity="error",
             message="`bd` (beads) CLI not found in PATH.",
-            fix_hint="Install it: npm install -g beads-cli  (or follow beads docs)\n"
+            fix_hint="Install it: brew install beads  (or: npm install -g @beads/bd)\n"
                      "Then re-run install.sh so launchd picks up the new PATH.",
         ))
 
