@@ -525,6 +525,8 @@ class Prediction:
 
     # True when the last /status fetch returned an API error
     outage: bool = False
+    # True when live /status data is unavailable (pexpect/pyte missing or claude unreachable)
+    live_unavailable: bool = False
 
 
 def _hours_until_reset_label(label: str, tz_name: str) -> float:
@@ -585,6 +587,7 @@ def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
     # --- Override with live /status data when available ---
     live = fetch_live_status(force=force)
     outage = live.outage if live is not None else False
+    live_unavailable = live is None
     if live is not None:
         pct_all = live.weekly_pct_all
         pct_sonnet = live.weekly_pct_sonnet
@@ -644,6 +647,7 @@ def build_prediction(state: dict[str, Any], force: bool = False) -> Prediction:
         session_hours_remaining=round(session_hours_remaining, 1),
         session_reset_label=session_reset_label,
         outage=outage,
+        live_unavailable=live_unavailable,
     )
 
 

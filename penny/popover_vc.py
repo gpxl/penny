@@ -273,6 +273,16 @@ class ControlCenterViewController(NSViewController):
                         "\u26a0\ufe0f Claude API outage \u2014 usage data may be stale"
                     )
                     self._lbl_outage_warning.setHidden_(False)
+                elif pred.live_unavailable and pred.budget_all is None:
+                    self._lbl_outage_warning.setStringValue_(
+                        "Calibrating \u2014 need 1\u20132 weeks of usage history for budget estimates"
+                    )
+                    self._lbl_outage_warning.setHidden_(False)
+                elif pred.live_unavailable:
+                    self._lbl_outage_warning.setStringValue_(
+                        "Live stats unavailable \u2014 showing JSONL estimates"
+                    )
+                    self._lbl_outage_warning.setHidden_(False)
                 else:
                     self._lbl_outage_warning.setHidden_(True)
 
@@ -784,7 +794,11 @@ class ControlCenterViewController(NSViewController):
         task_id = agent.get("task_id", "?")
         title = agent.get("title", "")[:38]
         project = agent.get("project", "")
-        lbl = make_label(f"\u2713 {task_id} \u00b7 {title} ({project})", size=12.0)
+        status = agent.get("status", "completed")
+        icon = "\u2753" if status == "unknown" else "\u2713"  # ? or ✓
+        lbl = make_label(f"{icon} {task_id} \u00b7 {title} ({project})", size=12.0)
+        if status == "unknown":
+            lbl.setTextColor_(NSColor.secondaryLabelColor())
         lbl.setContentCompressionResistancePriority_forOrientation_(249, 0)
 
         dismiss_btn = _make_button("\u2715", self, "_dismissCompleted:")

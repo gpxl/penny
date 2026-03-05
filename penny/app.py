@@ -198,7 +198,7 @@ class PennyApp(NSObject):
             if not any(a.get("task_id") == agent.get("task_id") for a in rc):
                 rc.append(agent)
             state["recently_completed"] = rc[-20:]  # keep last 20
-            if self.config.get("notifications", {}).get("completion", True):
+            if agent.get("status") != "unknown" and self.config.get("notifications", {}).get("completion", True):
                 send_notification(
                     "Penny",
                     f"{agent['task_id']} completed \u2713 \u2014 {agent['title']} ({agent['project']})",
@@ -416,7 +416,6 @@ class PennyApp(NSObject):
         threading.Thread(target=_run, daemon=True).start()
 
     def _newTaskSheet_(self, sender: Any) -> None:
-        """Open config for now — TODO: implement inline task creation form."""
         subprocess.run(["open", str(CONFIG_PATH)], check=False)
 
     # ── Footer button actions ─────────────────────────────────────────────

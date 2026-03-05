@@ -229,6 +229,31 @@ brew update-python-resources gpxl/penny/penny
 
 ---
 
+## Security & Autonomous Agent Warning
+
+Penny spawns `claude --dangerously-skip-permissions` on your codebases automatically. Understand what this means before enabling:
+
+- **No permission prompts.** Claude agents will read, write, and delete files; run shell commands; create git branches; commit code; and open pull requests — all without asking for confirmation.
+- **Runs on your actual projects.** Agents work inside the directories listed in `config.yaml`. Changes are real and can be pushed to remote repositories.
+- **Triggered automatically.** When token capacity thresholds are met, Penny spawns agents on its own schedule — no user action required.
+
+### How to limit scope
+
+| Config key | What it controls |
+|---|---|
+| `work.max_agents_per_run` | Cap the number of agents spawned per 4-hour cycle (default: 2) |
+| `work.task_priority_levels` | Restrict which Beads priority labels are eligible (default: P1, P2, P3) |
+| `trigger.min_capacity_percent` | Raise this to require a larger unused-budget buffer before spawning |
+| `trigger.max_days_remaining` | Lower this to spawn only near end-of-week |
+
+### Recommended before first use
+
+1. Review all `bd ready` tasks in your configured projects — only tasks marked "ready" will be spawned.
+2. Set conservative thresholds in `config.yaml` until you are comfortable with the behaviour.
+3. Consider keeping `work.max_agents_per_run: 1` initially.
+
+---
+
 ## Architecture
 
 | Module | Purpose |

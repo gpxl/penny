@@ -63,7 +63,7 @@ def _open_in_terminal(cmd: str) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             f.write(script)
-        os.chmod(path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
+        os.chmod(path, stat.S_IRWXU)  # owner-only: no world-readable temp scripts
         subprocess.Popen(["open", path], start_new_session=True)
     except Exception as exc:
         print(f"[penny] _open_in_terminal failed: {exc}", flush=True)
@@ -253,10 +253,10 @@ def spawn_claude_agent(
             # claude -p runs to completion and exits; PID tracking detects when done.
             runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
             runner_file.write_text(
-                "import subprocess\n"
+                "import os\n"
                 f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
                 "    prompt = f.read()\n"
-                f"subprocess.run([{repr(claude_bin)}, '--dangerously-skip-permissions',"
+                f"os.execv({repr(claude_bin)}, [{repr(claude_bin)}, '--dangerously-skip-permissions',"
                 " '-p', prompt])\n",
                 encoding="utf-8",
             )
@@ -271,10 +271,10 @@ def spawn_claude_agent(
         # ── Screen fallback (background only) ──────────────────────────────────────
         runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
         runner_file.write_text(
-            "import subprocess\n"
+            "import os\n"
             f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
             "    prompt = f.read()\n"
-            f"subprocess.run([{repr(claude_bin)}, '--dangerously-skip-permissions',"
+            f"os.execv({repr(claude_bin)}, [{repr(claude_bin)}, '--dangerously-skip-permissions',"
             " '-p', prompt])\n",
             encoding="utf-8",
         )
@@ -315,11 +315,24 @@ def _pid_is_alive(pid: int) -> bool:
         return True  # can't determine — assume alive
 
 
+# Set to True after the first call to check_running_agents per process lifetime.
+# On first call (startup), dead agents are flagged "unknown" rather than "completed"
+# to avoid false completion notifications for agents that were running when Penny crashed.
+_startup_agent_check_done: bool = False
+
+
 def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Poll all running agents for completion.
     Returns list of newly-completed agent records.
+
+    On the first call after startup, agents whose PIDs are no longer alive are marked
+    "unknown" (not "completed") because Penny may have crashed while they were running —
+    their actual outcome is indeterminate.
     """
+    global _startup_agent_check_done
+    is_startup = not _startup_agent_check_done
+
     completed = []
     still_running = []
 
@@ -336,7 +349,8 @@ def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
             if session and _get_session_pid(session):
                 still_running.append(agent)
             else:
-                completed.append({**agent, "status": "completed"})
+                final_status = "unknown" if is_startup else "completed"
+                completed.append({**agent, "status": final_status})
             continue
 
         # Interactive agents: check whether claude is still the active pane command.
@@ -359,25 +373,53 @@ def check_running_agents(state: dict[str, Any]) -> list[dict[str, Any]]:
             pane_cmd = _tmux_pane_command(session)
             if pane_cmd is None or "claude" not in pane_cmd.lower():
                 # Session gone or Claude no longer running in it → done
-                completed.append({**agent, "status": "completed"})
+                final_status = "unknown" if is_startup else "completed"
+                completed.append({**agent, "status": final_status})
             else:
                 still_running.append(agent)
         elif _pid_is_alive(pid):
             still_running.append(agent)
         else:
-            completed.append({**agent, "status": "completed"})
+            final_status = "unknown" if is_startup else "completed"
+            completed.append({**agent, "status": final_status})
 
+    _startup_agent_check_done = True
     state["agents_running"] = still_running
     return completed
 
 
 def send_notification(title: str, message: str) -> None:
-    """Send a macOS Notification Center notification via NSUserNotificationCenter."""
+    """Send a macOS Notification Center notification via UNUserNotificationCenter (macOS 10.14+)."""
     try:
-        from AppKit import NSUserNotification, NSUserNotificationCenter
-        note = NSUserNotification.alloc().init()
-        note.setTitle_(title)
-        note.setInformativeText_(message)
-        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(note)
+        import uuid
+        from Foundation import NSBundle
+        # UNUserNotificationCenter requires a bundle identifier; use the app's bundle or a fallback.
+        bundle_id = NSBundle.mainBundle().bundleIdentifier() or "com.gpxl.penny"
+
+        from UserNotifications import (  # type: ignore[import]
+            UNUserNotificationCenter,
+            UNMutableNotificationContent,
+            UNNotificationRequest,
+            UNAuthorizationOptionAlert,
+            UNAuthorizationOptionSound,
+        )
+
+        center = UNUserNotificationCenter.currentNotificationCenter()
+
+        def _request_and_deliver(granted, error):
+            if not granted:
+                return
+            content = UNMutableNotificationContent.alloc().init()
+            content.setTitle_(title)
+            content.setBody_(message)
+            request = UNNotificationRequest.requestWithIdentifier_content_trigger_(
+                str(uuid.uuid4()), content, None
+            )
+            center.addNotificationRequest_withCompletionHandler_(request, None)
+
+        center.requestAuthorizationWithOptions_completionHandler_(
+            UNAuthorizationOptionAlert | UNAuthorizationOptionSound,
+            _request_and_deliver,
+        )
     except Exception:
         pass  # Notifications are best-effort
