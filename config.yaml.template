@@ -32,3 +32,7 @@ notifications:
   weekly_summary: true
 
 stats_cache_path: ~/.claude/stats-cache.json
+
+service:
+  keep_alive: true       # launchd restarts Penny automatically if it exits
+  launch_at_login: true  # Penny starts when you log in

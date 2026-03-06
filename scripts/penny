@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# penny — Penny service management CLI
+#
+# Usage: penny <start|stop|status>
+#
+set -euo pipefail
+
+PLIST_LABEL="com.gpxl.penny"
+PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+UID_VAL="$(id -u)"
+TARGET="gui/$UID_VAL/$PLIST_LABEL"
+
+_is_running() {
+  launchctl list "$PLIST_LABEL" &>/dev/null
+}
+
+case "${1:-}" in
+  start)
+    if _is_running; then
+      echo "Penny is already running."
+      exit 0
+    fi
+    if [[ ! -f "$PLIST_DEST" ]]; then
+      echo "Plist not found at $PLIST_DEST — run install.sh first."
+      exit 1
+    fi
+    launchctl bootstrap "gui/$UID_VAL" "$PLIST_DEST"
+    echo "Penny started."
+    ;;
+
+  stop)
+    if ! _is_running; then
+      echo "Penny is not running."
+      exit 0
+    fi
+    # Set KeepAlive=false in plist before stopping so launchd doesn't restart.
+    # The app's _sync_launchd_service() will restore it from config.yaml on next start.
+    python3 - "$PLIST_DEST" <<'PYEOF'
+import plistlib, sys
+path = sys.argv[1]
+with open(path, "rb") as f:
+    pl = plistlib.load(f)
+pl["KeepAlive"] = False
+with open(path, "wb") as f:
+    plistlib.dump(pl, f)
+PYEOF
+    launchctl bootout "$TARGET" 2>/dev/null || true
+    echo "Penny stopped. Run 'penny start' to restart."
+    ;;
+
+  status)
+    if _is_running; then
+      echo "Penny is running."
+    else
+      echo "Penny is not running."
+    fi
+    ;;
+
+  *)
+    echo "Usage: penny <start|stop|status>"
+    exit 1
+    ;;
+esac

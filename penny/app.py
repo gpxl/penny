@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import plistlib
 import signal
 import subprocess
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import objc
@@ -34,6 +36,20 @@ from .state import load_state, reset_period_if_needed, save_state
 from .tasks import filter_tasks, get_ready_tasks, get_task_description
 
 CONFIG_PATH = data_dir() / "config.yaml"
+
+PLIST_LABEL = "com.gpxl.penny"
+PLIST_LAUNCHAGENTS = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
+
+
+def _script_dir_from_plist() -> "Path | None":
+    """Return WorkingDirectory from installed plist (= SCRIPT_DIR)."""
+    try:
+        with PLIST_LAUNCHAGENTS.open("rb") as f:
+            pl = plistlib.load(f)
+        wd = pl.get("WorkingDirectory", "")
+        return Path(wd) if wd else None
+    except Exception:
+        return None
 
 
 def _safe_load_config() -> tuple[dict[str, Any], str | None]:
@@ -415,6 +431,71 @@ class PennyApp(NSObject):
 
         threading.Thread(target=_run, daemon=True).start()
 
+    @objc.python_method
+    def _write_config(self) -> None:
+        """Persist self.config to config.yaml."""
+        try:
+            with CONFIG_PATH.open("w") as f:
+                yaml.dump(self.config, f, default_flow_style=False, allow_unicode=True)
+        except Exception as exc:
+            print(f"[penny] _write_config failed: {exc}", flush=True)
+
+    @objc.python_method
+    def _sync_launchd_service(self) -> None:
+        """Sync plist KeepAlive/RunAtLoad from config.yaml service: section."""
+        svc = self.config.get("service", {})
+        want_keep_alive  = bool(svc.get("keep_alive", True))
+        want_run_at_load = bool(svc.get("launch_at_login", True))
+
+        if not PLIST_LAUNCHAGENTS.exists():
+            return
+
+        try:
+            with PLIST_LAUNCHAGENTS.open("rb") as f:
+                pl = plistlib.load(f)
+        except Exception as exc:
+            print(f"[penny] _sync_launchd_service read error: {exc}", flush=True)
+            return
+
+        if (pl.get("KeepAlive", True) == want_keep_alive
+                and pl.get("RunAtLoad", True) == want_run_at_load):
+            return  # already in sync — no-op
+
+        pl["KeepAlive"]  = want_keep_alive
+        pl["RunAtLoad"]  = want_run_at_load
+        plist_bytes = plistlib.dumps(pl)
+
+        try:
+            PLIST_LAUNCHAGENTS.write_bytes(plist_bytes)
+        except Exception as exc:
+            print(f"[penny] _sync_launchd_service write error: {exc}", flush=True)
+            return
+
+        # Update source copy in SCRIPT_DIR (for install.sh re-runs)
+        sd = _script_dir_from_plist()
+        if sd:
+            try:
+                (sd / f"{PLIST_LABEL}.plist").write_bytes(plist_bytes)
+            except Exception:
+                pass
+
+        uid = str(os.getuid())
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{PLIST_LABEL}"],
+                       capture_output=True, check=False)
+        subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(PLIST_LAUNCHAGENTS)],
+                       capture_output=True, check=False)
+        # If bootout succeeded, this process exits here; launchd handles restart
+
+    def toggleKeepAlive_(self, sender: Any) -> None:
+        self.config.setdefault("service", {})["keep_alive"] = bool(sender.state())
+        self._write_config()
+        self._sync_launchd_service()
+
+    def toggleLaunchAtLogin_(self, sender: Any) -> None:
+        self.config.setdefault("service", {})["launch_at_login"] = bool(sender.state())
+        self._write_config()
+        self._sync_launchd_service()
+
     def _newTaskSheet_(self, sender: Any) -> None:
         subprocess.run(["open", str(CONFIG_PATH)], check=False)
 
@@ -473,6 +554,7 @@ class PennyApp(NSObject):
                 return
 
         self.config = config
+        self._sync_launchd_service()   # apply any config.yaml service changes at startup
 
         try:
             issues = run_preflight(config)

@@ -324,6 +324,33 @@ mkdir -p "$HOME/Library/LaunchAgents"
 cp "$PLIST_FILE" "$PLIST_DEST"
 echo "✓ Plist installed to $PLIST_DEST"
 
+# ── ~/Applications symlink (Spotlight/Finder access) ────────────────────────
+APPS_DIR="$HOME/Applications"
+SYMLINK_DEST="$APPS_DIR/Penny.app"
+mkdir -p "$APPS_DIR"
+if [[ -L "$SYMLINK_DEST" && "$(readlink "$SYMLINK_DEST")" != "$SCRIPT_DIR/Penny.app" ]]; then
+  rm "$SYMLINK_DEST"
+fi
+if [[ ! -e "$SYMLINK_DEST" ]]; then
+  ln -s "$SCRIPT_DIR/Penny.app" "$SYMLINK_DEST"
+  echo "✓ Penny.app linked to $SYMLINK_DEST (Spotlight or Finder)"
+else
+  echo "✓ ~/Applications/Penny.app in place"
+fi
+
+# ── penny CLI ────────────────────────────────────────────────────────────────
+CLI_BIN_DIR="$HOME/.local/bin"
+CLI_DEST="$CLI_BIN_DIR/penny"
+mkdir -p "$CLI_BIN_DIR"
+cp "$SCRIPT_DIR/scripts/penny" "$CLI_DEST"
+chmod +x "$CLI_DEST"
+echo "✓ penny CLI installed to $CLI_DEST"
+echo "  Run: penny start | penny stop | penny status"
+if ! echo "$PATH" | tr ':' '\n' | grep -qx "$CLI_BIN_DIR"; then
+  echo "  ⚠  ~/.local/bin is not in your PATH — add it to ~/.zprofile:"
+  echo "     export PATH=\"\$HOME/.local/bin:\$PATH\""
+fi
+
 # ── Auto-defer on fresh config ────────────────────────────────────────────────
 if [[ "$FRESH_CONFIG" -eq 1 ]]; then
   DEFER_START=1

@@ -217,6 +217,8 @@ class ControlCenterViewController(NSViewController):
         # UI state
         self._expanded_task_id: str | None = None
         self._refresh_btn: Any = None
+        self._keep_alive_btn: Any = None
+        self._login_btn: Any = None
         self._last_refresh_at: datetime | None = None
         self._last_refresh_lbl: NSTextField | None = None
         self._app: Any = None      # set by app.py after construction
@@ -253,6 +255,11 @@ class ControlCenterViewController(NSViewController):
         # Guard: views not yet created (loadView not called yet)
         if self._bar_all is None:
             return
+
+        if self._keep_alive_btn is not None and self._app is not None:
+            svc = getattr(self._app, "config", {}).get("service", {})
+            self._keep_alive_btn.setState_(1 if svc.get("keep_alive", True) else 0)
+            self._login_btn.setState_(1 if svc.get("launch_at_login", True) else 0)
 
         if pred:
             self._bar_all.setPct(pred.pct_all)
@@ -467,6 +474,10 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(self._completed_nav_row)
         stack.addArrangedSubview_(self._completed_sep)
 
+        # ── Service settings ─────────────────────────────────────────────────
+        stack.addArrangedSubview_(_make_separator())
+        stack.addArrangedSubview_(self._make_service_row())
+
         # ── Footer ───────────────────────────────────────────────────────────
         footer = self._make_footer_row()
         stack.addArrangedSubview_(footer)
@@ -492,6 +503,34 @@ class ControlCenterViewController(NSViewController):
     def _make_tasks_header_row(self) -> NSView:
         self._tasks_header_lbl = make_label("Ready Tasks", size=11.0, secondary=True)
         return self._tasks_header_lbl
+
+    @objc.python_method
+    def _make_service_row(self) -> NSView:
+        row = NSStackView.alloc().init()
+        row.setOrientation_(0)   # horizontal
+        row.setSpacing_(12.0)
+        row.setDistribution_(0)
+
+        keep_alive_btn = NSButton.alloc().init()
+        keep_alive_btn.setButtonType_(3)        # NSButtonTypeSwitch (checkbox)
+        keep_alive_btn.setTitle_("Auto-restart")
+        keep_alive_btn.setTarget_(self._app)
+        keep_alive_btn.setAction_("toggleKeepAlive:")
+        keep_alive_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+
+        login_btn = NSButton.alloc().init()
+        login_btn.setButtonType_(3)
+        login_btn.setTitle_("Launch at login")
+        login_btn.setTarget_(self._app)
+        login_btn.setAction_("toggleLaunchAtLogin:")
+        login_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+
+        row.addArrangedSubview_(keep_alive_btn)
+        row.addArrangedSubview_(login_btn)
+
+        self._keep_alive_btn = keep_alive_btn
+        self._login_btn      = login_btn
+        return row
 
     @objc.python_method
     def _make_footer_row(self) -> NSView:
