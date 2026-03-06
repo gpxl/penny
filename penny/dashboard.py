@@ -1,17 +1,28 @@
 """Local HTTP dashboard server.
 
-Starts lazily on first 'View Report' click. Serves a polling live dashboard
-at http://127.0.0.1:7432/. Reads app state read-only (GIL-safe).
+Auto-starts at app launch. Serves a live dashboard at http://127.0.0.1:7432/
+and exposes a JSON API for the penny CLI. Reads/writes app state via
+main-thread dispatch (same pattern as bg_worker.py).
 """
 import dataclasses
 import http.server
 import json
+import os
 import socket
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from .analysis import format_reset_label
+
 PREFERRED_PORT = 7432
+
+
+def _port_file() -> Path:
+    env = os.environ.get("PENNY_HOME")
+    d = Path(env) if env else Path.home() / ".penny"
+    return d / ".dashboard_port"
 
 
 class DashboardServer:
@@ -33,6 +44,10 @@ class DashboardServer:
             t.start()
             self._port = port
             self._started = True
+            try:
+                _port_file().write_text(str(port))
+            except Exception:
+                pass
             return port
 
     def _pick_port(self) -> int:
@@ -50,6 +65,12 @@ class DashboardServer:
 
     def _make_handler(self):
         app = self._app
+
+        def _dispatch(selector: str, obj: Any = None, wait: bool = True) -> None:
+            """Dispatch an ObjC selector to the main thread."""
+            app.performSelectorOnMainThread_withObject_waitUntilDone_(
+                selector, obj, wait
+            )
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -71,6 +92,61 @@ class DashboardServer:
                     self.wfile.write(body)
                 else:
                     self.send_error(404)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b"{}"
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except Exception:
+                    payload = {}
+
+                if self.path == "/api/refresh":
+                    _dispatch("refreshNow:", None, True)
+                    self._ok({"ok": True})
+
+                elif self.path == "/api/quit":
+                    self._ok({"ok": True})
+                    _dispatch("quitApp:", None, False)
+
+                elif self.path == "/api/run":
+                    task_id = payload.get("task_id", "")
+                    if not task_id:
+                        self.send_error(400, "task_id required")
+                        return
+                    _dispatch("spawnTaskById:", task_id, True)
+                    self._ok({"ok": True})
+
+                elif self.path == "/api/stop-agent":
+                    task_id = payload.get("task_id", "")
+                    if not task_id:
+                        self.send_error(400, "task_id required")
+                        return
+                    _dispatch("stopAgentByTaskId:", task_id, True)
+                    self._ok({"ok": True})
+
+                elif self.path == "/api/dismiss":
+                    task_id = payload.get("task_id", "")
+                    if not task_id:
+                        self.send_error(400, "task_id required")
+                        return
+                    _dispatch("dismissCompleted:", task_id, True)
+                    self._ok({"ok": True})
+
+                elif self.path == "/api/clear-completed":
+                    _dispatch("clearAllCompleted:", None, True)
+                    self._ok({"ok": True})
+
+                else:
+                    self.send_error(404)
+
+            def _ok(self, data: dict) -> None:
+                body = json.dumps(data).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
             def log_message(self, *args):
                 pass  # Suppress request logs
@@ -98,6 +174,12 @@ def _snapshot(app) -> dict[str, Any]:
             completed.append(agent)
     completed.reverse()
 
+    # Apply OS 12/24h preference to reset labels (same as popover_vc)
+    if pred_dict.get("reset_label"):
+        pred_dict["reset_label"] = format_reset_label(pred_dict["reset_label"])
+    if pred_dict.get("session_reset_label"):
+        pred_dict["session_reset_label"] = format_reset_label(pred_dict["session_reset_label"])
+
     return {
         "generated_at": datetime.now().isoformat(),
         "state": state,
@@ -112,12 +194,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Penny — Live Dashboard</title>
+  <title>Penny Dashboard</title>
   <style>
     /* Same design tokens as report.py */
     body { font-family: -apple-system,BlinkMacSystemFont,sans-serif; background:#f9fafb; color:#111827; margin:0; padding:16px; }
-    h1 { font-size:18px; margin:0 0 4px; }
-    .subtitle { color:#6b7280; font-size:13px; margin:0 0 16px; }
+    h1 { font-size:18px; margin:0 0 16px; }
     .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
     .card { background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:14px; }
     .card h2 { font-size:13px; color:#6b7280; text-transform:uppercase; letter-spacing:.05em; margin:0 0 10px; }
@@ -136,7 +217,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     table { width:100%; border-collapse:collapse; font-size:12px; }
     th { text-align:left; color:#6b7280; font-weight:600; padding:4px 8px; border-bottom:1px solid #e5e7eb; }
     td { padding:4px 8px; border-bottom:1px solid #f3f4f6; vertical-align:top; }
-    .stale { color:#ef4444; font-size:11px; }
     svg text { font-size:10px; fill:#9ca3af; }
     .filter-btns { display:flex; gap:4px; margin-bottom:10px; }
     .filter-btn { background:#f3f4f6; border:1px solid #e5e7eb; border-radius:4px; color:#6b7280; cursor:pointer; font-size:11px; font-weight:600; padding:3px 10px; }
@@ -144,8 +224,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-<h1>Penny — Live Dashboard</h1>
-<p class="subtitle" id="subtitle">Loading…</p>
+<h1>Penny Dashboard</h1>
 
 <div class="grid">
   <div class="card" id="card-period"><h2>Billing Period Usage</h2><p>…</p></div>
@@ -289,24 +368,13 @@ async function refresh() {
     const data = await resp.json();
     render(data);
     lastOk = Date.now();
-    document.getElementById('subtitle').textContent = 'Updated just now · auto-refreshes every 10s';
-    document.getElementById('subtitle').className = 'subtitle';
   } catch (e) {
-    const ago = lastOk ? Math.round((Date.now() - lastOk) / 1000) + 's ago' : 'never';
-    document.getElementById('subtitle').innerHTML = `<span class="stale">⚠ Reconnecting… last update ${ago}</span>`;
+    // reconnecting silently
   }
 }
 
 refresh();
 setInterval(refresh, 10000);
-
-// Keep subtitle "N seconds ago" counter fresh
-setInterval(() => {
-  if (lastOk) {
-    const s = Math.round((Date.now() - lastOk) / 1000);
-    if (s > 5) document.getElementById('subtitle').textContent = `Updated ${s}s ago · auto-refreshes every 10s`;
-  }
-}, 1000);
 </script>
 </body>
 </html>"""

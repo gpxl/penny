@@ -121,6 +121,7 @@ class PennyApp(NSObject):
     # ── Startup ───────────────────────────────────────────────────────────
 
     def _startup_(self, timer: Any) -> None:
+        self._dashboard.ensure_started()
         self._load_and_refresh()
 
     # ── Toggle popover ────────────────────────────────────────────────────
@@ -328,6 +329,12 @@ class PennyApp(NSObject):
             "fetched_at": self._last_fetch_at,
         })
         self._worker.fetch()
+
+    def spawnTaskById_(self, task_id: str) -> None:
+        """Spawn an agent by task_id string — used by the dashboard API."""
+        task = next((t for t in self._all_ready_tasks if t.task_id == str(task_id)), None)
+        if task:
+            self.spawnTask_(task)
 
     def stopAgentByTaskId_(self, task_id: str) -> None:
         if not task_id:
