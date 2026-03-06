@@ -1,30 +1,5 @@
 #!/usr/bin/env bash
 # penny — Penny service management CLI
-#
-# Usage: penny <command> [args]
-#
-# Service:
-#   start              Start Penny via launchd
-#   stop               Stop Penny and keep it stopped (KeepAlive disabled)
-#   quit               Quit Penny gracefully (launchd restarts if KeepAlive is on)
-#   status             Show running/stopped status
-#
-# Data:
-#   refresh            Trigger a live data refresh
-#   tasks              List ready tasks
-#   agents             List running agents
-#
-# Actions:
-#   run <task-id>      Spawn a Claude agent for a task
-#   stop-agent <id>    Stop a running agent
-#   dismiss <id>       Dismiss a completed task notification
-#   clear-completed    Clear all completed task notifications
-#
-# UI / Config:
-#   open               Open the dashboard in your browser
-#   logs [-f]          Show recent logs (-f to follow/stream)
-#   prefs              Open config.yaml in your default editor
-#
 set -euo pipefail
 
 PLIST_LABEL="com.gpxl.penny"
@@ -32,13 +7,12 @@ PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 UID_VAL="$(id -u)"
 TARGET="gui/$UID_VAL/$PLIST_LABEL"
 
-# Resolve PENNY_HOME: honour env var, else read from plist, else default
+# Resolve PENNY_HOME: honour env var, else read from installed plist, else default
 if [[ -z "${PENNY_HOME:-}" ]]; then
   PENNY_HOME=$(python3 - "$PLIST_DEST" <<'PYEOF'
 import plistlib, os, sys
-plist = sys.argv[1]
 try:
-    with open(plist, "rb") as f:
+    with open(sys.argv[1], "rb") as f:
         pl = plistlib.load(f)
     print(pl.get("EnvironmentVariables", {}).get("PENNY_HOME", os.path.expanduser("~/.penny")))
 except Exception:
@@ -53,6 +27,73 @@ PORT_FILE="$PENNY_HOME/.dashboard_port"
 DEFAULT_PORT=7432
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+_show_help() {
+  cat <<'HELP'
+penny — Penny service management CLI
+
+Usage:
+  penny <command> [args]
+
+Service:
+  start              Start Penny via launchd
+  stop               Stop Penny and keep it stopped (KeepAlive disabled)
+  quit               Quit Penny gracefully (launchd restarts if KeepAlive is on)
+  status             Show running/stopped status
+
+Data:
+  refresh            Trigger a live data refresh
+  tasks              List ready tasks
+  agents             List running agents
+
+Actions:
+  run <task-id>      Spawn a Claude agent for a task
+  stop-agent <id>    Stop a running agent
+  dismiss <id>       Dismiss a completed task notification
+  clear-completed    Clear all completed task notifications
+
+UI / Config:
+  open               Open the dashboard in your browser
+  logs [-f]          Show recent logs (-f to follow/stream)
+  prefs              Open config.yaml in your default editor
+
+Info:
+  version, -v        Show Penny version number
+  help, -h, -?, -?   Show this help
+HELP
+}
+
+_get_version() {
+  python3 - "$PLIST_DEST" <<'PYEOF'
+import plistlib, sys
+from pathlib import Path
+try:
+    with open(sys.argv[1], "rb") as f:
+        pl = plistlib.load(f)
+    script_dir = pl.get("WorkingDirectory", "")
+    # Primary: read __version__ from penny/__init__.py
+    if script_dir:
+        init = Path(script_dir) / "penny" / "__init__.py"
+        if init.exists():
+            for line in init.read_text().splitlines():
+                if line.startswith("__version__"):
+                    print(line.split("=", 1)[1].strip().strip('"').strip("'"))
+                    raise SystemExit(0)
+    # Fallback: CFBundleShortVersionString from Info.plist
+    if script_dir:
+        info = Path(script_dir) / "Penny.app" / "Contents" / "Info.plist"
+        if info.exists():
+            with open(info, "rb") as f:
+                ip = plistlib.load(f)
+            print(ip.get("CFBundleShortVersionString", "unknown"))
+            raise SystemExit(0)
+    print("unknown")
+except SystemExit:
+    raise
+except Exception:
+    print("unknown")
+PYEOF
+}
 
 _is_running() {
   launchctl list "$PLIST_LABEL" &>/dev/null
@@ -90,9 +131,8 @@ _api_post() {
   python3 - "$port" "$path" "$body" <<'PYEOF'
 import sys, urllib.request, json
 port, path, body = sys.argv[1], sys.argv[2], sys.argv[3]
-data = body.encode()
 req = urllib.request.Request(
-    f"http://127.0.0.1:{port}{path}", data=data,
+    f"http://127.0.0.1:{port}{path}", data=body.encode(),
     headers={"Content-Type": "application/json"}
 )
 try:
@@ -116,6 +156,15 @@ _check_api_response() {
 # ── commands ──────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
+
+  help | -h | --help | '-?')
+    _show_help
+    ;;
+
+  version | -v | --version)
+    ver=$(_get_version)
+    echo "Penny $ver"
+    ;;
 
   start)
     if _is_running; then
@@ -276,7 +325,8 @@ PYEOF
     ;;
 
   *)
-    sed -n '2,20p' "$0" | sed 's/^# \?//'
+    echo "Unknown command: ${1:-}"
+    echo "Run 'penny help' for usage."
     exit 1
     ;;
 
