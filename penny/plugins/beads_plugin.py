@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..plugin import PennyPlugin, UISection
+from ..plugin import PennyPlugin
 from ..preflight import PreflightIssue
 from ..tasks import Task
 

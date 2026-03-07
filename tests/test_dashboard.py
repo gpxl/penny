@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
-import urllib.request
 import urllib.error
-from datetime import datetime, timezone
-from threading import Thread
+import urllib.request
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +13,6 @@ import pytest
 from penny.analysis import Prediction
 from penny.dashboard import DashboardServer, _snapshot
 from penny.tasks import Task
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

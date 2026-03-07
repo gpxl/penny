@@ -15,14 +15,10 @@ FakeApp in test_dashboard.py).
 
 from __future__ import annotations
 
-import dataclasses
 import json
-import os
-import plistlib
-import subprocess
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,9 +29,7 @@ import yaml
 
 from penny.analysis import Prediction
 from penny.dashboard import DashboardServer
-from penny.state import save_state
 from penny.tasks import Task
-
 
 # ── SmartFakeApp ──────────────────────────────────────────────────────────────
 
@@ -432,7 +426,6 @@ class TestJourneyLoadAndRefresh:
             issues = run_preflight(loaded)
         # May have warnings about project path but no fatal errors
         errors = [i for i in issues if i.severity == "error"]
-        project_errors = [i for i in errors if "project" in i.message.lower()]
         non_project_errors = [i for i in errors if "project" not in i.message.lower()]
         assert non_project_errors == []
 
@@ -442,7 +435,6 @@ class TestJourneyLoadAndRefresh:
         mgr.discover()
         mgr.sync_with_config(MagicMock(), loaded)
         # Beads plugin should activate if bd is available
-        active_names = [p.name for p in mgr.active_plugins]
         # Don't assert beads is active — depends on system
 
         # Step 7: Verify state is coherent

@@ -309,7 +309,6 @@ def _write_config_with_comments(
             new_text,
         )
         if agent_permissions == "scoped" and allowed_tools:
-            tools_yaml = "\n".join(f"  #   - {t}" for t in allowed_tools)
             # Uncomment the allowed_tools block if it's present as comments
             new_text = re.sub(
                 r"  # allowed_tools:.*?(?=\n\w|\Z)",

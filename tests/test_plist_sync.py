@@ -10,9 +10,7 @@ from __future__ import annotations
 import os
 import plistlib
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
 
-import pytest
 import yaml
 
 PLIST_LABEL = "com.gpxl.penny"
@@ -115,7 +113,7 @@ class TestSyncLaunchdService:
         plist_path = tmp_path / "test.plist"
         _make_plist(plist_path, keep_alive=True, run_at_load=True)
         config = {"service": {"keep_alive": True, "launch_at_login": False}}
-        cmds = _sync_launchd_service(config, plist_path)
+        _sync_launchd_service(config, plist_path)
         pl = _read_plist(plist_path)
         assert pl["KeepAlive"] is True
         assert pl["RunAtLoad"] is False
@@ -124,7 +122,7 @@ class TestSyncLaunchdService:
         plist_path = tmp_path / "test.plist"
         _make_plist(plist_path, keep_alive=True, run_at_load=True)
         config = {"service": {"keep_alive": False, "launch_at_login": False}}
-        cmds = _sync_launchd_service(config, plist_path)
+        _sync_launchd_service(config, plist_path)
         pl = _read_plist(plist_path)
         assert pl["KeepAlive"] is False
         assert pl["RunAtLoad"] is False

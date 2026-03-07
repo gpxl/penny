@@ -10,7 +10,6 @@ import pytest
 from penny.report import _history_svg, generate_report, open_report
 from penny.tasks import Task
 
-
 # ── _history_svg ─────────────────────────────────────────────────────────────
 
 

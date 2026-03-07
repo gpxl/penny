@@ -3,9 +3,32 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
+import sys
+import types as _types
 from unittest.mock import patch
+
+# ---------------------------------------------------------------------------
+# Stub macOS-only frameworks so pure-Python functions in penny.app/popover_vc
+# can be imported and tested in CI (Linux). Each AppKit/Foundation name
+# resolves to a freshly-created empty class, allowing ``class Foo(NSObject)``
+# to succeed without PyObjC installed.
+# ---------------------------------------------------------------------------
+if "objc" not in sys.modules:
+    def _stub_module(name: str) -> _types.ModuleType:
+        class _StubMod(_types.ModuleType):
+            def __getattr__(self, attr: str):
+                t = type(attr, (), {})
+                object.__setattr__(self, attr, t)
+                return t
+        mod = _StubMod(name)
+        sys.modules[name] = mod
+        return mod
+
+    _objc = _stub_module("objc")
+    _objc.python_method = staticmethod(lambda fn: fn)  # passthrough decorator
+    _stub_module("AppKit")
+    _stub_module("Foundation")
+    _stub_module("setproctitle")
 
 import pytest
 

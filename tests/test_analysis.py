@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from penny.analysis import (
+    Prediction,
     count_tokens_since,
     current_billing_period,
     days_until_reset,
@@ -18,8 +16,6 @@ from penny.analysis import (
     get_usage_bar,
     should_trigger,
 )
-from penny.analysis import Prediction
-
 
 # ---------------------------------------------------------------------------
 # current_billing_period
@@ -126,7 +122,7 @@ class TestCountTokensSince:
             encoding="utf-8",
         )
         # Set mtime to well before our 'since' timestamp
-        import os, time
+        import os
         old_mtime = 0  # epoch
         os.utime(convo, (old_mtime, old_mtime))
 

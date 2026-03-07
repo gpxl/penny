@@ -25,12 +25,12 @@ from Foundation import NSObject, NSTimer
 
 from .analysis import should_trigger, uses_24h_time
 from .bg_worker import BackgroundWorker
+from .dashboard import DashboardServer
 from .onboarding import check_full_permissions_consent, needs_onboarding, run_onboarding
 from .paths import data_dir
 from .plugin import PluginManager
 from .popover_vc import ControlCenterViewController
 from .preflight import format_issues_for_alert, run_preflight
-from .dashboard import DashboardServer
 from .report import generate_report, open_report
 from .spawner import send_notification, spawn_claude_agent
 from .state import load_state, reset_period_if_needed, save_state
@@ -41,7 +41,7 @@ PLIST_LABEL = "com.gpxl.penny"
 PLIST_LAUNCHAGENTS = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
 
 
-def _script_dir_from_plist() -> "Path | None":
+def _script_dir_from_plist() -> Path | None:
     """Return WorkingDirectory from installed plist (= SCRIPT_DIR)."""
     try:
         with PLIST_LAUNCHAGENTS.open("rb") as f:

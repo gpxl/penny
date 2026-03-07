@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
-
 
 # We need to patch STATE_PATH before importing state to avoid touching the real filesystem.
 # The module-level STATE_PATH = data_dir() / "state.json" runs at import time.

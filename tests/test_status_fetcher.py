@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import json
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from penny.status_fetcher import (
     LiveStatus,
@@ -20,7 +16,6 @@ from penny.status_fetcher import (
     fetch_live_status,
     status_as_prediction_overrides,
 )
-
 
 # ── _detect_api_error ─────────────────────────────────────────────────────────
 

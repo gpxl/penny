@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from penny.state import (
     _default_state,
@@ -15,7 +12,6 @@ from penny.state import (
     load_state,
     save_state,
 )
-
 
 # ── load_state ───────────────────────────────────────────────────────────────
 

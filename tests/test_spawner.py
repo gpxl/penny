@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from penny.spawner import (
     _build_claude_flags,
     _get_screen_pid,

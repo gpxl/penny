@@ -5,11 +5,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from penny.tasks import Task
 from penny.plugins.beads_plugin import AGENT_PROMPT_TEMPLATE, Plugin, _parse_bd_ready, _run_bd
-
+from penny.tasks import Task
 
 BD_READY_SAMPLE = """\
 1. [● P1] [task] SetDigger-abc: Fix broken search

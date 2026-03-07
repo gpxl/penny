@@ -6,7 +6,6 @@ and task/agent action methods — all without requiring a running AppKit event l
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,7 +13,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from penny.analysis import Prediction
-
 
 # ── _compact_reset_time ──────────────────────────────────────────────────────
 #
@@ -30,6 +28,7 @@ def _compact_reset_time(label: str) -> str:
     reflected here. If they drift, the integration tests will catch it.
     """
     import re
+
     from penny.analysis import uses_24h_time
 
     if not label or label == "\u2014":
@@ -720,8 +719,9 @@ class TestLoadAndRefreshLogic:
 
     def test_yaml_error_stops_refresh(self):
         """If config has YAML error, status title shows warning and no fetch."""
-        from penny.app import _safe_load_config
         import tempfile
+
+        from penny.app import _safe_load_config
         with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
             f.write("bad: [unclosed\n")
             f.flush()
@@ -835,7 +835,7 @@ class TestConfigHotReload:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("projects: []")
 
-        from penny.app import _config_mtime, _safe_load_config
+        from penny.app import _config_mtime
         with patch("penny.app.CONFIG_PATH", cfg):
             mt1 = _config_mtime()
 

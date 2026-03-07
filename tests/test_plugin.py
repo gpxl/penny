@@ -11,7 +11,6 @@ from penny.plugin import PennyPlugin, PluginManager, UISection
 from penny.preflight import PreflightIssue
 from penny.tasks import Task
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 

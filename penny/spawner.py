@@ -70,7 +70,6 @@ def _open_in_terminal(cmd: str) -> None:
     """
     import stat
     import tempfile
-    import threading
 
     # Wrap the command so the .command file deletes itself after 30 s
     script = (
@@ -420,16 +419,13 @@ def send_notification(title: str, message: str) -> None:
     """Send a macOS Notification Center notification via UNUserNotificationCenter (macOS 10.14+)."""
     try:
         import uuid
-        from Foundation import NSBundle
-        # UNUserNotificationCenter requires a bundle identifier; use the app's bundle or a fallback.
-        bundle_id = NSBundle.mainBundle().bundleIdentifier() or "com.gpxl.penny"
 
         from UserNotifications import (  # type: ignore[import]
-            UNUserNotificationCenter,
-            UNMutableNotificationContent,
-            UNNotificationRequest,
             UNAuthorizationOptionAlert,
             UNAuthorizationOptionSound,
+            UNMutableNotificationContent,
+            UNNotificationRequest,
+            UNUserNotificationCenter,
         )
 
         center = UNUserNotificationCenter.currentNotificationCenter()
