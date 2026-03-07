@@ -25,7 +25,7 @@ if "objc" not in sys.modules:
         return mod
 
     _objc = _stub_module("objc")
-    _objc.python_method = staticmethod(lambda fn: fn)  # passthrough decorator
+    _objc.python_method = lambda fn: fn  # passthrough decorator
     _stub_module("AppKit")
     _stub_module("Foundation")
     _stub_module("setproctitle")
