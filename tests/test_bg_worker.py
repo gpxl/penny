@@ -102,3 +102,28 @@ class TestBackgroundWorker:
             import time
             time.sleep(0.2)
         assert worker._running is False
+
+    def test_fetch_data_calls_detect_new_sessions(self):
+        """_fetch_data must call detect_new_sessions so session history is populated."""
+        from datetime import datetime, timezone
+
+        fake_state = {
+            "agents_running": [],
+            "session_history": [],
+            "last_session_scan": None,
+            "plugin_state": {},
+        }
+        fake_period_start = datetime(2024, 1, 5, 20, 0, 0, tzinfo=timezone.utc)
+
+        with (
+            patch("penny.state.load_state", return_value=fake_state),
+            patch("penny.state.reset_period_if_needed", return_value=fake_state),
+            patch("penny.analysis.current_billing_period", return_value=(fake_period_start, None)),
+            patch("penny.state.detect_new_sessions", return_value=fake_state) as mock_detect,
+            patch("penny.state.save_state"),
+            patch("penny.spawner.check_running_agents", return_value=[]),
+            patch("penny.analysis.build_prediction", return_value=None),
+        ):
+            BackgroundWorker._fetch_data(force=False)
+
+        mock_detect.assert_called_once_with(fake_state, fake_period_start)

@@ -90,6 +90,31 @@ def _parse_bd_ready(output: str, project_path: str) -> list[Task]:
     return tasks
 
 
+def _parse_bd_list(output: str, project_path: str) -> list[Task]:
+    """Parse `bd list --status=closed` output into Task objects.
+
+    Format: ✓ <id> [P<n>] [<type>] - <title>
+    """
+    tasks = []
+    project_name = Path(project_path).name
+    pattern = re.compile(r"✓\s+([\w-]+)\s+\[(P\d)\]\s+\[.*?\]\s+-\s+(.+)")
+    for line in output.splitlines():
+        m = pattern.search(line)
+        if not m:
+            continue
+        tasks.append(
+            Task(
+                task_id=m.group(1).strip(),
+                title=m.group(3).strip(),
+                priority=m.group(2),
+                project_path=project_path,
+                project_name=project_name,
+                raw_line=line.strip(),
+            )
+        )
+    return tasks
+
+
 class Plugin(PennyPlugin):
     """Beads issue tracker integration."""
 
@@ -214,7 +239,7 @@ class Plugin(PennyPlugin):
             if not Path(path).exists():
                 continue
             output = _run_bd(["list", "--status=closed"], path)
-            tasks = _parse_bd_ready(output, path)
+            tasks = _parse_bd_list(output, path)
             for task in tasks:
                 if task.task_id not in seen_ids:
                     new_tasks.append(task)

@@ -232,10 +232,12 @@ def _snapshot(app) -> dict[str, Any]:
 
     # Plugin-contributed cards ({name, html} per active plugin)
     plugin_cards: list[dict[str, Any]] = []
+    active_plugin_names: list[str] = []
     plugin_mgr = getattr(app, "_plugin_mgr", None)
     if plugin_mgr is not None:
         try:
             plugin_cards = plugin_mgr.get_dashboard_cards(state, app.config or {})
+            active_plugin_names = [p.name for p in plugin_mgr.active_plugins]
         except Exception:
             pass
 
@@ -247,6 +249,7 @@ def _snapshot(app) -> dict[str, Any]:
         "completed_this_period": completed,
         "session_history": state.get("session_history", []),
         "plugin_cards": plugin_cards,
+        "active_plugins": active_plugin_names,
     }
 
 
@@ -420,8 +423,15 @@ function renderHistory_card(history, periodStart) {
   return btnRow + `<svg viewBox="0 0 ${W} ${H+20}" style="width:100%;height:auto">${bars}</svg>`;
 }
 
-function renderTasks(tasks) {
-  if (!tasks || !tasks.length) return '<p style="color:#9ca3af;font-size:12px">No ready tasks.</p>';
+function renderTasks(tasks, activePlugins) {
+  if (!tasks || !tasks.length) {
+    if (!activePlugins || !activePlugins.includes('beads')) {
+      return '<p style="color:#9ca3af;font-size:12px">Task management not active. ' +
+             'Install the <a href="https://github.com/steveyegge/beads" target="_blank">beads CLI</a> ' +
+             '(<code>brew install beads</code>) to enable automatic task spawning.</p>';
+    }
+    return '<p style="color:#9ca3af;font-size:12px">No ready tasks.</p>';
+  }
   const rows = tasks.map(t => {
     const cls = {P1:'p1',P2:'p2',P3:'p3'}[t.priority]||'p3';
     return `<tr><td>${t.task_id}</td><td>${t.project_name}</td><td><span class="badge ${cls}">${t.priority}</span></td><td>${t.title}</td></tr>`;
@@ -460,7 +470,7 @@ function render(data) {
   document.getElementById('card-period').innerHTML = '<h2>Billing Period Usage</h2>' + renderPeriod(pred);
   document.getElementById('card-session').innerHTML = '<h2>Current Sub-Session</h2>' + renderSession(pred);
   document.getElementById('card-history').innerHTML = '<h2>Session History</h2>' + renderHistory_card(data.session_history, pred.period_start);
-  document.getElementById('card-tasks').innerHTML = '<h2>Task Queue (' + (data.ready_tasks||[]).length + ' ready)</h2>' + renderTasks(data.ready_tasks);
+  document.getElementById('card-tasks').innerHTML = '<h2>Task Queue (' + (data.ready_tasks||[]).length + ' ready)</h2>' + renderTasks(data.ready_tasks, data.active_plugins);
   document.getElementById('card-agents').innerHTML = '<h2>Agents Running (' + (state.agents_running||[]).length + ')</h2>' + renderAgents(state.agents_running);
   const completed = data.completed_this_period || [];
   document.getElementById('card-completed').innerHTML = '<h2>Completed This Period (' + completed.length + ')</h2>' + renderCompleted(completed);

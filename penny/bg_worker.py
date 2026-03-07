@@ -46,13 +46,16 @@ class BackgroundWorker:
     @staticmethod
     def _fetch_data(force: bool) -> dict[str, Any]:
         """Gather all data needed by the UI. Called on a background thread."""
-        from .analysis import build_prediction
+        from .analysis import build_prediction, current_billing_period
         from .spawner import check_running_agents
-        from .state import load_state, reset_period_if_needed
+        from .state import detect_new_sessions, load_state, reset_period_if_needed, save_state
 
         # Reload state each cycle so we pick up changes from spawner callbacks
         state = load_state()
         state = reset_period_if_needed(state)
+        start, _ = current_billing_period()
+        state = detect_new_sessions(state, start)
+        save_state(state)
 
         # Check for newly completed agents before building prediction
         newly_done = check_running_agents(state)

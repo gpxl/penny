@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
-from penny.plugins.beads_plugin import AGENT_PROMPT_TEMPLATE, Plugin, _parse_bd_ready, _run_bd
+from penny.plugins.beads_plugin import AGENT_PROMPT_TEMPLATE, Plugin, _parse_bd_list, _parse_bd_ready, _run_bd
 from penny.tasks import Task
 
 BD_READY_SAMPLE = """\
@@ -51,6 +51,49 @@ class TestParseBdReady:
             tasks = _parse_bd_ready(line, "/tmp/proj")
             assert len(tasks) == 1
             assert tasks[0].priority == p
+
+
+BD_LIST_CLOSED_SAMPLE = """\
+✓ proj-aaa [P1] [task] - Fix critical bug
+✓ proj-bbb [P2] [feature] - Add export button
+✓ proj-ccc [P3] [bug] - Minor display glitch
+"""
+
+BD_LIST_CLOSED_MALFORMED = """\
+this line has no check mark
+also bad
+✓ missing-brackets title here
+"""
+
+
+class TestParseBdList:
+    def test_parses_well_formed_lines(self):
+        tasks = _parse_bd_list(BD_LIST_CLOSED_SAMPLE, "/tmp/proj")
+        assert len(tasks) == 3
+        assert tasks[0].task_id == "proj-aaa"
+        assert tasks[0].title == "Fix critical bug"
+        assert tasks[0].priority == "P1"
+        assert tasks[0].project_path == "/tmp/proj"
+        assert tasks[0].project_name == "proj"
+
+    def test_skips_malformed_lines_without_crashing(self):
+        tasks = _parse_bd_list(BD_LIST_CLOSED_MALFORMED, "/tmp/proj")
+        assert tasks == []
+
+    def test_empty_output_returns_empty_list(self):
+        assert _parse_bd_list("", "/tmp/proj") == []
+
+    def test_priority_p1_through_p4(self):
+        for p in ["P1", "P2", "P3", "P4"]:
+            line = f"✓ proj-xyz [{p}] [task] - Some title\n"
+            tasks = _parse_bd_list(line, "/tmp/proj")
+            assert len(tasks) == 1
+            assert tasks[0].priority == p
+
+    def test_does_not_match_bd_ready_format(self):
+        ready_line = "1. [● P2] [task] proj-abc: Done task\n"
+        tasks = _parse_bd_list(ready_line, "/tmp/proj")
+        assert tasks == []
 
 
 class TestBeadsPluginGetTasks:
@@ -119,7 +162,7 @@ class TestBeadsPluginGetCompletedTasks:
     def test_returns_parsed_closed_tasks(self, tmp_path):
         plugin = Plugin()
         project = {"path": str(tmp_path), "priority": 1}
-        sample = "1. [● P2] [task] proj-abc: Done task\n"
+        sample = "✓ proj-abc [P2] [task] - Done task\n"
         with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=sample)
             tasks = plugin.get_completed_tasks([project], {})
@@ -130,7 +173,7 @@ class TestBeadsPluginGetCompletedTasks:
     def test_deduplicates_via_plugin_state(self, tmp_path):
         plugin = Plugin()
         project = {"path": str(tmp_path), "priority": 1}
-        sample = "1. [● P2] [task] proj-abc: Done task\n"
+        sample = "✓ proj-abc [P2] [task] - Done task\n"
         plugin_state = {"seen_closed_ids": ["proj-abc"]}
         with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=sample)
@@ -140,7 +183,7 @@ class TestBeadsPluginGetCompletedTasks:
     def test_updates_plugin_state_with_new_ids(self, tmp_path):
         plugin = Plugin()
         project = {"path": str(tmp_path), "priority": 1}
-        sample = "1. [● P2] [task] proj-abc: Done task\n"
+        sample = "✓ proj-abc [P2] [task] - Done task\n"
         plugin_state: dict = {}
         with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=sample)

@@ -29,13 +29,20 @@ Claude Max subscribers who also use [Beads](https://github.com/steveyegge/beads)
 
 ## Requirements
 
+**Required**
+
 | Requirement | Notes |
 |---|---|
 | macOS 12+ | Menu bar requires macOS |
 | Python 3.9+ | `python3 --version` to check |
-| `claude` CLI (authenticated) | npm install -g @anthropic-ai/claude-code |
-| `bd` CLI | `brew install beads` or `npm install -g @beads/bd` |
+| `claude` CLI (authenticated) | `npm install -g @anthropic-ai/claude-code` |
 | Claude Max subscription | Required for the usage stats this app reads |
+
+**Optional**
+
+| Requirement | Notes |
+|---|---|
+| `bd` CLI | `brew install beads` or `npm install -g @beads/bd` — enables automatic agent task spawning; Penny runs without it as a usage monitor only |
 
 ---
 
@@ -75,8 +82,6 @@ brew services start penny
 
 ## First-run setup
 
-Complete all steps before Penny can run agents:
-
 1. **Install claude CLI**
    ```bash
    npm install -g @anthropic-ai/claude-code
@@ -87,34 +92,40 @@ Complete all steps before Penny can run agents:
    claude auth login
    ```
 
-3. **Install beads CLI**
+3. **Edit config** — the installer creates `~/.penny/config.yaml` from the template. Replace the placeholder path:
+   ```bash
+   open ~/.penny/config.yaml
+   ```
+
+4. **Verify setup**
+   ```bash
+   bash ~/.penny/src/install.sh --check
+   ```
+
+5. **Start the service**
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.gpxl.penny.plist
+   ```
+
+> The installer auto-defers step 5 when it creates a fresh config, so you won't accidentally start with unconfigured placeholders.
+
+### Optional: Enable task automation with Beads
+
+Penny monitors token usage without Beads. To also enable autonomous agent spawning on Beads tasks:
+
+1. **Install beads CLI**
    ```bash
    brew install beads
    # or: npm install -g @beads/bd
    ```
 
-4. **Init beads in your project(s)**
+2. **Init beads in your project(s)**
    ```bash
    cd ~/Documents/GitHub/your-repo
    bd init
    ```
 
-5. **Edit config** — the installer creates `~/.penny/config.yaml` from the template. Replace the placeholder path:
-   ```bash
-   open ~/.penny/config.yaml
-   ```
-
-6. **Verify setup**
-   ```bash
-   bash ~/.penny/src/install.sh --check
-   ```
-
-7. **Start the service**
-   ```bash
-   launchctl load ~/Library/LaunchAgents/com.gpxl.penny.plist
-   ```
-
-> The installer auto-defers step 7 when it creates a fresh config, so you won't accidentally start with unconfigured placeholders.
+Penny auto-detects `bd` in PATH and activates the plugin automatically.
 
 ---
 
