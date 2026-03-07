@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from penny.tasks import Task
-from penny.plugins.beads_plugin import Plugin, _parse_bd_ready
+from penny.plugins.beads_plugin import AGENT_PROMPT_TEMPLATE, Plugin, _parse_bd_ready, _run_bd
 
 
 BD_READY_SAMPLE = """\
@@ -103,3 +103,252 @@ class TestBeadsPluginGetTasks:
         # proj1 has priority 1 (wins) even though task is P2
         assert tasks[0].project_name == "proj1"
         assert tasks[1].project_name == "proj2"
+
+
+# ── _run_bd helper ────────────────────────────────────────────────────────────
+
+
+class TestRunBd:
+    def test_returns_stdout_on_success(self, tmp_path):
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="hello\n")
+            result = _run_bd(["ready"], str(tmp_path))
+        assert result == "hello\n"
+        mock_run.assert_called_once()
+
+    def test_returns_empty_on_timeout(self, tmp_path):
+        with patch(
+            "penny.plugins.beads_plugin.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="bd", timeout=30),
+        ):
+            assert _run_bd(["ready"], str(tmp_path)) == ""
+
+    def test_returns_empty_when_bd_not_found(self, tmp_path):
+        with patch(
+            "penny.plugins.beads_plugin.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            assert _run_bd(["ready"], str(tmp_path)) == ""
+
+
+# ── Plugin identity / availability ────────────────────────────────────────────
+
+
+class TestBeadsPluginIdentity:
+    def test_name(self):
+        assert Plugin().name == "beads"
+
+    def test_description_is_nonempty_string(self):
+        assert isinstance(Plugin().description, str)
+        assert len(Plugin().description) > 0
+
+    def test_is_available_true_when_bd_exists(self):
+        with patch("penny.plugins.beads_plugin.shutil.which", return_value="/usr/local/bin/bd"):
+            assert Plugin().is_available() is True
+
+    def test_is_available_false_when_bd_missing(self):
+        with patch("penny.plugins.beads_plugin.shutil.which", return_value=None):
+            assert Plugin().is_available() is False
+
+
+# ── on_activate / on_deactivate ───────────────────────────────────────────────
+
+
+class TestBeadsPluginLifecycle:
+    def test_on_activate_stores_app(self):
+        plugin = Plugin()
+        app = MagicMock()
+        plugin.on_activate(app)
+        assert plugin._app is app
+
+    def test_on_deactivate_clears_app(self):
+        plugin = Plugin()
+        plugin.on_activate(MagicMock())
+        plugin.on_deactivate()
+        assert plugin._app is None
+
+
+# ── preflight_checks ──────────────────────────────────────────────────────────
+
+
+class TestBeadsPluginPreflight:
+    def test_error_when_bd_not_in_path(self):
+        plugin = Plugin()
+        with patch("penny.plugins.beads_plugin.shutil.which", return_value=None):
+            issues = plugin.preflight_checks({"projects": []})
+        errors = [i for i in issues if i.severity == "error"]
+        assert any("`bd`" in i.message for i in errors)
+
+    def test_warning_when_beads_dir_missing(self, tmp_path):
+        project_dir = tmp_path / "myproj"
+        project_dir.mkdir()
+        config = {"projects": [{"path": str(project_dir)}]}
+        plugin = Plugin()
+        with patch("penny.plugins.beads_plugin.shutil.which", return_value="/usr/bin/bd"):
+            issues = plugin.preflight_checks(config)
+        warnings = [i for i in issues if i.severity == "warning"]
+        assert any(".beads" in i.message for i in warnings)
+
+    def test_no_warning_when_beads_dir_exists(self, tmp_path):
+        project_dir = tmp_path / "myproj"
+        project_dir.mkdir()
+        (project_dir / ".beads").mkdir()
+        config = {"projects": [{"path": str(project_dir)}]}
+        plugin = Plugin()
+        with patch("penny.plugins.beads_plugin.shutil.which", return_value="/usr/bin/bd"):
+            issues = plugin.preflight_checks(config)
+        assert issues == []
+
+    def test_skips_placeholder_paths(self):
+        config = {"projects": [{"path": "/PLACEHOLDER_PROJECT_PATH"}]}
+        plugin = Plugin()
+        with patch("penny.plugins.beads_plugin.shutil.which", return_value="/usr/bin/bd"):
+            issues = plugin.preflight_checks(config)
+        assert issues == []
+
+    def test_skips_nonexistent_paths(self, tmp_path):
+        config = {"projects": [{"path": str(tmp_path / "nope")}]}
+        plugin = Plugin()
+        with patch("penny.plugins.beads_plugin.shutil.which", return_value="/usr/bin/bd"):
+            issues = plugin.preflight_checks(config)
+        assert issues == []
+
+
+# ── filter_tasks ──────────────────────────────────────────────────────────────
+
+
+class TestBeadsPluginFilterTasks:
+    def _make_task(self, task_id: str, priority: str = "P2") -> Task:
+        return Task(
+            task_id=task_id,
+            title="Test",
+            priority=priority,
+            project_path="/tmp/proj",
+            project_name="proj",
+        )
+
+    def test_filters_out_spawned_ids(self):
+        plugin = Plugin()
+        tasks = [self._make_task("a"), self._make_task("b")]
+        state = {"spawned_this_week": [{"task_id": "a"}], "agents_running": []}
+        config = {"work": {"max_agents_per_run": 5, "task_priority_levels": ["P1", "P2"]}}
+        result = plugin.filter_tasks(tasks, state, config)
+        assert [t.task_id for t in result] == ["b"]
+
+    def test_filters_out_running_ids(self):
+        plugin = Plugin()
+        tasks = [self._make_task("a"), self._make_task("b")]
+        state = {"spawned_this_week": [], "agents_running": [{"task_id": "b"}]}
+        config = {"work": {"max_agents_per_run": 5, "task_priority_levels": ["P1", "P2"]}}
+        result = plugin.filter_tasks(tasks, state, config)
+        assert [t.task_id for t in result] == ["a"]
+
+    def test_respects_priority_levels(self):
+        plugin = Plugin()
+        tasks = [self._make_task("a", "P1"), self._make_task("b", "P3")]
+        state = {"spawned_this_week": [], "agents_running": []}
+        config = {"work": {"max_agents_per_run": 5, "task_priority_levels": ["P1", "P2"]}}
+        result = plugin.filter_tasks(tasks, state, config)
+        assert [t.task_id for t in result] == ["a"]
+
+    def test_limits_to_max_agents_per_run(self):
+        plugin = Plugin()
+        tasks = [self._make_task(f"t-{i}") for i in range(5)]
+        state = {"spawned_this_week": [], "agents_running": []}
+        config = {"work": {"max_agents_per_run": 2, "task_priority_levels": ["P1", "P2"]}}
+        result = plugin.filter_tasks(tasks, state, config)
+        assert len(result) == 2
+
+    def test_empty_state_keys_default(self):
+        plugin = Plugin()
+        tasks = [self._make_task("a")]
+        state = {}  # missing keys
+        config = {"work": {"max_agents_per_run": 2, "task_priority_levels": ["P2"]}}
+        result = plugin.filter_tasks(tasks, state, config)
+        assert len(result) == 1
+
+
+# ── get_task_description ──────────────────────────────────────────────────────
+
+
+class TestBeadsPluginTaskDescription:
+    def test_returns_bd_show_output(self):
+        plugin = Plugin()
+        task = Task("t-1", "Title", "P2", "/tmp/proj", "proj")
+        with patch("penny.plugins.beads_plugin._run_bd", return_value="detailed info\n"):
+            desc = plugin.get_task_description(task)
+        assert desc == "detailed info\n"
+
+    def test_returns_none_when_bd_returns_empty(self):
+        plugin = Plugin()
+        task = Task("t-1", "Title", "P2", "/tmp/proj", "proj")
+        with patch("penny.plugins.beads_plugin._run_bd", return_value=""):
+            desc = plugin.get_task_description(task)
+        assert desc is None
+
+
+# ── get_agent_prompt_template ─────────────────────────────────────────────────
+
+
+class TestBeadsPluginPromptTemplate:
+    def test_returns_template(self):
+        tmpl = Plugin().get_agent_prompt_template()
+        assert tmpl is AGENT_PROMPT_TEMPLATE
+        assert "{task_id}" in tmpl
+        assert "{task_title}" in tmpl
+        assert "{project_path}" in tmpl
+
+
+# ── handle_action ─────────────────────────────────────────────────────────────
+
+
+class TestBeadsPluginHandleAction:
+    def test_ignores_non_bd_actions(self):
+        plugin = Plugin()
+        assert plugin.handle_action("other_action", None) is False
+
+    def test_runs_bd_command(self, tmp_path):
+        plugin = Plugin()
+        payload = (["ready"], str(tmp_path))
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            result = plugin.handle_action("bd_command", payload)
+        assert result is True
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        assert call_args[0][0] == ["bd", "ready"]
+        assert call_args[1]["cwd"] == str(tmp_path)
+
+    def test_returns_true_even_on_nonzero_exit(self, tmp_path):
+        plugin = Plugin()
+        payload = (["fail"], str(tmp_path))
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+            result = plugin.handle_action("bd_command", payload)
+        assert result is True
+
+    def test_returns_true_even_on_exception(self, tmp_path):
+        plugin = Plugin()
+        payload = (["crash"], str(tmp_path))
+        with patch(
+            "penny.plugins.beads_plugin.subprocess.run",
+            side_effect=OSError("nope"),
+        ):
+            result = plugin.handle_action("bd_command", payload)
+        assert result is True
+
+    def test_returns_false_when_no_cwd(self):
+        plugin = Plugin()
+        payload = (["ready"], "")
+        result = plugin.handle_action("bd_command", payload)
+        assert result is False
+
+
+# ── config_schema ─────────────────────────────────────────────────────────────
+
+
+class TestBeadsPluginConfigSchema:
+    def test_has_enabled_key(self):
+        schema = Plugin().config_schema()
+        assert "enabled" in schema
+        assert schema["enabled"]["default"] == "auto"
