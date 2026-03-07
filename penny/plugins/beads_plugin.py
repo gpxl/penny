@@ -166,6 +166,9 @@ class Plugin(PennyPlugin):
     def on_agent_spawned(self, task: Task, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
         plugin_state.setdefault("spawned_task_ids", []).append(task.task_id)
 
+    def on_agent_completed(self, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
+        pass
+
     def filter_tasks(
         self,
         tasks: list[Task],

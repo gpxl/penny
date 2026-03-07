@@ -53,20 +53,24 @@ class PennyPlugin(ABC):
         """Contribute validation checks to the preflight system."""
         return []
 
-    def on_activate(self, app: Any) -> None:  # noqa: B027
+    @abstractmethod
+    def on_activate(self, app: Any) -> None:
         """Called when the plugin is activated. `app` is the PennyApp delegate."""
 
-    def on_deactivate(self) -> None:  # noqa: B027
+    @abstractmethod
+    def on_deactivate(self) -> None:
         """Called when the plugin is deactivated."""
 
     def get_tasks(self, projects: list[dict[str, Any]]) -> list[Task]:
         """Supply tasks to the task queue."""
         return []
 
-    def on_agent_spawned(self, task: Task, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:  # noqa: B027
+    @abstractmethod
+    def on_agent_spawned(self, task: Task, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
         """Called after core spawns an agent. plugin_state is mutable; core persists it."""
 
-    def on_agent_completed(self, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:  # noqa: B027
+    @abstractmethod
+    def on_agent_completed(self, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
         """Called when core detects agent completion."""
 
     def get_completed_tasks(

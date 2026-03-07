@@ -40,6 +40,12 @@ class StubPlugin(PennyPlugin):
     def on_deactivate(self) -> None:
         self.deactivated = True
 
+    def on_agent_spawned(self, task: Any, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
+        pass
+
+    def on_agent_completed(self, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
+        pass
+
 
 class ErrorPlugin(StubPlugin):
     """Plugin that raises on activate/deactivate."""
