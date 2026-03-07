@@ -126,6 +126,7 @@ class PluginManager:
     def __init__(self) -> None:
         self._plugins: dict[str, PennyPlugin] = {}
         self._active: dict[str, PennyPlugin] = {}
+        self._load_errors: list[PreflightIssue] = []
 
     @property
     def active_plugins(self) -> list[PennyPlugin]:
@@ -135,22 +136,96 @@ class PluginManager:
     def all_plugins(self) -> dict[str, PennyPlugin]:
         return dict(self._plugins)
 
+    @property
+    def load_errors(self) -> list[PreflightIssue]:
+        """PreflightIssues raised during plugin discovery (import or API violations)."""
+        return list(self._load_errors)
+
+    def _plugins_dir(self) -> Path:
+        """Return the directory where built-in plugins are discovered."""
+        return Path(__file__).parent / "plugins"
+
+    def _record_load_error(self, source: str, message: str, fix_hint: str) -> None:
+        full_msg = f"Plugin '{source}' {message}"
+        print(f"[penny] {full_msg}", flush=True)
+        self._load_errors.append(PreflightIssue(severity="error", message=full_msg, fix_hint=fix_hint))
+
+    def _validate_plugin_instance(self, instance: PennyPlugin, source: str) -> list[str]:
+        """Return a list of API violation strings. Empty list means the plugin is valid."""
+        errors: list[str] = []
+
+        try:
+            name = instance.name
+            if not isinstance(name, str) or not name.strip():
+                errors.append(f"'name' must return a non-empty string (got {name!r})")
+        except Exception as exc:
+            errors.append(f"'name' property raised an exception: {exc}")
+
+        try:
+            desc = instance.description
+            if not isinstance(desc, str):
+                errors.append(f"'description' must return a string (got {type(desc).__name__})")
+        except Exception as exc:
+            errors.append(f"'description' property raised an exception: {exc}")
+
+        return errors
+
     def discover(self) -> None:
         """Discover plugins from penny/plugins/ directory."""
-        plugins_dir = Path(__file__).parent / "plugins"
+        plugins_dir = self._plugins_dir()
         if not plugins_dir.exists():
             return
 
         for path in sorted(plugins_dir.glob("*_plugin.py")):
             module_name = f"penny.plugins.{path.stem}"
+            source = path.name
             try:
                 module = importlib.import_module(module_name)
-                plugin_cls = getattr(module, "Plugin", None)
-                if plugin_cls and isinstance(plugin_cls, type) and issubclass(plugin_cls, PennyPlugin):
-                    instance = plugin_cls()
-                    self._plugins[instance.name] = instance
             except Exception as exc:
-                print(f"[penny] Failed to load plugin {path.stem}: {exc}", flush=True)
+                self._record_load_error(
+                    source,
+                    f"failed to import: {exc}",
+                    f"Check {source} for import errors or missing dependencies.",
+                )
+                continue
+
+            plugin_cls = getattr(module, "Plugin", None)
+            if not (plugin_cls and isinstance(plugin_cls, type) and issubclass(plugin_cls, PennyPlugin)):
+                self._record_load_error(
+                    source,
+                    "does not expose a valid Plugin class (must subclass PennyPlugin)",
+                    f"Ensure {source} defines a class named 'Plugin' that inherits from PennyPlugin.",
+                )
+                continue
+
+            try:
+                instance = plugin_cls()
+            except TypeError as exc:
+                self._record_load_error(
+                    source,
+                    f"could not be instantiated: {exc}",
+                    f"Implement all abstract methods of PennyPlugin in {source}.",
+                )
+                continue
+            except Exception as exc:
+                self._record_load_error(
+                    source,
+                    f"raised an unexpected error during instantiation: {exc}",
+                    f"Check Plugin.__init__ in {source}.",
+                )
+                continue
+
+            validation_errors = self._validate_plugin_instance(instance, source)
+            if validation_errors:
+                for err in validation_errors:
+                    self._record_load_error(
+                        source,
+                        f"API violation — {err}",
+                        f"Fix the Plugin class in {source} to comply with the PennyPlugin API.",
+                    )
+                continue
+
+            self._plugins[instance.name] = instance
 
     def activate(self, name: str, app: Any, config: dict[str, Any]) -> bool:
         """Activate a discovered plugin. Returns True on success."""
@@ -209,8 +284,8 @@ class PluginManager:
     # ── Aggregation methods ───────────────────────────────────────────────
 
     def get_all_preflight_checks(self, config: dict[str, Any]) -> list[PreflightIssue]:
-        """Collect preflight checks from all active plugins."""
-        issues: list[PreflightIssue] = []
+        """Collect preflight checks from all active plugins, plus any plugin load errors."""
+        issues: list[PreflightIssue] = list(self._load_errors)
         for plugin in self._active.values():
             try:
                 issues.extend(plugin.preflight_checks(config))

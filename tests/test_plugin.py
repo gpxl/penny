@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import types as builtin_types
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -596,6 +597,280 @@ class TestAggregationMethods:
         mgr = _make_manager_with(bp)
         mgr._active["bad"] = bp
         assert mgr.dispatch_action("anything", None) is False
+
+
+# ── Plugin validation ─────────────────────────────────────────────────────────
+
+
+class TestPluginValidation:
+    def test_validate_valid_plugin_returns_no_errors(self):
+        mgr = PluginManager()
+        errors = mgr._validate_plugin_instance(StubPlugin(), "good_plugin.py")
+        assert errors == []
+
+    def test_validate_rejects_empty_name(self):
+        class EmptyName(StubPlugin):
+            @property
+            def name(self) -> str:
+                return ""
+
+        mgr = PluginManager()
+        errors = mgr._validate_plugin_instance(EmptyName(), "empty_name.py")
+        assert len(errors) == 1
+        assert "'name'" in errors[0]
+
+    def test_validate_rejects_whitespace_only_name(self):
+        class WhitespaceName(StubPlugin):
+            @property
+            def name(self) -> str:
+                return "   "
+
+        mgr = PluginManager()
+        errors = mgr._validate_plugin_instance(WhitespaceName(), "ws_plugin.py")
+        assert len(errors) == 1
+        assert "'name'" in errors[0]
+
+    def test_validate_rejects_non_string_name(self):
+        class IntName(StubPlugin):
+            @property
+            def name(self):  # type: ignore[override]
+                return 42
+
+        mgr = PluginManager()
+        errors = mgr._validate_plugin_instance(IntName(), "int_name.py")
+        assert len(errors) == 1
+        assert "'name'" in errors[0]
+
+    def test_validate_rejects_non_string_description(self):
+        class IntDesc(StubPlugin):
+            @property
+            def description(self):  # type: ignore[override]
+                return 99
+
+        mgr = PluginManager()
+        errors = mgr._validate_plugin_instance(IntDesc(), "int_desc.py")
+        assert len(errors) == 1
+        assert "'description'" in errors[0]
+
+    def test_validate_handles_exception_in_name(self):
+        class BoomName(StubPlugin):
+            @property
+            def name(self) -> str:
+                raise RuntimeError("boom")
+
+        mgr = PluginManager()
+        errors = mgr._validate_plugin_instance(BoomName(), "boom_plugin.py")
+        assert len(errors) == 1
+        assert "'name'" in errors[0]
+        assert "boom" in errors[0]
+
+    def test_validate_handles_exception_in_description(self):
+        class BoomDesc(StubPlugin):
+            @property
+            def description(self) -> str:
+                raise RuntimeError("desc boom")
+
+        mgr = PluginManager()
+        errors = mgr._validate_plugin_instance(BoomDesc(), "boom_desc.py")
+        assert len(errors) == 1
+        assert "'description'" in errors[0]
+
+    def test_load_errors_initially_empty(self):
+        mgr = PluginManager()
+        assert mgr.load_errors == []
+
+    def test_load_errors_returns_copy(self):
+        mgr = PluginManager()
+        mgr._load_errors.append(
+            PreflightIssue(severity="error", message="test", fix_hint="fix")
+        )
+        copy = mgr.load_errors
+        copy.clear()
+        assert len(mgr.load_errors) == 1
+
+    def test_get_all_preflight_checks_includes_load_errors(self):
+        mgr = PluginManager()
+        mgr._load_errors.append(
+            PreflightIssue(
+                severity="error",
+                message="Plugin 'bad.py' failed to import: missing dep",
+                fix_hint="Fix it.",
+            )
+        )
+        issues = mgr.get_all_preflight_checks({})
+        assert len(issues) == 1
+        assert issues[0].message == "Plugin 'bad.py' failed to import: missing dep"
+
+    def test_get_all_preflight_checks_combines_load_errors_and_plugin_checks(self):
+        tp = TaskPlugin(plugin_name="tp")
+        tp._preflight = [
+            PreflightIssue(severity="warning", message="plugin warning", fix_hint="fix"),
+        ]
+        mgr = _make_manager_with(tp)
+        mgr.activate("tp", MagicMock(), {})
+        mgr._load_errors.append(
+            PreflightIssue(severity="error", message="load error", fix_hint="fix load")
+        )
+        issues = mgr.get_all_preflight_checks({})
+        messages = [i.message for i in issues]
+        assert "load error" in messages
+        assert "plugin warning" in messages
+
+
+class TestDiscoverWithBadPlugins:
+    """Tests for discover() handling of malformed plugin files."""
+
+    def _fake_plugins_dir(self, tmp_path: Any, filenames: list[str]) -> Any:
+        for name in filenames:
+            (tmp_path / name).touch()
+        return tmp_path
+
+    def test_discover_stores_load_error_for_import_failure(self, tmp_path: Any) -> None:
+        self._fake_plugins_dir(tmp_path, ["broken_plugin.py"])
+        mgr = PluginManager()
+
+        with patch.object(mgr, "_plugins_dir", return_value=tmp_path), \
+             patch("penny.plugin.importlib.import_module", side_effect=ImportError("no dep")):
+            mgr.discover()
+
+        assert len(mgr.load_errors) == 1
+        assert mgr.load_errors[0].severity == "error"
+        assert "broken_plugin.py" in mgr.load_errors[0].message
+        assert mgr.all_plugins == {}
+
+    def test_discover_stores_load_error_when_no_plugin_class(self, tmp_path: Any) -> None:
+        self._fake_plugins_dir(tmp_path, ["empty_plugin.py"])
+        mgr = PluginManager()
+        fake_module = builtin_types.SimpleNamespace()  # no Plugin attribute
+
+        with patch.object(mgr, "_plugins_dir", return_value=tmp_path), \
+             patch("penny.plugin.importlib.import_module", return_value=fake_module):
+            mgr.discover()
+
+        assert len(mgr.load_errors) == 1
+        assert "empty_plugin.py" in mgr.load_errors[0].message
+        assert "valid Plugin class" in mgr.load_errors[0].message
+
+    def test_discover_stores_load_error_when_not_subclass(self, tmp_path: Any) -> None:
+        self._fake_plugins_dir(tmp_path, ["wrong_plugin.py"])
+        mgr = PluginManager()
+
+        class NotAPlugin:
+            pass
+
+        fake_module = builtin_types.SimpleNamespace(Plugin=NotAPlugin)
+
+        with patch.object(mgr, "_plugins_dir", return_value=tmp_path), \
+             patch("penny.plugin.importlib.import_module", return_value=fake_module):
+            mgr.discover()
+
+        assert len(mgr.load_errors) == 1
+        assert "wrong_plugin.py" in mgr.load_errors[0].message
+        assert "valid Plugin class" in mgr.load_errors[0].message
+
+    def test_discover_stores_load_error_when_instantiation_fails(self, tmp_path: Any) -> None:
+        self._fake_plugins_dir(tmp_path, ["abstract_plugin.py"])
+        mgr = PluginManager()
+
+        # Subclass of PennyPlugin missing required abstract methods → TypeError on init
+        class PartialPlugin(PennyPlugin):
+            @property
+            def name(self) -> str:
+                return "partial"
+
+            @property
+            def description(self) -> str:
+                return "Partial"
+
+            # on_activate, on_deactivate, on_agent_spawned, on_agent_completed NOT implemented
+
+        fake_module = builtin_types.SimpleNamespace(Plugin=PartialPlugin)
+
+        with patch.object(mgr, "_plugins_dir", return_value=tmp_path), \
+             patch("penny.plugin.importlib.import_module", return_value=fake_module):
+            mgr.discover()
+
+        assert len(mgr.load_errors) >= 1
+        assert "abstract_plugin.py" in mgr.load_errors[0].message
+        assert mgr.all_plugins == {}
+
+    def test_discover_stores_load_error_for_api_violation(self, tmp_path: Any) -> None:
+        self._fake_plugins_dir(tmp_path, ["badname_plugin.py"])
+        mgr = PluginManager()
+
+        class BadNamePlugin(StubPlugin):
+            @property
+            def name(self) -> str:
+                return ""  # empty name is an API violation
+
+        fake_module = builtin_types.SimpleNamespace(Plugin=BadNamePlugin)
+
+        with patch.object(mgr, "_plugins_dir", return_value=tmp_path), \
+             patch("penny.plugin.importlib.import_module", return_value=fake_module):
+            mgr.discover()
+
+        assert len(mgr.load_errors) == 1
+        assert "badname_plugin.py" in mgr.load_errors[0].message
+        assert "API violation" in mgr.load_errors[0].message
+        assert mgr.all_plugins == {}
+
+    def test_discover_does_not_register_plugin_with_api_violation(self, tmp_path: Any) -> None:
+        self._fake_plugins_dir(tmp_path, ["baddesc_plugin.py"])
+        mgr = PluginManager()
+
+        class BadDescPlugin(StubPlugin):
+            @property
+            def description(self):  # type: ignore[override]
+                return 42  # non-string description
+
+        fake_module = builtin_types.SimpleNamespace(Plugin=BadDescPlugin)
+
+        with patch.object(mgr, "_plugins_dir", return_value=tmp_path), \
+             patch("penny.plugin.importlib.import_module", return_value=fake_module):
+            mgr.discover()
+
+        assert mgr.all_plugins == {}
+        assert len(mgr.load_errors) == 1
+
+    def test_discover_registers_valid_plugin_without_errors(self, tmp_path: Any) -> None:
+        self._fake_plugins_dir(tmp_path, ["good_plugin.py"])
+        mgr = PluginManager()
+        fake_module = builtin_types.SimpleNamespace(Plugin=StubPlugin)
+
+        with patch.object(mgr, "_plugins_dir", return_value=tmp_path), \
+             patch("penny.plugin.importlib.import_module", return_value=fake_module):
+            mgr.discover()
+
+        assert mgr.load_errors == []
+        assert "stub" in mgr.all_plugins
+
+    def test_discover_bad_plugin_does_not_block_good_plugin(self, tmp_path: Any) -> None:
+        self._fake_plugins_dir(tmp_path, ["aaa_bad_plugin.py", "zzz_good_plugin.py"])
+        mgr = PluginManager()
+
+        class BadPlugin(StubPlugin):
+            @property
+            def name(self) -> str:
+                return ""
+
+        bad_module = builtin_types.SimpleNamespace(Plugin=BadPlugin)
+        good_module = builtin_types.SimpleNamespace(Plugin=StubPlugin)
+
+        call_count = 0
+
+        def fake_import(module_name: str) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if "aaa_bad" in module_name:
+                return bad_module
+            return good_module
+
+        with patch.object(mgr, "_plugins_dir", return_value=tmp_path), \
+             patch("penny.plugin.importlib.import_module", side_effect=fake_import):
+            mgr.discover()
+
+        assert len(mgr.load_errors) == 1
+        assert "stub" in mgr.all_plugins  # good plugin still loaded
 
 
 # ── Integration: discover + sync + aggregate ──────────────────────────────────
