@@ -4,6 +4,8 @@ logs/
 reports/
 *.pyc
 __pycache__/
+.coverage
+htmlcov/
 .DS_Store
 *.egg-info/
 dist/
