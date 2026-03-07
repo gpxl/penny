@@ -23,5 +23,7 @@
   <true/>
   <key>NSAppleEventsUsageDescription</key>
   <string>Penny runs the Claude CLI to read live usage statistics.</string>
+  <key>NSUserNotificationsUsageDescription</key>
+  <string>Penny sends notifications when Claude agents complete tasks.</string>
 </dict>
 </plist>

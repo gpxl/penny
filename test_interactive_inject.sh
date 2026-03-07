@@ -20,7 +20,7 @@ echo "Waiting 4s for claude to initialize..."
 sleep 4
 
 # Inject the initial prompt as if the user typed it and pressed Enter
-PROMPT="Say exactly: hello from nae nae"
+PROMPT="Say exactly: hello from penny"
 echo "Injecting prompt: '$PROMPT'"
 tmux send-keys -t "$SESSION" "$PROMPT" Enter
 
