@@ -59,9 +59,9 @@ class SmartFakeApp:
     ):
         self.state = state or {
             "agents_running": [],
-            "spawned_this_week": [],
             "recently_completed": [],
             "session_history": [],
+            "plugin_state": {},
         }
         self.config = config or {}
         self._prediction = prediction
@@ -148,9 +148,6 @@ class SmartFakeApp:
             a for a in self.state["agents_running"] if a.get("task_id") != task_id
         ]
         completed = {**agent, "status": "completed"}
-        sw = self.state.setdefault("spawned_this_week", [])
-        if not any(a.get("task_id") == task_id for a in sw):
-            sw.append(completed)
         rc = self.state.setdefault("recently_completed", [])
         if not any(a.get("task_id") == task_id for a in rc):
             rc.append(completed)
@@ -271,9 +268,8 @@ class TestJourneyTaskLifecycle:
         data = _get(port, "/api/state")
         recently_ids = [c["task_id"] for c in data["state"]["recently_completed"]]
         assert "task-1" not in recently_ids
-        # But still in spawned_this_week (historical record)
-        spawned_ids = [s["task_id"] for s in data["state"]["spawned_this_week"]]
-        assert "task-1" in spawned_ids
+        # After dismissal the task is no longer tracked in core state;
+        # the plugin's plugin_state["beads"]["seen_closed_ids"] retains the ID.
 
     def test_spawn_unknown_task_is_noop(self, e2e_app):
         """Spawning a non-existent task doesn't crash or change state."""
@@ -329,8 +325,8 @@ class TestJourneyMultiTask:
         _post(port, "/api/clear-completed")
         data = _get(port, "/api/state")
         assert data["state"]["recently_completed"] == []
-        # spawned_this_week retains historical record
-        assert len(data["state"]["spawned_this_week"]) == 2
+        # Agents running list is now empty too
+        assert data["state"]["agents_running"] == []
 
     def test_spawn_same_task_twice_rejected(self, e2e_app):
         """Once a task is spawned and removed from ready list, spawning again is a no-op."""
@@ -451,7 +447,7 @@ class TestJourneyLoadAndRefresh:
 
         # Step 7: Verify state is coherent
         assert isinstance(state["current_period_start"], str)
-        assert state["spawned_this_week"] == []
+        assert state["agents_running"] == []
 
     def test_yaml_error_does_not_crash(self, tmp_path):
         """Bad YAML → _safe_load_config returns error, startup can handle it."""
@@ -477,7 +473,6 @@ class TestJourneyLoadAndRefresh:
             "current_period_start": old_period_start,
             "predictions": {"output_all": 50000, "output_sonnet": 20000},
             "agents_running": [{"task_id": "old-agent", "pid": -1}],
-            "spawned_this_week": [{"task_id": "old-done"}],
             "recently_completed": [],
             "period_history": [],
         }
@@ -486,8 +481,7 @@ class TestJourneyLoadAndRefresh:
 
         # Period start should be updated
         assert state["current_period_start"] == start.isoformat()
-        # Weekly counters should be reset
-        assert state["spawned_this_week"] == []
+        # Agent running list is reset; plugin_state is owned by plugins and untouched
         assert state["agents_running"] == []
         # Old data should be archived
         assert len(state["period_history"]) == 1

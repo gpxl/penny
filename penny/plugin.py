@@ -63,6 +63,22 @@ class PennyPlugin(ABC):
         """Supply tasks to the task queue."""
         return []
 
+    def on_agent_spawned(self, task: Task, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
+        """Called after core spawns an agent. plugin_state is mutable; core persists it."""
+
+    def on_agent_completed(self, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
+        """Called when core detects agent completion."""
+
+    def get_completed_tasks(
+        self, projects: list[dict[str, Any]], plugin_state: dict[str, Any]
+    ) -> list[Task]:
+        """Return ONLY newly-seen externally-completed tasks.
+
+        Update plugin_state to record seen IDs so the same tasks are never
+        returned twice. Default: [].
+        """
+        return []
+
     def filter_tasks(
         self,
         tasks: list[Task],
@@ -207,6 +223,39 @@ class PluginManager:
             except Exception as exc:
                 print(f"[penny] get_tasks error in plugin {plugin.name}: {exc}", flush=True)
         return all_tasks
+
+    def notify_agent_spawned(self, task: Task, record: dict[str, Any], state: dict[str, Any]) -> None:
+        """Broadcast agent-spawned event to all active plugins."""
+        for plugin in self._active.values():
+            plugin_state = state.setdefault("plugin_state", {}).setdefault(plugin.name, {})
+            try:
+                plugin.on_agent_spawned(task, record, plugin_state)
+            except Exception as exc:
+                print(f"[penny] on_agent_spawned error in plugin {plugin.name}: {exc}", flush=True)
+
+    def notify_agent_completed(self, record: dict[str, Any], state: dict[str, Any]) -> None:
+        """Broadcast agent-completed event to all active plugins."""
+        for plugin in self._active.values():
+            plugin_state = state.setdefault("plugin_state", {}).setdefault(plugin.name, {})
+            try:
+                plugin.on_agent_completed(record, plugin_state)
+            except Exception as exc:
+                print(f"[penny] on_agent_completed error in plugin {plugin.name}: {exc}", flush=True)
+
+    def get_all_completed_tasks(self, projects: list[dict[str, Any]], state: dict[str, Any]) -> list[Task]:
+        """Collect externally completed tasks from all active plugins.
+
+        Each plugin receives its own namespaced plugin_state so it can track
+        which task IDs it has already reported.
+        """
+        all_completed: list[Task] = []
+        for plugin in self._active.values():
+            plugin_state = state.setdefault("plugin_state", {}).setdefault(plugin.name, {})
+            try:
+                all_completed.extend(plugin.get_completed_tasks(projects, plugin_state))
+            except Exception as exc:
+                print(f"[penny] get_completed_tasks error in plugin {plugin.name}: {exc}", flush=True)
+        return all_completed
 
     def filter_all_tasks(
         self,

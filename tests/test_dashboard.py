@@ -91,11 +91,8 @@ def dashboard_app():
         "agents_running": [
             {"task_id": "a-1", "pid": 123, "project_name": "proj", "title": "Running task"}
         ],
-        "spawned_this_week": [
-            {"task_id": "d-1", "project_name": "proj", "title": "Done task", "status": "completed"}
-        ],
         "recently_completed": [
-            {"task_id": "d-1", "project_name": "proj", "title": "Done task"}
+            {"task_id": "d-1", "project_name": "proj", "title": "Done task", "status": "completed"}
         ],
         "session_history": [],
     }
@@ -133,7 +130,7 @@ def _post(port: int, path: str, body: dict | None = None) -> tuple[int, dict]:
 
 class TestSnapshot:
     def test_returns_expected_keys(self):
-        app = FakeApp(state={"agents_running": [], "spawned_this_week": []})
+        app = FakeApp(state={"agents_running": [], "recently_completed": []})
         result = _snapshot(app)
         assert "generated_at" in result
         assert "state" in result
@@ -162,10 +159,9 @@ class TestSnapshot:
         assert result["ready_tasks"][0]["task_id"] == "t-1"
         assert result["ready_tasks"][0]["title"] == "Title"
 
-    def test_completed_deduplicates_by_task_id(self):
+    def test_completed_from_recently_completed(self):
         state = {
-            "spawned_this_week": [
-                {"task_id": "x", "status": "completed"},
+            "recently_completed": [
                 {"task_id": "x", "status": "completed"},
                 {"task_id": "y", "status": "completed"},
             ]
@@ -186,7 +182,7 @@ class TestSnapshot:
     def test_json_serializable(self):
         pred = Prediction(pct_all=10.0)
         tasks = [Task("t-1", "Title", "P1", "/tmp/p", "p")]
-        state = {"agents_running": [], "spawned_this_week": [], "session_history": []}
+        state = {"agents_running": [], "recently_completed": [], "session_history": []}
         app = FakeApp(state=state, prediction=pred, ready_tasks=tasks)
         result = _snapshot(app)
         # Should not raise

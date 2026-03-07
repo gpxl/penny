@@ -270,9 +270,6 @@ class TestDidFetchDataLogic:
         """Reproduce the newly-completed agent processing from _didFetchData_."""
         notifications = []
         for agent in newly_done:
-            sw = state.setdefault("spawned_this_week", [])
-            if not any(a.get("task_id") == agent.get("task_id") for a in sw):
-                sw.append(agent)
             rc = state.setdefault("recently_completed", [])
             if not any(a.get("task_id") == agent.get("task_id") for a in rc):
                 rc.append(agent)
@@ -281,23 +278,21 @@ class TestDidFetchDataLogic:
                 notifications.append(agent["task_id"])
         return notifications
 
-    def test_newly_done_added_to_spawned_this_week(self):
-        state = {"spawned_this_week": [], "recently_completed": []}
+    def test_newly_done_added_to_recently_completed(self):
+        state = {"recently_completed": []}
         agent = {"task_id": "t-1", "title": "Fix", "project": "proj", "status": "completed"}
         self._process_newly_done(state, [agent])
-        assert len(state["spawned_this_week"]) == 1
-        assert state["spawned_this_week"][0]["task_id"] == "t-1"
+        assert len(state["recently_completed"]) == 1
+        assert state["recently_completed"][0]["task_id"] == "t-1"
 
     def test_newly_done_deduplicates(self):
         agent = {"task_id": "t-1", "title": "Fix", "project": "proj", "status": "completed"}
-        state = {"spawned_this_week": [agent], "recently_completed": [agent]}
+        state = {"recently_completed": [agent]}
         self._process_newly_done(state, [agent])
-        assert len(state["spawned_this_week"]) == 1
         assert len(state["recently_completed"]) == 1
 
     def test_recently_completed_capped_at_20(self):
         state = {
-            "spawned_this_week": [],
             "recently_completed": [
                 {"task_id": f"old-{i}", "status": "completed"} for i in range(20)
             ],
@@ -308,19 +303,19 @@ class TestDidFetchDataLogic:
         assert state["recently_completed"][-1]["task_id"] == "new-1"
 
     def test_unknown_status_skips_notification(self):
-        state = {"spawned_this_week": [], "recently_completed": []}
+        state = {"recently_completed": []}
         agent = {"task_id": "t-1", "status": "unknown"}
         notifs = self._process_newly_done(state, [agent])
         assert notifs == []
 
     def test_completed_status_sends_notification(self):
-        state = {"spawned_this_week": [], "recently_completed": []}
+        state = {"recently_completed": []}
         agent = {"task_id": "t-1", "status": "completed", "title": "Fix", "project": "proj"}
         notifs = self._process_newly_done(state, [agent])
         assert notifs == ["t-1"]
 
     def test_notifications_disabled(self):
-        state = {"spawned_this_week": [], "recently_completed": []}
+        state = {"recently_completed": []}
         agent = {"task_id": "t-1", "status": "completed"}
         notifs = self._process_newly_done(state, [agent], notify_completion=False)
         assert notifs == []

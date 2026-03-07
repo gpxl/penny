@@ -12,17 +12,17 @@ import pytest
 
 @pytest.fixture
 def tmp_state():
-    """Return a fresh empty state dict."""
+    """Return a fresh empty state dict matching _default_state()."""
     return {
         "last_check": None,
         "current_period_start": None,
         "predictions": {},
         "agents_running": [],
-        "spawned_this_week": [],
         "recently_completed": [],
         "period_history": [],
         "session_history": [],
         "last_session_scan": None,
+        "plugin_state": {},
     }
 
 

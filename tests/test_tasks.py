@@ -105,6 +105,62 @@ class TestBeadsPluginGetTasks:
         assert tasks[1].project_name == "proj2"
 
 
+# ── BeadsPlugin.get_completed_tasks ──────────────────────────────────────────
+
+
+class TestBeadsPluginGetCompletedTasks:
+    def test_calls_bd_list_status_closed(self, tmp_path):
+        plugin = Plugin()
+        project = {"path": str(tmp_path), "priority": 1}
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="")
+            plugin.get_completed_tasks([project], {})
+        call_args = mock_run.call_args[0][0]
+        assert "list" in call_args
+        assert "--status=closed" in call_args
+
+    def test_returns_parsed_closed_tasks(self, tmp_path):
+        plugin = Plugin()
+        project = {"path": str(tmp_path), "priority": 1}
+        sample = "1. [● P2] [task] proj-abc: Done task\n"
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=sample)
+            tasks = plugin.get_completed_tasks([project], {})
+        assert len(tasks) == 1
+        assert tasks[0].task_id == "proj-abc"
+        assert tasks[0].title == "Done task"
+
+    def test_deduplicates_via_plugin_state(self, tmp_path):
+        plugin = Plugin()
+        project = {"path": str(tmp_path), "priority": 1}
+        sample = "1. [● P2] [task] proj-abc: Done task\n"
+        plugin_state = {"seen_closed_ids": ["proj-abc"]}
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=sample)
+            tasks = plugin.get_completed_tasks([project], plugin_state)
+        assert tasks == []  # already seen
+
+    def test_updates_plugin_state_with_new_ids(self, tmp_path):
+        plugin = Plugin()
+        project = {"path": str(tmp_path), "priority": 1}
+        sample = "1. [● P2] [task] proj-abc: Done task\n"
+        plugin_state: dict = {}
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=sample)
+            plugin.get_completed_tasks([project], plugin_state)
+        assert "proj-abc" in plugin_state.get("seen_closed_ids", [])
+
+    def test_returns_empty_for_missing_project(self, tmp_path):
+        plugin = Plugin()
+        project = {"path": str(tmp_path / "nonexistent"), "priority": 1}
+        tasks = plugin.get_completed_tasks([project], {})
+        assert tasks == []
+
+    def test_returns_empty_list_for_no_projects(self):
+        plugin = Plugin()
+        assert plugin.get_completed_tasks([], {}) == []
+
+
 # ── _run_bd helper ────────────────────────────────────────────────────────────
 
 
@@ -230,7 +286,7 @@ class TestBeadsPluginFilterTasks:
     def test_filters_out_spawned_ids(self):
         plugin = Plugin()
         tasks = [self._make_task("a"), self._make_task("b")]
-        state = {"spawned_this_week": [{"task_id": "a"}], "agents_running": []}
+        state = {"plugin_state": {"beads": {"spawned_task_ids": ["a"]}}, "agents_running": []}
         config = {"work": {"max_agents_per_run": 5, "task_priority_levels": ["P1", "P2"]}}
         result = plugin.filter_tasks(tasks, state, config)
         assert [t.task_id for t in result] == ["b"]
@@ -238,7 +294,7 @@ class TestBeadsPluginFilterTasks:
     def test_filters_out_running_ids(self):
         plugin = Plugin()
         tasks = [self._make_task("a"), self._make_task("b")]
-        state = {"spawned_this_week": [], "agents_running": [{"task_id": "b"}]}
+        state = {"plugin_state": {"beads": {}}, "agents_running": [{"task_id": "b"}]}
         config = {"work": {"max_agents_per_run": 5, "task_priority_levels": ["P1", "P2"]}}
         result = plugin.filter_tasks(tasks, state, config)
         assert [t.task_id for t in result] == ["a"]
@@ -246,7 +302,7 @@ class TestBeadsPluginFilterTasks:
     def test_respects_priority_levels(self):
         plugin = Plugin()
         tasks = [self._make_task("a", "P1"), self._make_task("b", "P3")]
-        state = {"spawned_this_week": [], "agents_running": []}
+        state = {"plugin_state": {"beads": {}}, "agents_running": []}
         config = {"work": {"max_agents_per_run": 5, "task_priority_levels": ["P1", "P2"]}}
         result = plugin.filter_tasks(tasks, state, config)
         assert [t.task_id for t in result] == ["a"]
@@ -254,7 +310,7 @@ class TestBeadsPluginFilterTasks:
     def test_limits_to_max_agents_per_run(self):
         plugin = Plugin()
         tasks = [self._make_task(f"t-{i}") for i in range(5)]
-        state = {"spawned_this_week": [], "agents_running": []}
+        state = {"plugin_state": {"beads": {}}, "agents_running": []}
         config = {"work": {"max_agents_per_run": 2, "task_priority_levels": ["P1", "P2"]}}
         result = plugin.filter_tasks(tasks, state, config)
         assert len(result) == 2

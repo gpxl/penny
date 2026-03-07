@@ -65,7 +65,7 @@ class TestGenerateReport:
         return {
             "predictions": {},
             "agents_running": [],
-            "spawned_this_week": [],
+            "recently_completed": [],
             "period_history": [],
             "last_check": "never",
         }
@@ -136,7 +136,7 @@ class TestGenerateReport:
 
     def test_includes_completed_agents(self, report_dir):
         state = self._empty_state()
-        state["spawned_this_week"] = [
+        state["recently_completed"] = [
             {
                 "task_id": "d-1",
                 "project": "proj",

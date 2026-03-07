@@ -136,6 +136,23 @@ class TestPennyPluginDefaults:
         plugin = StubPlugin()
         assert plugin.get_tasks([]) == []
 
+    def test_get_completed_tasks_defaults_empty(self):
+        plugin = StubPlugin()
+        assert plugin.get_completed_tasks([], {}) == []
+
+    def test_on_agent_spawned_defaults_noop(self):
+        plugin = StubPlugin()
+        task = _make_task()
+        plugin_state: dict = {}
+        plugin.on_agent_spawned(task, {}, plugin_state)  # should not raise
+        assert plugin_state == {}
+
+    def test_on_agent_completed_defaults_noop(self):
+        plugin = StubPlugin()
+        plugin_state: dict = {}
+        plugin.on_agent_completed({}, plugin_state)  # should not raise
+        assert plugin_state == {}
+
     def test_filter_tasks_defaults_passthrough(self):
         plugin = StubPlugin()
         tasks = [_make_task("a"), _make_task("b")]
@@ -367,6 +384,93 @@ class TestAggregationMethods:
         mgr._active["bad"] = bp
         tasks = mgr.get_all_tasks([])
         assert tasks == []
+
+    def test_get_all_completed_tasks_collects(self):
+        class CompletingPlugin(StubPlugin):
+            def get_completed_tasks(self, projects, plugin_state):
+                return [_make_task("done-1"), _make_task("done-2")]
+
+        cp = CompletingPlugin(plugin_name="cp")
+        mgr = _make_manager_with(cp)
+        mgr._active["cp"] = cp
+        done = mgr.get_all_completed_tasks([], {})
+        assert len(done) == 2
+        assert {t.task_id for t in done} == {"done-1", "done-2"}
+
+    def test_get_all_completed_tasks_empty_by_default(self):
+        stub = StubPlugin()
+        mgr = _make_manager_with(stub)
+        mgr.activate("stub", MagicMock(), {})
+        assert mgr.get_all_completed_tasks([], {}) == []
+
+    def test_get_all_completed_tasks_handles_error(self):
+        class BadPlugin(StubPlugin):
+            def get_completed_tasks(self, projects, plugin_state):
+                raise RuntimeError("boom")
+
+        bp = BadPlugin(plugin_name="bad")
+        mgr = _make_manager_with(bp)
+        mgr._active["bad"] = bp
+        assert mgr.get_all_completed_tasks([], {}) == []
+
+    def test_notify_agent_spawned_broadcasts_to_plugins(self):
+        spawned: list[str] = []
+
+        class SpawnPlugin(StubPlugin):
+            def on_agent_spawned(self, task, record, plugin_state):
+                spawned.append(task.task_id)
+
+        sp = SpawnPlugin(plugin_name="sp")
+        mgr = _make_manager_with(sp)
+        mgr._active["sp"] = sp
+        task = _make_task("t-1")
+        state: dict = {}
+        mgr.notify_agent_spawned(task, {}, state)
+        assert spawned == ["t-1"]
+
+    def test_notify_agent_spawned_passes_plugin_namespace(self):
+        received_state: list[dict] = []
+
+        class SpawnPlugin(StubPlugin):
+            def on_agent_spawned(self, task, record, plugin_state):
+                plugin_state["seen"] = True
+                received_state.append(plugin_state)
+
+        sp = SpawnPlugin(plugin_name="sp")
+        mgr = _make_manager_with(sp)
+        mgr._active["sp"] = sp
+        state: dict = {}
+        mgr.notify_agent_spawned(_make_task(), {}, state)
+        assert state["plugin_state"]["sp"]["seen"] is True
+
+    def test_notify_agent_completed_broadcasts_to_plugins(self):
+        completed: list[str] = []
+
+        class CompletedPlugin(StubPlugin):
+            def on_agent_completed(self, record, plugin_state):
+                completed.append(record.get("task_id"))
+
+        cp = CompletedPlugin(plugin_name="cp")
+        mgr = _make_manager_with(cp)
+        mgr._active["cp"] = cp
+        state: dict = {}
+        mgr.notify_agent_completed({"task_id": "t-2"}, state)
+        assert completed == ["t-2"]
+
+    def test_get_all_completed_tasks_passes_plugin_state(self):
+        received: list[dict] = []
+
+        class StatefulPlugin(StubPlugin):
+            def get_completed_tasks(self, projects, plugin_state):
+                received.append(plugin_state)
+                return []
+
+        sp = StatefulPlugin(plugin_name="sp")
+        mgr = _make_manager_with(sp)
+        mgr._active["sp"] = sp
+        state: dict = {"plugin_state": {"sp": {"x": 1}}}
+        mgr.get_all_completed_tasks([], state)
+        assert received[0] == {"x": 1}
 
     def test_filter_all_tasks_chains_filters(self):
         tp = TaskPlugin(plugin_name="tp")

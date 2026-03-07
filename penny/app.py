@@ -247,9 +247,6 @@ class PennyApp(NSObject):
 
         # Handle newly-completed agents
         for agent in newly_done:
-            sw = state.setdefault("spawned_this_week", [])
-            if not any(a.get("task_id") == agent.get("task_id") for a in sw):
-                sw.append(agent)
             rc = state.setdefault("recently_completed", [])
             if not any(a.get("task_id") == agent.get("task_id") for a in rc):
                 rc.append(agent)
@@ -259,16 +256,47 @@ class PennyApp(NSObject):
                     "Penny",
                     f"{agent['task_id']} completed \u2713 \u2014 {agent['title']} ({agent['project']})",
                 )
+            self._plugin_mgr.notify_agent_completed(agent, state)
         if newly_done:
             save_state(state)
 
         # Refresh task list from plugins
         projects = self.config.get("projects", [])
         all_tasks = self._plugin_mgr.get_all_tasks(projects)
-        # Exclude tasks already completed or running from the display list
-        spawned_ids = {a.get("task_id") for a in state.get("spawned_this_week", [])}
+
+        # Detect tasks completed by external processes (humans, other tools).
+        # Each plugin tracks which IDs it has already reported in plugin_state.
+        new_external = self._plugin_mgr.get_all_completed_tasks(projects, state)
+        if new_external:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for task in new_external:
+                record = {
+                    "task_id": task.task_id,
+                    "project": task.project_name,
+                    "project_path": task.project_path,
+                    "title": task.title,
+                    "priority": task.priority,
+                    "status": "completed",
+                    "completed_by": "external",
+                    "spawned_at": now_iso,
+                    "log": "",
+                }
+                rc = state.setdefault("recently_completed", [])
+                rc.append(record)
+                state["recently_completed"] = rc[-20:]
+            save_state(state)
+            if self.config.get("notifications", {}).get("completion", True):
+                for task in new_external:
+                    send_notification(
+                        "Penny",
+                        f"{task.task_id} done externally \u2713 \u2014 {task.title} ({task.project_name})",
+                    )
+
+        # Exclude tasks already in recently_completed or running from the display list.
+        # Tasks closed in beads won't reappear in `bd ready` anyway.
+        recently_ids = {a.get("task_id") for a in state.get("recently_completed", [])}
         running_ids = {a.get("task_id") for a in state.get("agents_running", [])}
-        exclude_ids = spawned_ids | running_ids
+        exclude_ids = recently_ids | running_ids
         self._all_ready_tasks = [t for t in all_tasks if t.task_id not in exclude_ids]
         self._ready_tasks = self._plugin_mgr.filter_all_tasks(all_tasks, state, self.config)
 
@@ -359,6 +387,7 @@ class PennyApp(NSObject):
         prompt_tmpl = self._plugin_mgr.get_agent_prompt_template(task)
         record = spawn_claude_agent(task, desc, interactive=True, prompt_template=prompt_tmpl, config=self.config)
         self.state.setdefault("agents_running", []).append(record)
+        self._plugin_mgr.notify_agent_spawned(task, record, self.state)
         # Remove from ready list immediately so the popover reflects the change now
         self._all_ready_tasks = [t for t in self._all_ready_tasks if t.task_id != task.task_id]
         save_state(self.state)
@@ -652,6 +681,7 @@ class PennyApp(NSObject):
             prompt_tmpl = self._plugin_mgr.get_agent_prompt_template(task)
             record = spawn_claude_agent(task, desc, interactive=False, prompt_template=prompt_tmpl, config=self.config)
             self.state.setdefault("agents_running", []).append(record)
+            self._plugin_mgr.notify_agent_spawned(task, record, self.state)
             spawned.append(f"{task.project_name}/{task.task_id}")
         if spawned:
             save_state(self.state)
