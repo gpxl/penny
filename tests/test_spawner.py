@@ -13,6 +13,7 @@ from penny.spawner import (
     _pid_is_alive,
     _tmux_available,
     _tmux_pane_command,
+    _write_secure_file,
     check_running_agents,
     spawn_claude_agent,
 )
@@ -129,6 +130,28 @@ class TestSpawnClaudeAgentDryRun:
             )
             record = spawn_claude_agent(task, "desc", dry_run=True)
         assert record["session"] == "penny-myproject-xyz"
+
+
+class TestWriteSecureFile:
+    def test_file_has_owner_only_permissions(self, tmp_path):
+        target = tmp_path / "secret.txt"
+        _write_secure_file(target, "sensitive content")
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_file_content_is_written(self, tmp_path):
+        target = tmp_path / "secret.txt"
+        _write_secure_file(target, "hello world")
+        assert target.read_text(encoding="utf-8") == "hello world"
+
+    def test_overwrites_existing_file(self, tmp_path):
+        target = tmp_path / "existing.txt"
+        target.write_text("old content")
+        os.chmod(target, 0o644)
+        _write_secure_file(target, "new content")
+        assert target.read_text(encoding="utf-8") == "new content"
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o600
 
 
 class TestPidIsAlive:

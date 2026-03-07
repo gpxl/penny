@@ -36,6 +36,12 @@ Work autonomously. Do not ask for confirmation. Complete the full task end-to-en
 """
 
 
+def _write_secure_file(path: Path, content: str) -> None:
+    """Write content to a file with owner-only permissions (0o600)."""
+    path.write_text(content, encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
 def _open_in_terminal(cmd: str) -> None:
     """Open a shell command in a new Terminal.app window using a .command file.
 
@@ -202,7 +208,7 @@ def spawn_claude_agent(
     env = {k: v for k, v in os.environ.items() if k in _ENV_PASSTHROUGH}
 
     # Write prompt to a file — avoids shell quoting issues and lets Claude read it directly.
-    prompt_file.write_text(prompt, encoding="utf-8")
+    _write_secure_file(prompt_file, prompt)
 
     # Kill any stale session with this name before creating a new one.
     subprocess.run([tmux_bin, "kill-session", "-t", session_name],
@@ -249,13 +255,13 @@ def spawn_claude_agent(
             # ── Background path: batch runner ──────────────────────────────────────
             # claude -p runs to completion and exits; PID tracking detects when done.
             runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
-            runner_file.write_text(
+            _write_secure_file(
+                runner_file,
                 "import os\n"
                 f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
                 "    prompt = f.read()\n"
                 f"os.execv({repr(claude_bin)}, [{repr(claude_bin)}, '--dangerously-skip-permissions',"
                 " '-p', prompt])\n",
-                encoding="utf-8",
             )
             proc = subprocess.Popen(
                 [tmux_bin, "new-session", "-d", "-s", session_name,
@@ -267,13 +273,13 @@ def spawn_claude_agent(
     else:
         # ── Screen fallback (background only) ──────────────────────────────────────
         runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
-        runner_file.write_text(
+        _write_secure_file(
+            runner_file,
             "import os\n"
             f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
             "    prompt = f.read()\n"
             f"os.execv({repr(claude_bin)}, [{repr(claude_bin)}, '--dangerously-skip-permissions',"
             " '-p', prompt])\n",
-            encoding="utf-8",
         )
         proc = subprocess.Popen(
             ["screen", "-dmS", session_name, "-h", "10000",
