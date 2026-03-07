@@ -27,13 +27,13 @@ from .analysis import should_trigger, uses_24h_time
 from .bg_worker import BackgroundWorker
 from .onboarding import needs_onboarding, run_onboarding
 from .paths import data_dir
+from .plugin import PluginManager
 from .popover_vc import ControlCenterViewController
 from .preflight import format_issues_for_alert, run_preflight
 from .dashboard import DashboardServer
 from .report import generate_report, open_report
 from .spawner import send_notification, spawn_claude_agent
 from .state import load_state, reset_period_if_needed, save_state
-from .tasks import filter_tasks, get_ready_tasks, get_task_description
 
 CONFIG_PATH = data_dir() / "config.yaml"
 
@@ -78,6 +78,10 @@ class PennyApp(NSObject):
         self._has_setup_issues: bool = False
         self._last_fetch_at: datetime | None = None
         self._event_monitor: Any = None
+
+        # Plugin system
+        self._plugin_mgr = PluginManager()
+        self._plugin_mgr.discover()
 
         # Build status item (icon in menu bar)
         status_bar = NSStatusBar.systemStatusBar()
@@ -223,11 +227,11 @@ class PennyApp(NSObject):
         if newly_done:
             save_state(state)
 
-        # Refresh task list with current config
+        # Refresh task list from plugins
         projects = self.config.get("projects", [])
-        all_tasks = get_ready_tasks(projects)
+        all_tasks = self._plugin_mgr.get_all_tasks(projects)
         self._all_ready_tasks = all_tasks
-        self._ready_tasks = filter_tasks(all_tasks, state, self.config)
+        self._ready_tasks = self._plugin_mgr.filter_all_tasks(all_tasks, state, self.config)
 
         # Update status item title
         self._update_status_title()
@@ -309,8 +313,9 @@ class PennyApp(NSObject):
     # ── Task/agent actions ────────────────────────────────────────────────
 
     def spawnTask_(self, task: Any) -> None:
-        desc = get_task_description(task)
-        record = spawn_claude_agent(task, desc, interactive=True)
+        desc = self._plugin_mgr.get_task_description(task)
+        prompt_tmpl = self._plugin_mgr.get_agent_prompt_template(task)
+        record = spawn_claude_agent(task, desc, interactive=True, prompt_template=prompt_tmpl)
         self.state.setdefault("agents_running", []).append(record)
         # Remove from ready list immediately so the popover reflects the change now
         self._all_ready_tasks = [t for t in self._all_ready_tasks if t.task_id != task.task_id]
@@ -412,27 +417,18 @@ class PennyApp(NSObject):
         })
 
     def runBdAction_(self, args_cwd: Any) -> None:
-        """Run a bd command in the background, then refresh."""
-        args, cwd = args_cwd
-        # Ensure all args are plain Python str so subprocess doesn't choke on NSString
-        str_args = [str(a) for a in args]
-        str_cwd = str(cwd) if cwd else ""
-        if not str_cwd:
-            return
+        """Run a bd command via the beads plugin, then refresh."""
+        self.pluginAction_(("bd_command", args_cwd))
+
+    def pluginAction_(self, action_payload: Any) -> None:
+        """Dispatch a plugin-specific action in the background, then refresh."""
+        action, payload = action_payload
 
         def _run() -> None:
             try:
-                r = subprocess.run(
-                    ["bd"] + str_args,
-                    cwd=str_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if r.returncode != 0:
-                    print(f"[penny] bd {str_args} failed (rc={r.returncode}): {r.stderr.strip()}", flush=True)
+                self._plugin_mgr.dispatch_action(str(action), payload)
             except Exception as exc:
-                print(f"[penny] bd {str_args} exception: {exc}", flush=True)
+                print(f"[penny] pluginAction_ error: {exc}", flush=True)
             finally:
                 self._worker.fetch(force=True)
 
@@ -514,7 +510,7 @@ class PennyApp(NSObject):
             subprocess.run(["open", f"http://127.0.0.1:{port}/"], check=False)
         except Exception:
             try:  # fallback to static report
-                path = generate_report(self.state, self.config)
+                path = generate_report(self.state, self.config, self._plugin_mgr)
                 open_report(path)
             except Exception:
                 pass
@@ -562,9 +558,11 @@ class PennyApp(NSObject):
 
         self.config = config
         self._sync_launchd_service()   # apply any config.yaml service changes at startup
+        self._plugin_mgr.sync_with_config(self, config)
 
         try:
             issues = run_preflight(config)
+            issues.extend(self._plugin_mgr.get_all_preflight_checks(config))
         except Exception as exc:
             print(f"[penny] preflight error: {exc}", flush=True)
             issues = []
@@ -591,8 +589,9 @@ class PennyApp(NSObject):
             return
         spawned = []
         for task in self._ready_tasks:
-            desc = get_task_description(task)
-            record = spawn_claude_agent(task, desc, interactive=False)
+            desc = self._plugin_mgr.get_task_description(task)
+            prompt_tmpl = self._plugin_mgr.get_agent_prompt_template(task)
+            record = spawn_claude_agent(task, desc, interactive=False, prompt_template=prompt_tmpl)
             self.state.setdefault("agents_running", []).append(record)
             spawned.append(f"{task.project_name}/{task.task_id}")
         if spawned:

@@ -33,7 +33,7 @@ from AppKit import (
 from Foundation import NSEdgeInsets
 
 from .analysis import format_reset_label
-from .ui_components import ProgressBarView, make_label
+from .ui_components import ProgressBarView, make_button, make_label
 
 # Popover width (fixed). Height is dynamic.
 _WIDTH: float = 380.0
@@ -151,15 +151,6 @@ def _make_separator() -> NSView:
     return sep
 
 
-def _make_button(title: str, target: Any, action: str, small: bool = True) -> NSButton:
-    btn = NSButton.buttonWithTitle_target_action_(title, target, action)
-    if small:
-        btn.setControlSize_(1)   # NSControlSizeSmall
-        btn.setFont_(NSFont.systemFontOfSize_(11.0))
-    btn.setBezelStyle_(4)        # NSBezelStyleRounded
-    return btn
-
-
 class ControlCenterViewController(NSViewController):
     """Popover view controller built entirely in code."""
 
@@ -226,6 +217,9 @@ class ControlCenterViewController(NSViewController):
         self._state: dict = {}
         self._all_ready_tasks: list = []
         self._agents_running: list = []
+        # Plugin UI sections
+        self._plugin_section_views: list[Any] = []
+        self._plugin_sections: list[Any] = []  # UISection instances
         return self
 
     def loadView(self) -> None:
@@ -233,6 +227,7 @@ class ControlCenterViewController(NSViewController):
         outer = NSView.alloc().initWithFrame_(((0, 0), (_WIDTH, 500)))
         self.setView_(outer)
         self._build(outer)
+        self._insert_plugin_sections()
 
     # ── Public update API ──────────────────────────────────────────────────
 
@@ -296,6 +291,14 @@ class ControlCenterViewController(NSViewController):
         self._rebuild_tasks_section(ready_tasks, agents_running)
         self._rebuild_agents_section(agents_running)
         self._rebuild_completed_section(recently_completed)
+
+        # Refresh plugin sections
+        for section in self._plugin_sections:
+            try:
+                section.rebuild(data)
+            except Exception as exc:
+                print(f"[penny] plugin section rebuild error: {exc}", flush=True)
+
         self._relayout()
 
     # ── Layout helpers ─────────────────────────────────────────────────────
@@ -356,10 +359,10 @@ class ControlCenterViewController(NSViewController):
         row.setDistribution_(2)  # NSStackViewDistributionEqualSpacing
 
         cap = section.capitalize()
-        prev_btn = _make_button("◀", self, f"_prev{cap}Page:")
+        prev_btn = make_button("◀", self, f"_prev{cap}Page:")
         page_lbl = make_label("1 / 1", size=11.0, secondary=True)
         page_lbl.setAlignment_(1)  # NSTextAlignmentCenter
-        next_btn = _make_button("▶", self, f"_next{cap}Page:")
+        next_btn = make_button("▶", self, f"_next{cap}Page:")
 
         row.addArrangedSubview_(prev_btn)
         row.addArrangedSubview_(page_lbl)
@@ -431,6 +434,10 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(self._lbl_weekly_reset)
         stack.addArrangedSubview_(_make_separator())
 
+        # ── Plugin section insertion point ─────────────────────────────────────
+        # Plugin sections are inserted here by _insert_plugin_sections()
+        self._plugin_insertion_index = len(stack.arrangedSubviews())
+
         # ── Ready Tasks ──────────────────────────────────────────────────────
         tasks_header = self._make_tasks_header_row()
         stack.addArrangedSubview_(tasks_header)
@@ -483,13 +490,53 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(footer)
 
     @objc.python_method
+    def _insert_plugin_sections(self) -> None:
+        """Build and insert plugin-contributed UI sections into the stack."""
+        if self._app is None:
+            return
+        mgr = getattr(self._app, "_plugin_mgr", None)
+        if mgr is None:
+            return
+
+        # Remove any previously inserted plugin views
+        for view in self._plugin_section_views:
+            self._root_stack.removeArrangedSubview_(view)
+            view.removeFromSuperview()
+        self._plugin_section_views = []
+        self._plugin_sections = []
+
+        sections = mgr.get_all_ui_sections()
+        if not sections:
+            return
+
+        insert_idx = self._plugin_insertion_index
+        for section in sections:
+            view = section.build_view()
+            if view is not None:
+                self._root_stack.insertArrangedSubview_atIndex_(view, insert_idx)
+                self._plugin_section_views.append(view)
+                self._plugin_sections.append(section)
+                insert_idx += 1
+                # Add separator after each plugin section
+                sep = _make_separator()
+                self._root_stack.insertArrangedSubview_atIndex_(sep, insert_idx)
+                self._plugin_section_views.append(sep)
+                insert_idx += 1
+
+    @objc.python_method
+    def rebuild_plugin_sections(self) -> None:
+        """Re-discover and rebuild plugin sections (e.g. after config change)."""
+        self._insert_plugin_sections()
+        self._relayout()
+
+    @objc.python_method
     def _make_header_row(self) -> NSView:
         row = NSStackView.alloc().init()
         row.setOrientation_(0)   # horizontal
         row.setSpacing_(8.0)
         row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
 
-        refresh_btn = _make_button("↻ Refresh", self, "refreshNow:")
+        refresh_btn = make_button("↻ Refresh", self, "refreshNow:")
         last_refresh_lbl = make_label("—", size=11.0, secondary=True)
         last_refresh_lbl.setAlignment_(2)  # NSTextAlignmentRight
 
@@ -539,9 +586,9 @@ class ControlCenterViewController(NSViewController):
         row.setSpacing_(8.0)
         row.setDistribution_(0)
 
-        report_btn = _make_button("View Report", self, "viewReport:")
-        prefs_btn = _make_button("Preferences", self, "openPrefs:")
-        quit_btn = _make_button("Quit", self, "quitApp:")
+        report_btn = make_button("View Report", self, "viewReport:")
+        prefs_btn = make_button("Preferences", self, "openPrefs:")
+        quit_btn = make_button("Quit", self, "quitApp:")
 
         for btn in (report_btn, prefs_btn, quit_btn):
             row.addArrangedSubview_(btn)
@@ -679,7 +726,7 @@ class ControlCenterViewController(NSViewController):
             status_lbl = make_label("⚙ Running…", size=11.0, secondary=True)
             title_row.addArrangedSubview_(status_lbl)
         else:
-            run_btn = _make_button("▶ Run", self, "_runTask:")
+            run_btn = make_button("▶ Run", self, "_runTask:")
             run_btn.setRepresentedObject_(task.task_id)
             title_row.addArrangedSubview_(run_btn)
 
@@ -741,9 +788,9 @@ class ControlCenterViewController(NSViewController):
         lbl = make_label(f"⚙ {task_id} · {title}", size=12.0)
         lbl.setContentCompressionResistancePriority_forOrientation_(250, 0)
 
-        log_btn = _make_button("Control", self, "_controlAgent:")
+        log_btn = make_button("Control", self, "_controlAgent:")
         log_btn.setRepresentedObject_(agent.get("task_id", ""))
-        stop_btn = _make_button("■ Stop", self, "_stopAgent:")
+        stop_btn = make_button("■ Stop", self, "_stopAgent:")
         stop_btn.setRepresentedObject_(agent.get("task_id", ""))
 
         row.addArrangedSubview_(lbl)
@@ -780,7 +827,7 @@ class ControlCenterViewController(NSViewController):
         row.setSpacing_(8.0)
         row.setDistribution_(2)  # NSStackViewDistributionEqualSpacing
         lbl = make_label("Recently Completed", size=11.0, secondary=True)
-        clear_btn = _make_button("Clear All", self, "_clearAllCompleted:")
+        clear_btn = make_button("Clear All", self, "_clearAllCompleted:")
         row.addArrangedSubview_(lbl)
         row.addArrangedSubview_(clear_btn)
         return row
@@ -840,7 +887,7 @@ class ControlCenterViewController(NSViewController):
             lbl.setTextColor_(NSColor.secondaryLabelColor())
         lbl.setContentCompressionResistancePriority_forOrientation_(249, 0)
 
-        dismiss_btn = _make_button("\u2715", self, "_dismissCompleted:")
+        dismiss_btn = make_button("\u2715", self, "_dismissCompleted:")
         dismiss_btn.setRepresentedObject_(task_id)
 
         row.addArrangedSubview_(lbl)
@@ -941,8 +988,11 @@ class ControlCenterViewController(NSViewController):
             self._expanded_task_id = task_id
             task = next((t for t in self._all_ready_tasks if t.task_id == task_id), None)
             if task and not getattr(task, "_cached_desc", None):
-                from .tasks import get_task_description
-                task._cached_desc = get_task_description(task)
+                mgr = getattr(self._app, "_plugin_mgr", None)
+                if mgr:
+                    task._cached_desc = mgr.get_task_description(task)
+                else:
+                    task._cached_desc = task.title
         self._rebuild_tasks_section(self._all_ready_tasks, self._agents_running)
         self._relayout()
 

@@ -10,7 +10,6 @@ from typing import Any
 
 from .analysis import get_usage_bar
 from .paths import data_dir
-from .tasks import get_ready_tasks, get_task_description
 
 REPORT_DIR = data_dir() / "reports"
 
@@ -45,7 +44,7 @@ def _history_svg(history: list[dict], width: int = 500, height: int = 120) -> st
     )
 
 
-def generate_report(state: dict[str, Any], config: dict[str, Any]) -> Path:
+def generate_report(state: dict[str, Any], config: dict[str, Any], plugin_mgr: Any = None) -> Path:
     """Generate a self-contained HTML status report. Returns path to the file."""
     REPORT_DIR.mkdir(exist_ok=True)
 
@@ -68,13 +67,13 @@ def generate_report(state: dict[str, Any], config: dict[str, Any]) -> Path:
 
     # Task queue — fetch all ready tasks and full descriptions
     projects = config.get("projects", [])
-    ready_tasks = get_ready_tasks(projects)
+    ready_tasks = plugin_mgr.get_all_tasks(projects) if plugin_mgr else []
     task_rows = ""
     spawned_ids = {s["task_id"] for s in state.get("spawned_this_week", [])}
     running_ids = {a["task_id"] for a in state.get("agents_running", [])}
 
     for task in ready_tasks:
-        desc_raw = get_task_description(task)
+        desc_raw = plugin_mgr.get_task_description(task) if plugin_mgr else task.title
         desc_escaped = _html.escape(desc_raw)
         status_badge = ""
         if task.task_id in running_ids:

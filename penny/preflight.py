@@ -52,15 +52,6 @@ def run_preflight(config: dict[str, Any]) -> list[PreflightIssue]:
             ))
 
 
-    bd_bin = shutil.which("bd")
-    if bd_bin is None:
-        issues.append(PreflightIssue(
-            severity="error",
-            message="`bd` (beads) CLI not found in PATH.",
-            fix_hint="Install it: brew install beads  (or: npm install -g @beads/bd)\n"
-                     "Then re-run install.sh so launchd picks up the new PATH.",
-        ))
-
     if shutil.which("tmux") is None and shutil.which("screen") is None:
         issues.append(PreflightIssue(
             severity="error",
@@ -128,14 +119,6 @@ def run_preflight(config: dict[str, Any]) -> list[PreflightIssue]:
                     fix_hint="Check the path in config.yaml or create the directory.",
                 ))
                 continue
-
-            beads_dir = project_path / ".beads"
-            if not beads_dir.exists():
-                issues.append(PreflightIssue(
-                    severity="warning",
-                    message=f"No .beads/ directory in {project_path}.",
-                    fix_hint=f"Run `bd init` inside {project_path} to initialise beads.",
-                ))
 
     return issues
 

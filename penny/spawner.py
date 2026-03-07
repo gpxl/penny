@@ -15,7 +15,7 @@ from typing import Any
 
 from .paths import data_dir
 
-AGENT_PROMPT_TEMPLATE = """\
+DEFAULT_AGENT_PROMPT_TEMPLATE = """\
 You are a background agent working on the project at {project_path}.
 
 Task {task_id}: {task_title}
@@ -24,18 +24,13 @@ Priority: {priority}
 Full task description:
 {task_description}
 
-Instructions (follow exactly):
-1. Run: bd prime  (understand full project context)
-2. Run: bd update {task_id} --status=in_progress
-3. Create a git branch for this task: git checkout -b agent/{task_id}
-4. Implement the solution following project conventions (TDD: write tests first, then implement)
-5. Run all project tests and fix any failures
-6. Run lint and fix all warnings (code is not complete until lint passes)
-7. Stage and commit with a descriptive message: git add <files> && git commit -m "..."
-8. Push the branch: git push -u origin agent/{task_id}
-9. Open a pull request: gh pr create --title "<task title>" --body "<summary of changes>"
-10. Run: bd close {task_id}
-11. Run: bd sync --flush-only
+Instructions:
+1. Create a git branch for this task: git checkout -b agent/{task_id}
+2. Implement the solution following project conventions
+3. Run all project tests and fix any failures
+4. Stage and commit with a descriptive message
+5. Push the branch: git push -u origin agent/{task_id}
+6. Open a pull request: gh pr create --title "<task title>" --body "<summary of changes>"
 
 Work autonomously. Do not ask for confirmation. Complete the full task end-to-end.
 """
@@ -130,6 +125,7 @@ def spawn_claude_agent(
     task_description: str,
     dry_run: bool = False,
     interactive: bool = False,
+    prompt_template: str | None = None,
 ) -> dict[str, Any]:
     """
     Spawn a Claude agent for a task inside a named tmux session.
@@ -145,7 +141,8 @@ def spawn_claude_agent(
         tmux session.  Claude exits when the task completes; PID tracking in
         check_running_agents() detects completion automatically.
     """
-    prompt = AGENT_PROMPT_TEMPLATE.format(
+    template = prompt_template or DEFAULT_AGENT_PROMPT_TEMPLATE
+    prompt = template.format(
         project_path=task.project_path,
         task_id=task.task_id,
         task_title=task.title,

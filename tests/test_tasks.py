@@ -1,4 +1,4 @@
-"""Unit tests for penny/tasks.py."""
+"""Unit tests for penny/tasks.py (Task dataclass) and penny/plugins/beads_plugin.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from penny.tasks import Task, _parse_bd_ready, get_ready_tasks
+from penny.tasks import Task
+from penny.plugins.beads_plugin import Plugin, _parse_bd_ready
 
 
 BD_READY_SAMPLE = """\
@@ -55,27 +56,30 @@ class TestParseBdReady:
             assert tasks[0].priority == p
 
 
-class TestGetReadyTasks:
+class TestBeadsPluginGetTasks:
     def test_returns_empty_when_projects_empty(self):
-        tasks = get_ready_tasks([])
+        plugin = Plugin()
+        tasks = plugin.get_tasks([])
         assert tasks == []
 
     def test_returns_empty_when_bd_fails(self, tmp_path):
+        plugin = Plugin()
         project = {"path": str(tmp_path), "priority": 1}
-        # Make the path exist but bd returns non-zero
-        with patch("penny.tasks.subprocess.run") as mock_run:
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=1, stdout="", stderr="error"
             )
-            tasks = get_ready_tasks([project])
+            tasks = plugin.get_tasks([project])
         assert tasks == []
 
     def test_returns_empty_when_project_path_missing(self, tmp_path):
+        plugin = Plugin()
         project = {"path": str(tmp_path / "nonexistent"), "priority": 1}
-        tasks = get_ready_tasks([project])
+        tasks = plugin.get_tasks([project])
         assert tasks == []
 
     def test_sorts_by_project_priority_then_task_priority(self, tmp_path):
+        plugin = Plugin()
         proj1 = tmp_path / "proj1"
         proj1.mkdir()
         proj2 = tmp_path / "proj2"
@@ -93,8 +97,8 @@ class TestGetReadyTasks:
             {"path": str(proj1), "priority": 1},
             {"path": str(proj2), "priority": 2},
         ]
-        with patch("penny.tasks.subprocess.run", side_effect=fake_run):
-            tasks = get_ready_tasks(projects)
+        with patch("penny.plugins.beads_plugin.subprocess.run", side_effect=fake_run):
+            tasks = plugin.get_tasks(projects)
 
         # proj1 has priority 1 (wins) even though task is P2
         assert tasks[0].project_name == "proj1"

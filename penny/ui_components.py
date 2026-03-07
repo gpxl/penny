@@ -7,6 +7,7 @@ from typing import Any
 import objc
 from AppKit import (
     NSBezierPath,
+    NSButton,
     NSColor,
     NSFont,
     NSTextField,
@@ -72,6 +73,16 @@ class ProgressBarView(NSView):
         )
         fill_color.setFill()
         fill_path.fill()
+
+
+def make_button(title: str, target: Any, action: str, small: bool = True) -> NSButton:
+    """Return a styled NSButton for use in popover rows."""
+    btn = NSButton.buttonWithTitle_target_action_(title, target, action)
+    if small:
+        btn.setControlSize_(1)   # NSControlSizeSmall
+        btn.setFont_(NSFont.systemFontOfSize_(11.0))
+    btn.setBezelStyle_(4)        # NSBezelStyleRounded
+    return btn
 
 
 def make_label(text: str = "", size: float = 13.0, bold: bool = False,
