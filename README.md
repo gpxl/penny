@@ -4,6 +4,15 @@ macOS menu bar app that monitors your Claude Max token usage, predicts unused we
 
 ---
 
+## Resources
+
+- [CHANGELOG](CHANGELOG.md) — version history
+- [Security Policy](SECURITY.md) — threat model and vulnerability reporting
+- [Contributing](CONTRIBUTING.md) — dev setup and PR process
+- [API Reference](docs/API.md) — dashboard HTTP API for scripting
+
+---
+
 ## What it does
 
 1. **Token monitoring** — reads `~/.claude/stats-cache.json` every 5 minutes and displays current and projected weekly usage in the menu bar.
@@ -119,6 +128,8 @@ Config file: `~/.penny/config.yaml` (or `$PENNY_HOME/config.yaml`)
 | `projects[].priority` | int | — | Lower = higher priority; tasks from lower-numbered projects spawn first |
 | `trigger.min_capacity_percent` | int | 30 | Spawn only if ≥ N% of weekly budget predicted unused |
 | `trigger.max_days_remaining` | int | 2 | Spawn only if ≤ N days remain in the billing week |
+| `work.agent_permissions` | string | `"full"` | Agent permission mode: `full`, `scoped`, or `off` |
+| `work.allowed_tools` | list | — | Tool allowlist when `agent_permissions: scoped` |
 | `work.max_agents_per_run` | int | 2 | Maximum agents to spawn per 4-hour cycle |
 | `work.task_priority_levels` | list | [P1, P2, P3] | Beads priority labels to include |
 | `notifications.spawn` | bool | true | macOS notification when agents are spawned |
@@ -232,16 +243,43 @@ brew update-python-resources gpxl/penny/penny
 
 ## Security & Autonomous Agent Warning
 
-Penny spawns `claude --dangerously-skip-permissions` on your codebases automatically. Understand what this means before enabling:
+Penny spawns Claude agents on your codebases automatically. Understand what this means before enabling.
 
+### Agent permission modes
+
+Control how much autonomy agents have via `work.agent_permissions` in `config.yaml`:
+
+| Mode | Flag passed to `claude` | Behaviour |
+|---|---|---|
+| `full` (default) | `--dangerously-skip-permissions` | Agents operate without any permission prompts — maximum autonomy |
+| `scoped` | `--allowed-tools <list>` | Agents may only use the tools listed in `work.allowed_tools` |
+| `off` | *(no spawn)* | Monitoring only — Penny tracks tasks and capacity but never spawns agents |
+
+**Example — scoped mode:**
+```yaml
+work:
+  agent_permissions: "scoped"
+  allowed_tools:
+    - Read
+    - Edit
+    - Write
+    - Glob
+    - Grep
+    - "Bash(git:*)"
+    - "Bash(bd:*)"
+```
+
+**`full` mode implications:**
 - **No permission prompts.** Claude agents will read, write, and delete files; run shell commands; create git branches; commit code; and open pull requests — all without asking for confirmation.
 - **Runs on your actual projects.** Agents work inside the directories listed in `config.yaml`. Changes are real and can be pushed to remote repositories.
 - **Triggered automatically.** When token capacity thresholds are met, Penny spawns agents on its own schedule — no user action required.
 
-### How to limit scope
+### How to limit scope further
 
 | Config key | What it controls |
 |---|---|
+| `work.agent_permissions` | Permission mode: `full`, `scoped`, or `off` |
+| `work.allowed_tools` | Tool allowlist when `agent_permissions: scoped` |
 | `work.max_agents_per_run` | Cap the number of agents spawned per 4-hour cycle (default: 2) |
 | `work.task_priority_levels` | Restrict which Beads priority labels are eligible (default: P1, P2, P3) |
 | `trigger.min_capacity_percent` | Raise this to require a larger unused-budget buffer before spawning |
@@ -251,7 +289,8 @@ Penny spawns `claude --dangerously-skip-permissions` on your codebases automatic
 
 1. Review all `bd ready` tasks in your configured projects — only tasks marked "ready" will be spawned.
 2. Set conservative thresholds in `config.yaml` until you are comfortable with the behaviour.
-3. Consider keeping `work.max_agents_per_run: 1` initially.
+3. Consider starting with `agent_permissions: scoped` or `agent_permissions: off` before enabling `full`.
+4. Consider keeping `work.max_agents_per_run: 1` initially.
 
 ---
 

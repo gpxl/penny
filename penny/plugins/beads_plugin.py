@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..plugin import PennyPlugin, UISection
+from ..plugin import PennyPlugin
 from ..preflight import PreflightIssue
 from ..tasks import Task
 
@@ -151,17 +151,23 @@ class Plugin(PennyPlugin):
             output = _run_bd(["ready"], path)
             tasks = _parse_bd_ready(output, path)
             for t in tasks:
-                t._project_priority = project.get("priority", 99)  # type: ignore[attr-defined]
+                t.metadata["project_priority"] = project.get("priority", 99)
             all_tasks.extend(tasks)
 
         priority_order = {"P1": 1, "P2": 2, "P3": 3}
         all_tasks.sort(
             key=lambda t: (
-                getattr(t, "_project_priority", 99),
+                t.metadata.get("project_priority", 99),
                 priority_order.get(t.priority, 99),
             )
         )
         return all_tasks
+
+    def on_agent_spawned(self, task: Task, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
+        plugin_state.setdefault("spawned_task_ids", []).append(task.task_id)
+
+    def on_agent_completed(self, record: dict[str, Any], plugin_state: dict[str, Any]) -> None:
+        pass
 
     def filter_tasks(
         self,
@@ -173,10 +179,8 @@ class Plugin(PennyPlugin):
         max_agents = work_cfg.get("max_agents_per_run", 2)
         priority_levels = work_cfg.get("task_priority_levels", ["P1", "P2", "P3"])
 
-        spawned_ids = {
-            s["task_id"]
-            for s in state.get("spawned_this_week", [])
-        }
+        beads_state = state.get("plugin_state", {}).get("beads", {})
+        spawned_ids = set(beads_state.get("spawned_task_ids", []))
         running_ids = {
             a["task_id"]
             for a in state.get("agents_running", [])
@@ -188,6 +192,24 @@ class Plugin(PennyPlugin):
             if t.task_id not in skip_ids and t.priority in priority_levels
         ]
         return filtered[:max_agents]
+
+    def get_completed_tasks(
+        self, projects: list[dict[str, Any]], plugin_state: dict[str, Any]
+    ) -> list[Task]:
+        seen_ids = set(plugin_state.get("seen_closed_ids", []))
+        new_tasks: list[Task] = []
+        for project in projects:
+            path = str(Path(project["path"]).expanduser())
+            if not Path(path).exists():
+                continue
+            output = _run_bd(["list", "--status=closed"], path)
+            tasks = _parse_bd_ready(output, path)
+            for task in tasks:
+                if task.task_id not in seen_ids:
+                    new_tasks.append(task)
+                    seen_ids.add(task.task_id)
+        plugin_state["seen_closed_ids"] = list(seen_ids)
+        return new_tasks
 
     def get_task_description(self, task: Task) -> str | None:
         output = _run_bd(["show", task.task_id], task.project_path)

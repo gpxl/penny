@@ -164,15 +164,8 @@ def _snapshot(app) -> dict[str, Any]:
     # (_project_priority is a dynamic attr, not a field — excluded automatically)
     ready = [dataclasses.asdict(t) for t in (app._all_ready_tasks or [])]
 
-    # Deduplicate spawned_this_week by task_id (most recent entry wins)
-    seen: set[str] = set()
-    completed: list = []
-    for agent in reversed(state.get("spawned_this_week", [])):
-        tid = agent.get("task_id", "")
-        if tid not in seen:
-            seen.add(tid)
-            completed.append(agent)
-    completed.reverse()
+    # recently_completed is already deduped and capped at 20 by core
+    completed = list(state.get("recently_completed", []))
 
     # Apply OS 12/24h preference to reset labels (same as popover_vc)
     if pred_dict.get("reset_label"):

@@ -25,6 +25,15 @@ trigger:
 work:
   max_agents_per_run: 2
   task_priority_levels: [P1, P2, P3]
+  agent_permissions: "off"   # off | scoped | full  (default: off — monitoring only)
+  # allowed_tools:           # only used when agent_permissions: scoped
+  #   - Read
+  #   - Edit
+  #   - Write
+  #   - Glob
+  #   - Grep
+  #   - "Bash(git:*)"
+  #   - "Bash(bd:*)"
 
 notifications:
   spawn: true

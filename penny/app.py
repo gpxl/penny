@@ -25,12 +25,12 @@ from Foundation import NSObject, NSTimer
 
 from .analysis import should_trigger, uses_24h_time
 from .bg_worker import BackgroundWorker
-from .onboarding import needs_onboarding, run_onboarding
+from .dashboard import DashboardServer
+from .onboarding import check_full_permissions_consent, needs_onboarding, run_onboarding
 from .paths import data_dir
 from .plugin import PluginManager
 from .popover_vc import ControlCenterViewController
 from .preflight import format_issues_for_alert, run_preflight
-from .dashboard import DashboardServer
 from .report import generate_report, open_report
 from .spawner import send_notification, spawn_claude_agent
 from .state import load_state, reset_period_if_needed, save_state
@@ -41,7 +41,7 @@ PLIST_LABEL = "com.gpxl.penny"
 PLIST_LAUNCHAGENTS = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
 
 
-def _script_dir_from_plist() -> "Path | None":
+def _script_dir_from_plist() -> Path | None:
     """Return WorkingDirectory from installed plist (= SCRIPT_DIR)."""
     try:
         with PLIST_LAUNCHAGENTS.open("rb") as f:
@@ -247,9 +247,6 @@ class PennyApp(NSObject):
 
         # Handle newly-completed agents
         for agent in newly_done:
-            sw = state.setdefault("spawned_this_week", [])
-            if not any(a.get("task_id") == agent.get("task_id") for a in sw):
-                sw.append(agent)
             rc = state.setdefault("recently_completed", [])
             if not any(a.get("task_id") == agent.get("task_id") for a in rc):
                 rc.append(agent)
@@ -259,13 +256,48 @@ class PennyApp(NSObject):
                     "Penny",
                     f"{agent['task_id']} completed \u2713 \u2014 {agent['title']} ({agent['project']})",
                 )
+            self._plugin_mgr.notify_agent_completed(agent, state)
         if newly_done:
             save_state(state)
 
         # Refresh task list from plugins
         projects = self.config.get("projects", [])
         all_tasks = self._plugin_mgr.get_all_tasks(projects)
-        self._all_ready_tasks = all_tasks
+
+        # Detect tasks completed by external processes (humans, other tools).
+        # Each plugin tracks which IDs it has already reported in plugin_state.
+        new_external = self._plugin_mgr.get_all_completed_tasks(projects, state)
+        if new_external:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for task in new_external:
+                record = {
+                    "task_id": task.task_id,
+                    "project": task.project_name,
+                    "project_path": task.project_path,
+                    "title": task.title,
+                    "priority": task.priority,
+                    "status": "completed",
+                    "completed_by": "external",
+                    "spawned_at": now_iso,
+                    "log": "",
+                }
+                rc = state.setdefault("recently_completed", [])
+                rc.append(record)
+                state["recently_completed"] = rc[-20:]
+            save_state(state)
+            if self.config.get("notifications", {}).get("completion", True):
+                for task in new_external:
+                    send_notification(
+                        "Penny",
+                        f"{task.task_id} done externally \u2713 \u2014 {task.title} ({task.project_name})",
+                    )
+
+        # Exclude tasks already in recently_completed or running from the display list.
+        # Tasks closed in beads won't reappear in `bd ready` anyway.
+        recently_ids = {a.get("task_id") for a in state.get("recently_completed", [])}
+        running_ids = {a.get("task_id") for a in state.get("agents_running", [])}
+        exclude_ids = recently_ids | running_ids
+        self._all_ready_tasks = [t for t in all_tasks if t.task_id not in exclude_ids]
         self._ready_tasks = self._plugin_mgr.filter_all_tasks(all_tasks, state, self.config)
 
         # Update status item title
@@ -348,10 +380,14 @@ class PennyApp(NSObject):
     # ── Task/agent actions ────────────────────────────────────────────────
 
     def spawnTask_(self, task: Any) -> None:
+        if self.config.get("work", {}).get("agent_permissions") == "off":
+            print(f"[penny] agent_permissions=off — skipping spawn of {task.task_id}", flush=True)
+            return
         desc = self._plugin_mgr.get_task_description(task)
         prompt_tmpl = self._plugin_mgr.get_agent_prompt_template(task)
-        record = spawn_claude_agent(task, desc, interactive=True, prompt_template=prompt_tmpl)
+        record = spawn_claude_agent(task, desc, interactive=True, prompt_template=prompt_tmpl, config=self.config)
         self.state.setdefault("agents_running", []).append(record)
+        self._plugin_mgr.notify_agent_spawned(task, record, self.state)
         # Remove from ready list immediately so the popover reflects the change now
         self._all_ready_tasks = [t for t in self._all_ready_tasks if t.task_id != task.task_id]
         save_state(self.state)
@@ -594,6 +630,19 @@ class PennyApp(NSObject):
         self.config = config
         self._config_mtime = _config_mtime()
         self._sync_launchd_service()   # apply any config.yaml service changes at startup
+
+        # One-time consent check: if agent_permissions=full was enabled without going
+        # through onboarding, show a confirmation dialog and record consent in state.
+        if config.get("work", {}).get("agent_permissions") == "full":
+            if not check_full_permissions_consent(config, self.state):
+                # User declined — revert to off in config so agents don't spawn
+                config.setdefault("work", {})["agent_permissions"] = "off"
+                self.config = config
+                self._write_config()
+                print("[penny] Full-permission consent declined — reverted to off", flush=True)
+            else:
+                save_state(self.state)
+
         self._plugin_mgr.sync_with_config(self, config)
 
         try:
@@ -623,12 +672,16 @@ class PennyApp(NSObject):
     def _spawn_agents(self) -> None:
         if not self._ready_tasks:
             return
+        if self.config.get("work", {}).get("agent_permissions") == "off":
+            print("[penny] agent_permissions=off — automatic spawning disabled", flush=True)
+            return
         spawned = []
         for task in self._ready_tasks:
             desc = self._plugin_mgr.get_task_description(task)
             prompt_tmpl = self._plugin_mgr.get_agent_prompt_template(task)
-            record = spawn_claude_agent(task, desc, interactive=False, prompt_template=prompt_tmpl)
+            record = spawn_claude_agent(task, desc, interactive=False, prompt_template=prompt_tmpl, config=self.config)
             self.state.setdefault("agents_running", []).append(record)
+            self._plugin_mgr.notify_agent_spawned(task, record, self.state)
             spawned.append(f"{task.project_name}/{task.task_id}")
         if spawned:
             save_state(self.state)

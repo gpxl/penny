@@ -50,7 +50,7 @@ def generate_report(state: dict[str, Any], config: dict[str, Any], plugin_mgr: A
 
     pred = state.get("predictions", {})
     agents_running = state.get("agents_running", [])
-    spawned = state.get("spawned_this_week", [])
+    spawned = state.get("recently_completed", [])
     history = state.get("period_history", [])
 
     pct_all = pred.get("pct_all", 0.0)
@@ -69,7 +69,7 @@ def generate_report(state: dict[str, Any], config: dict[str, Any], plugin_mgr: A
     projects = config.get("projects", [])
     ready_tasks = plugin_mgr.get_all_tasks(projects) if plugin_mgr else []
     task_rows = ""
-    spawned_ids = {s["task_id"] for s in state.get("spawned_this_week", [])}
+    recently_ids = {s["task_id"] for s in state.get("recently_completed", [])}
     running_ids = {a["task_id"] for a in state.get("agents_running", [])}
 
     for task in ready_tasks:
@@ -78,7 +78,7 @@ def generate_report(state: dict[str, Any], config: dict[str, Any], plugin_mgr: A
         status_badge = ""
         if task.task_id in running_ids:
             status_badge = ' <span style="color:#f59e0b;font-size:0.7rem">● running</span>'
-        elif task.task_id in spawned_ids:
+        elif task.task_id in recently_ids:
             status_badge = ' <span style="color:#10b981;font-size:0.7rem">✓ done</span>'
         priority_color = {"P1": "#ef4444", "P2": "#f59e0b", "P3": "#6b7280"}.get(task.priority, "#6b7280")
         task_rows += f"""

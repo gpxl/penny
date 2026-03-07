@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from penny.state import (
     _default_state,
@@ -15,7 +12,6 @@ from penny.state import (
     load_state,
     save_state,
 )
-
 
 # ── load_state ───────────────────────────────────────────────────────────────
 
@@ -84,14 +80,15 @@ class TestSaveState:
         state_file = tmp_path / "state.json"
         original = {
             "agents_running": [{"task_id": "t-1", "pid": 123}],
-            "spawned_this_week": [{"task_id": "t-2", "status": "completed"}],
-            "recently_completed": [],
+            "recently_completed": [{"task_id": "t-2", "status": "completed"}],
+            "plugin_state": {"beads": {"spawned_task_ids": ["t-2"]}},
         }
         with patch("penny.state.STATE_PATH", state_file):
             save_state(original)
             loaded = load_state()
         assert loaded["agents_running"][0]["task_id"] == "t-1"
-        assert loaded["spawned_this_week"][0]["status"] == "completed"
+        assert loaded["recently_completed"][0]["status"] == "completed"
+        assert loaded["plugin_state"]["beads"]["spawned_task_ids"] == ["t-2"]
 
     def test_handles_datetime_serialization(self, tmp_path):
         state_file = tmp_path / "state.json"
@@ -122,19 +119,22 @@ class TestDefaultState:
             "current_period_start",
             "predictions",
             "agents_running",
-            "spawned_this_week",
             "recently_completed",
             "period_history",
             "session_history",
             "last_session_scan",
+            "plugin_state",
         }
         assert set(state.keys()) == expected_keys
 
     def test_lists_are_empty(self):
         state = _default_state()
-        for key in ("agents_running", "spawned_this_week", "recently_completed",
-                     "period_history", "session_history"):
+        for key in ("agents_running", "recently_completed", "period_history", "session_history"):
             assert state[key] == [], f"{key} should be empty"
+
+    def test_plugin_state_is_empty_dict(self):
+        state = _default_state()
+        assert state["plugin_state"] == {}
 
     def test_returns_fresh_copy(self):
         s1 = _default_state()

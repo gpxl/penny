@@ -5,14 +5,14 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from penny.spawner import (
+    _build_claude_flags,
     _get_screen_pid,
     _get_tmux_pid,
     _pid_is_alive,
     _tmux_available,
     _tmux_pane_command,
+    _write_secure_file,
     check_running_agents,
     spawn_claude_agent,
 )
@@ -29,6 +29,43 @@ def _make_task(**overrides):
     }
     defaults.update(overrides)
     return Task(**defaults)
+
+
+class TestBuildClaudeFlags:
+    def test_full_mode_returns_dangerously_skip(self):
+        assert _build_claude_flags({"work": {"agent_permissions": "full"}}) == [
+            "--dangerously-skip-permissions"
+        ]
+
+    def test_default_mode_returns_dangerously_skip(self):
+        assert _build_claude_flags({}) == ["--dangerously-skip-permissions"]
+
+    def test_none_config_returns_dangerously_skip(self):
+        assert _build_claude_flags(None) == ["--dangerously-skip-permissions"]
+
+    def test_scoped_mode_returns_allowed_tools(self):
+        config = {
+            "work": {
+                "agent_permissions": "scoped",
+                "allowed_tools": ["Read", "Edit", "Bash(git:*)"],
+            }
+        }
+        flags = _build_claude_flags(config)
+        assert flags == ["--allowed-tools", "Read,Edit,Bash(git:*)"]
+
+    def test_scoped_mode_without_tools_falls_back_to_full(self):
+        config = {"work": {"agent_permissions": "scoped", "allowed_tools": []}}
+        assert _build_claude_flags(config) == ["--dangerously-skip-permissions"]
+
+    def test_scoped_mode_missing_allowed_tools_key_falls_back_to_full(self):
+        config = {"work": {"agent_permissions": "scoped"}}
+        assert _build_claude_flags(config) == ["--dangerously-skip-permissions"]
+
+    def test_off_mode_returns_dangerously_skip(self):
+        # off mode is handled by callers — _build_claude_flags is not called
+        # when mode is off, but if it were called, it defaults to full
+        config = {"work": {"agent_permissions": "off"}}
+        assert _build_claude_flags(config) == ["--dangerously-skip-permissions"]
 
 
 class TestTmuxAvailable:
@@ -129,6 +166,28 @@ class TestSpawnClaudeAgentDryRun:
             )
             record = spawn_claude_agent(task, "desc", dry_run=True)
         assert record["session"] == "penny-myproject-xyz"
+
+
+class TestWriteSecureFile:
+    def test_file_has_owner_only_permissions(self, tmp_path):
+        target = tmp_path / "secret.txt"
+        _write_secure_file(target, "sensitive content")
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_file_content_is_written(self, tmp_path):
+        target = tmp_path / "secret.txt"
+        _write_secure_file(target, "hello world")
+        assert target.read_text(encoding="utf-8") == "hello world"
+
+    def test_overwrites_existing_file(self, tmp_path):
+        target = tmp_path / "existing.txt"
+        target.write_text("old content")
+        os.chmod(target, 0o644)
+        _write_secure_file(target, "new content")
+        assert target.read_text(encoding="utf-8") == "new content"
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o600
 
 
 class TestPidIsAlive:

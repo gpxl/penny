@@ -6,8 +6,12 @@ a running Penny instance (except where noted).
 
 from __future__ import annotations
 
+import http.server
+import json
 import os
+import socket
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -162,12 +166,6 @@ class TestCLIArgumentValidation:
 
 
 # ── CLI happy-path tests with mock server ────────────────────────────────────
-
-import http.server
-import json
-import socket
-import threading
-
 
 _SAMPLE_STATE = {
     "generated_at": "2025-03-07T12:00:00",
@@ -350,7 +348,7 @@ class TestCLILogsCommand:
     def test_logs_shows_last_80_lines(self, cli_env):
         env, _, _ = cli_env
         result = _run_env(["logs"], env)
-        lines = [l for l in result.stdout.strip().split("\n") if l.startswith("log line")]
+        lines = [line for line in result.stdout.strip().split("\n") if line.startswith("log line")]
         assert len(lines) == 80
 
     def test_logs_includes_recent_not_old(self, cli_env):

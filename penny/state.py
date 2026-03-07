@@ -35,11 +35,11 @@ def _default_state() -> dict[str, Any]:
         "current_period_start": None,
         "predictions": {},
         "agents_running": [],
-        "spawned_this_week": [],
-        "recently_completed": [],  # agents completed this session; user-clearable
+        "recently_completed": [],  # last-20 agent completions; user-clearable
         "period_history": [],    # past completed periods for budget calibration
         "session_history": [],   # past completed sub-sessions for budget calibration
         "last_session_scan": None,
+        "plugin_state": {},      # namespaced dict for plugin-owned state; never reset by core
     }
 
 
@@ -128,6 +128,5 @@ def reset_period_if_needed(state: dict[str, Any]) -> dict[str, Any]:
 
     # Reset for new period
     state["current_period_start"] = period_start_str
-    state["spawned_this_week"] = []
     state["agents_running"] = []
     return state

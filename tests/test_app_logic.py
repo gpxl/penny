@@ -6,7 +6,6 @@ and task/agent action methods — all without requiring a running AppKit event l
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,7 +13,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from penny.analysis import Prediction
-
 
 # ── _compact_reset_time ──────────────────────────────────────────────────────
 #
@@ -30,6 +28,7 @@ def _compact_reset_time(label: str) -> str:
     reflected here. If they drift, the integration tests will catch it.
     """
     import re
+
     from penny.analysis import uses_24h_time
 
     if not label or label == "\u2014":
@@ -270,9 +269,6 @@ class TestDidFetchDataLogic:
         """Reproduce the newly-completed agent processing from _didFetchData_."""
         notifications = []
         for agent in newly_done:
-            sw = state.setdefault("spawned_this_week", [])
-            if not any(a.get("task_id") == agent.get("task_id") for a in sw):
-                sw.append(agent)
             rc = state.setdefault("recently_completed", [])
             if not any(a.get("task_id") == agent.get("task_id") for a in rc):
                 rc.append(agent)
@@ -281,23 +277,21 @@ class TestDidFetchDataLogic:
                 notifications.append(agent["task_id"])
         return notifications
 
-    def test_newly_done_added_to_spawned_this_week(self):
-        state = {"spawned_this_week": [], "recently_completed": []}
+    def test_newly_done_added_to_recently_completed(self):
+        state = {"recently_completed": []}
         agent = {"task_id": "t-1", "title": "Fix", "project": "proj", "status": "completed"}
         self._process_newly_done(state, [agent])
-        assert len(state["spawned_this_week"]) == 1
-        assert state["spawned_this_week"][0]["task_id"] == "t-1"
+        assert len(state["recently_completed"]) == 1
+        assert state["recently_completed"][0]["task_id"] == "t-1"
 
     def test_newly_done_deduplicates(self):
         agent = {"task_id": "t-1", "title": "Fix", "project": "proj", "status": "completed"}
-        state = {"spawned_this_week": [agent], "recently_completed": [agent]}
+        state = {"recently_completed": [agent]}
         self._process_newly_done(state, [agent])
-        assert len(state["spawned_this_week"]) == 1
         assert len(state["recently_completed"]) == 1
 
     def test_recently_completed_capped_at_20(self):
         state = {
-            "spawned_this_week": [],
             "recently_completed": [
                 {"task_id": f"old-{i}", "status": "completed"} for i in range(20)
             ],
@@ -308,19 +302,19 @@ class TestDidFetchDataLogic:
         assert state["recently_completed"][-1]["task_id"] == "new-1"
 
     def test_unknown_status_skips_notification(self):
-        state = {"spawned_this_week": [], "recently_completed": []}
+        state = {"recently_completed": []}
         agent = {"task_id": "t-1", "status": "unknown"}
         notifs = self._process_newly_done(state, [agent])
         assert notifs == []
 
     def test_completed_status_sends_notification(self):
-        state = {"spawned_this_week": [], "recently_completed": []}
+        state = {"recently_completed": []}
         agent = {"task_id": "t-1", "status": "completed", "title": "Fix", "project": "proj"}
         notifs = self._process_newly_done(state, [agent])
         assert notifs == ["t-1"]
 
     def test_notifications_disabled(self):
-        state = {"spawned_this_week": [], "recently_completed": []}
+        state = {"recently_completed": []}
         agent = {"task_id": "t-1", "status": "completed"}
         notifs = self._process_newly_done(state, [agent], notify_completion=False)
         assert notifs == []
@@ -725,8 +719,9 @@ class TestLoadAndRefreshLogic:
 
     def test_yaml_error_stops_refresh(self):
         """If config has YAML error, status title shows warning and no fetch."""
-        from penny.app import _safe_load_config
         import tempfile
+
+        from penny.app import _safe_load_config
         with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
             f.write("bad: [unclosed\n")
             f.flush()
@@ -840,7 +835,7 @@ class TestConfigHotReload:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("projects: []")
 
-        from penny.app import _config_mtime, _safe_load_config
+        from penny.app import _config_mtime
         with patch("penny.app.CONFIG_PATH", cfg):
             mt1 = _config_mtime()
 
