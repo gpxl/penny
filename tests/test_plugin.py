@@ -936,3 +936,436 @@ class TestPluginIntegration:
         tasks = mgr.get_all_tasks([])
         assert len(tasks) == 1
         assert tasks[0].task_id == "ok"
+
+
+# ── PennyPlugin default hook returns ─────────────────────────────────────────
+
+
+class TestPluginDefaultHooks:
+    """Verify new extensibility hooks have safe defaults."""
+
+    def test_cli_commands_returns_empty_list(self):
+        plugin = StubPlugin()
+        assert plugin.cli_commands() == []
+
+    def test_dashboard_card_html_returns_none(self):
+        plugin = StubPlugin()
+        assert plugin.dashboard_card_html({}, {}) is None
+
+    def test_dashboard_api_handler_returns_none(self):
+        plugin = StubPlugin()
+        assert plugin.dashboard_api_handler("GET", "anything", {}) is None
+
+    def test_report_section_returns_none(self):
+        plugin = StubPlugin()
+        assert plugin.report_section({}, {}) is None
+
+
+# ── PluginManager.get_dashboard_cards ────────────────────────────────────────
+
+
+class TestGetDashboardCards:
+    def test_empty_when_no_active_plugins(self):
+        mgr = PluginManager()
+        assert mgr.get_dashboard_cards({}, {}) == []
+
+    def test_returns_card_when_plugin_contributes(self):
+        class CardPlugin(StubPlugin):
+            def dashboard_card_html(self, state, config):
+                return "<h2>My Card</h2>"
+
+        plugin = CardPlugin(plugin_name="card")
+        mgr = PluginManager()
+        mgr._active["card"] = plugin
+        cards = mgr.get_dashboard_cards({}, {})
+        assert len(cards) == 1
+        assert cards[0]["name"] == "card"
+        assert "<h2>My Card</h2>" in cards[0]["html"]
+
+    def test_skips_none_returns(self):
+        """Plugins returning None contribute no card."""
+        plugin = StubPlugin(plugin_name="nocard")  # default returns None
+        mgr = PluginManager()
+        mgr._active["nocard"] = plugin
+        assert mgr.get_dashboard_cards({}, {}) == []
+
+    def test_error_in_plugin_does_not_propagate(self):
+        class BoomCard(StubPlugin):
+            def dashboard_card_html(self, state, config):
+                raise RuntimeError("boom")
+
+        plugin = BoomCard(plugin_name="boom")
+        mgr = PluginManager()
+        mgr._active["boom"] = plugin
+        # Should not raise
+        assert mgr.get_dashboard_cards({}, {}) == []
+
+    def test_multiple_plugins_contribute_cards(self):
+        class CardA(StubPlugin):
+            def dashboard_card_html(self, state, config):
+                return "<h2>Card A</h2>"
+
+        class CardB(StubPlugin):
+            def dashboard_card_html(self, state, config):
+                return "<h2>Card B</h2>"
+
+        mgr = PluginManager()
+        mgr._active["a"] = CardA(plugin_name="a")
+        mgr._active["b"] = CardB(plugin_name="b")
+        cards = mgr.get_dashboard_cards({}, {})
+        assert len(cards) == 2
+        names = {c["name"] for c in cards}
+        assert names == {"a", "b"}
+
+
+# ── PluginManager.handle_dashboard_route ─────────────────────────────────────
+
+
+class TestHandleDashboardRoute:
+    def test_returns_none_when_plugin_not_active(self):
+        mgr = PluginManager()
+        result = mgr.handle_dashboard_route("missing", "POST", "action", {})
+        assert result is None
+
+    def test_routes_to_active_plugin(self):
+        class RoutePlugin(StubPlugin):
+            def dashboard_api_handler(self, method, path_suffix, payload):
+                if path_suffix == "ping":
+                    return {"pong": True}
+                return None
+
+        plugin = RoutePlugin(plugin_name="rp")
+        mgr = PluginManager()
+        mgr._active["rp"] = plugin
+        result = mgr.handle_dashboard_route("rp", "GET", "ping", {})
+        assert result == {"pong": True}
+
+    def test_returns_none_when_plugin_does_not_handle(self):
+        plugin = StubPlugin(plugin_name="p")  # default returns None
+        mgr = PluginManager()
+        mgr._active["p"] = plugin
+        assert mgr.handle_dashboard_route("p", "GET", "unknown", {}) is None
+
+    def test_error_returns_none(self):
+        class ErrorRoute(StubPlugin):
+            def dashboard_api_handler(self, method, path_suffix, payload):
+                raise RuntimeError("boom")
+
+        plugin = ErrorRoute(plugin_name="err")
+        mgr = PluginManager()
+        mgr._active["err"] = plugin
+        assert mgr.handle_dashboard_route("err", "POST", "action", {}) is None
+
+
+# ── PluginManager.get_report_sections ────────────────────────────────────────
+
+
+class TestGetReportSections:
+    def test_empty_when_no_active_plugins(self):
+        mgr = PluginManager()
+        assert mgr.get_report_sections({}, {}) == []
+
+    def test_returns_section_html(self):
+        class SectionPlugin(StubPlugin):
+            def report_section(self, state, config):
+                return "<h2>Plugin Section</h2><p>Content</p>"
+
+        plugin = SectionPlugin(plugin_name="sp")
+        mgr = PluginManager()
+        mgr._active["sp"] = plugin
+        sections = mgr.get_report_sections({}, {})
+        assert len(sections) == 1
+        assert "<h2>Plugin Section</h2>" in sections[0]
+
+    def test_skips_none_returns(self):
+        plugin = StubPlugin(plugin_name="ns")
+        mgr = PluginManager()
+        mgr._active["ns"] = plugin
+        assert mgr.get_report_sections({}, {}) == []
+
+    def test_error_does_not_propagate(self):
+        class BoomSection(StubPlugin):
+            def report_section(self, state, config):
+                raise RuntimeError("boom")
+
+        plugin = BoomSection(plugin_name="bs")
+        mgr = PluginManager()
+        mgr._active["bs"] = plugin
+        assert mgr.get_report_sections({}, {}) == []
+
+    def test_multiple_sections_collected(self):
+        class SecA(StubPlugin):
+            def report_section(self, state, config):
+                return "<h2>A</h2>"
+
+        class SecB(StubPlugin):
+            def report_section(self, state, config):
+                return "<h2>B</h2>"
+
+        mgr = PluginManager()
+        mgr._active["a"] = SecA(plugin_name="a")
+        mgr._active["b"] = SecB(plugin_name="b")
+        sections = mgr.get_report_sections({}, {})
+        assert len(sections) == 2
+
+
+# ── PluginManager.get_all_cli_commands ───────────────────────────────────────
+
+
+class TestGetAllCliCommands:
+    def test_empty_when_no_active_plugins(self):
+        mgr = PluginManager()
+        assert mgr.get_all_cli_commands() == []
+
+    def test_collects_commands_with_plugin_name(self):
+        class CmdPlugin(StubPlugin):
+            def cli_commands(self):
+                return [{"name": "mytask", "description": "Do something"}]
+
+        plugin = CmdPlugin(plugin_name="cp")
+        mgr = PluginManager()
+        mgr._active["cp"] = plugin
+        commands = mgr.get_all_cli_commands()
+        assert len(commands) == 1
+        assert commands[0]["name"] == "mytask"
+        assert commands[0]["plugin"] == "cp"
+
+    def test_error_does_not_propagate(self):
+        class BoomCmd(StubPlugin):
+            def cli_commands(self):
+                raise RuntimeError("boom")
+
+        plugin = BoomCmd(plugin_name="bc")
+        mgr = PluginManager()
+        mgr._active["bc"] = plugin
+        assert mgr.get_all_cli_commands() == []
+
+    def test_multiple_plugins_commands_aggregated(self):
+        class CmdA(StubPlugin):
+            def cli_commands(self):
+                return [{"name": "cmd-a", "description": "A"}]
+
+        class CmdB(StubPlugin):
+            def cli_commands(self):
+                return [{"name": "cmd-b", "description": "B"},
+                        {"name": "cmd-c", "description": "C"}]
+
+        mgr = PluginManager()
+        mgr._active["a"] = CmdA(plugin_name="a")
+        mgr._active["b"] = CmdB(plugin_name="b")
+        commands = mgr.get_all_cli_commands()
+        assert len(commands) == 3
+        names = {c["name"] for c in commands}
+        assert names == {"cmd-a", "cmd-b", "cmd-c"}
+
+
+# ── dashboard _try_plugin_route / _meta ──────────────────────────────────────
+
+
+class TestDashboardPluginRouting:
+    """Test the _try_plugin_route and _meta helper functions."""
+
+    def _make_app(self, active_plugins=None):
+        """Create a minimal mock app with a plugin manager."""
+        from penny.plugin import PluginManager
+        app = MagicMock()
+        app.state = {}
+        app.config = {}
+        app._plugin_mgr = PluginManager()
+        if active_plugins:
+            for plugin in active_plugins:
+                app._plugin_mgr._active[plugin.name] = plugin
+        return app
+
+    def test_try_plugin_route_returns_none_for_non_plugin_path(self):
+        from penny.dashboard import _try_plugin_route
+        app = self._make_app()
+        assert _try_plugin_route(app, "GET", "/api/state", {}) is None
+
+    def test_try_plugin_route_routes_to_plugin(self):
+        from penny.dashboard import _try_plugin_route
+
+        class RoutePlugin(StubPlugin):
+            def dashboard_api_handler(self, method, path_suffix, payload):
+                return {"hello": "world"}
+
+        plugin = RoutePlugin(plugin_name="rp")
+        app = self._make_app([plugin])
+        result = _try_plugin_route(app, "GET", "/api/plugin/rp/status", {})
+        assert result == {"hello": "world"}
+
+    def test_try_plugin_route_returns_none_for_inactive_plugin(self):
+        from penny.dashboard import _try_plugin_route
+        app = self._make_app()
+        assert _try_plugin_route(app, "GET", "/api/plugin/missing/status", {}) is None
+
+    def test_meta_returns_active_plugins_and_commands(self):
+        from penny.dashboard import _meta
+
+        class CmdPlugin(StubPlugin):
+            def cli_commands(self):
+                return [{"name": "tasks", "description": "List tasks"}]
+
+        plugin = CmdPlugin(plugin_name="beads")
+        app = self._make_app([plugin])
+        meta = _meta(app)
+        assert "beads" in meta["active_plugins"]
+        assert any(c["name"] == "tasks" for c in meta["cli_commands"])
+
+    def test_meta_returns_empty_when_no_plugin_mgr(self):
+        from penny.dashboard import _meta
+        app = MagicMock()
+        del app._plugin_mgr
+        meta = _meta(app)
+        assert meta["active_plugins"] == []
+        assert meta["cli_commands"] == []
+
+
+# ── report.py plugin section injection ───────────────────────────────────────
+
+
+class TestReportPluginSections:
+    def _make_plugin_mgr(self, section_html: str | None = None):
+        mgr = MagicMock()
+        mgr.get_all_tasks.return_value = []
+        mgr.get_task_description.return_value = ""
+        mgr.get_report_sections.return_value = [section_html] if section_html else []
+        return mgr
+
+    def test_plugin_section_appended_to_report(self, tmp_path):
+        from unittest.mock import patch
+        import penny.report as rep
+
+        plugin_section = "<h2>Beads Section</h2><p>Task data here</p>"
+        mgr = self._make_plugin_mgr(plugin_section)
+
+        with patch.object(rep, "REPORT_DIR", tmp_path):
+            path = rep.generate_report({}, {}, plugin_mgr=mgr)
+        content = path.read_text()
+        assert "<h2>Beads Section</h2>" in content
+
+    def test_no_plugin_section_when_mgr_is_none(self, tmp_path):
+        from unittest.mock import patch
+        import penny.report as rep
+
+        with patch.object(rep, "REPORT_DIR", tmp_path):
+            path = rep.generate_report({}, {}, plugin_mgr=None)
+        content = path.read_text()
+        # Should render without error (no plugin section injected)
+        assert "Penny" in content
+
+    def test_plugin_section_skipped_when_empty(self, tmp_path):
+        from unittest.mock import patch
+        import penny.report as rep
+
+        mgr = self._make_plugin_mgr(section_html=None)  # returns []
+
+        with patch.object(rep, "REPORT_DIR", tmp_path):
+            path = rep.generate_report({}, {}, plugin_mgr=mgr)
+        content = path.read_text()
+        # No plugin card div should be injected
+        assert "plugin-cards-container" not in content
+
+
+# ── Plugin on_first_activated / _ever_activated ───────────────────────────────
+
+
+class TestPluginFirstActivated:
+    """Test the first-activation notification tracking in PluginManager."""
+
+    class TrackedPlugin(StubPlugin):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.first_activated_called = False
+            self.first_activated_app = None
+
+        def on_first_activated(self, app):
+            self.first_activated_called = True
+            self.first_activated_app = app
+
+    def test_on_first_activated_called_once(self):
+        plugin = self.TrackedPlugin(plugin_name="tp")
+        mgr = PluginManager()
+        mgr._plugins["tp"] = plugin
+        app = MagicMock()
+
+        mgr.activate("tp", app, {})
+        assert plugin.first_activated_called is True
+        # Deactivate and re-activate — should NOT call again
+        mgr.deactivate("tp")
+        plugin.first_activated_called = False  # reset flag
+        mgr.activate("tp", app, {})
+        assert plugin.first_activated_called is False  # not called again
+
+    def test_on_first_activated_receives_app(self):
+        plugin = self.TrackedPlugin(plugin_name="tp2")
+        mgr = PluginManager()
+        mgr._plugins["tp2"] = plugin
+        app = MagicMock()
+
+        mgr.activate("tp2", app, {})
+        assert plugin.first_activated_app is app
+
+    def test_on_first_activated_error_does_not_break_activation(self):
+        class BoomFirstActivated(StubPlugin):
+            def on_first_activated(self, app):
+                raise RuntimeError("boom")
+
+        plugin = BoomFirstActivated(plugin_name="bfa")
+        mgr = PluginManager()
+        mgr._plugins["bfa"] = plugin
+        mgr.activate("bfa", MagicMock(), {})
+        # Plugin is still active despite the error
+        assert "bfa" in mgr._active
+
+    def test_ever_activated_persists_after_deactivation(self):
+        plugin = self.TrackedPlugin(plugin_name="tp3")
+        mgr = PluginManager()
+        mgr._plugins["tp3"] = plugin
+        app = MagicMock()
+
+        mgr.activate("tp3", app, {})
+        mgr.deactivate("tp3")
+        assert "tp3" in mgr._ever_activated
+
+
+# ── install.sh / config template smoke tests ──────────────────────────────────
+
+
+class TestInstallAndConfigTemplate:
+    """Test that install.sh and config template reflect optional beads."""
+
+    def test_install_sh_bd_is_optional(self):
+        from pathlib import Path
+        install_sh = Path(__file__).parent.parent / "install.sh"
+        content = install_sh.read_text()
+        # bd should be marked as Optional, not as a hard error
+        assert "Optional" in content or "optional" in content
+        assert "DEP_ERRORS=1" not in content.split("BD_BIN")[1].split("CLAUDE_BIN")[0]
+
+    def test_config_template_has_plugins_section(self):
+        from pathlib import Path
+        template = Path(__file__).parent.parent / "config.yaml.template"
+        content = template.read_text()
+        assert "plugins:" in content
+        assert "beads:" in content
+
+    def test_config_template_beads_optional_in_checklist(self):
+        from pathlib import Path
+        template = Path(__file__).parent.parent / "config.yaml.template"
+        content = template.read_text()
+        # Beads should be marked as optional
+        assert "Optional" in content or "optional" in content
+
+    def test_needs_onboarding_without_beads(self):
+        """needs_onboarding() should not require beads to be installed."""
+        from penny.onboarding import needs_onboarding
+        # A config with a real project path should NOT need onboarding
+        config = {"projects": [{"path": "/Users/me/project"}]}
+        assert needs_onboarding(config) is False
+
+    def test_needs_onboarding_no_plugins_key_required(self):
+        """Onboarding check should not require plugins section in config."""
+        from penny.onboarding import needs_onboarding
+        config = {"projects": [{"path": "/Users/me/project"}]}  # no plugins key
+        assert needs_onboarding(config) is False

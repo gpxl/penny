@@ -239,6 +239,18 @@ Last check: {state.get('last_check', 'never')[:19]}</p>
 </html>
 """
 
+    # Plugin-contributed sections (appended after core sections)
+    plugin_sections = ""
+    if plugin_mgr is not None:
+        try:
+            for section_html in plugin_mgr.get_report_sections(state, config):
+                plugin_sections += f'\n<div class="card">\n{section_html}\n</div>\n'
+        except Exception as exc:
+            print(f"[penny] report plugin_sections error: {exc}", flush=True)
+
+    if plugin_sections:
+        html = html.replace("</body>", plugin_sections + "\n</body>")
+
     today = date.today().isoformat()
     report_path = REPORT_DIR / f"report-{today}.html"
     report_path.write_text(html)

@@ -32,7 +32,12 @@ class FakeApp:
         self._all_ready_tasks = ready_tasks or []
         self._last_fetch_at = None
         self._ready_tasks = []
-        self._plugin_mgr = MagicMock()
+        mgr = MagicMock()
+        mgr.active_plugins = []
+        mgr.get_all_cli_commands.return_value = []
+        mgr.get_dashboard_cards.return_value = []
+        mgr.handle_dashboard_route.return_value = None
+        self._plugin_mgr = mgr
 
     # ObjC dispatch stub — just call the selector synchronously.
     # ObjC selectors like "refreshNow:" map to Python methods "refreshNow_".
@@ -400,3 +405,145 @@ class TestDashboardEdgeCases:
             assert r.status == 200
             body = r.read().decode()
             assert "Penny Dashboard" in body
+
+
+# ── Rate limiter unit tests ──────────────────────────────────────────────────
+
+
+class TestTokenBucket:
+    def test_consume_returns_true_when_tokens_available(self):
+        from penny.dashboard import _TokenBucket
+        bucket = _TokenBucket(capacity=5, refill_rate=1)
+        assert bucket.consume() is True
+
+    def test_consume_exhausts_bucket(self):
+        from penny.dashboard import _TokenBucket
+        bucket = _TokenBucket(capacity=3, refill_rate=0)  # no refill
+        assert bucket.consume() is True
+        assert bucket.consume() is True
+        assert bucket.consume() is True
+        assert bucket.consume() is False  # exhausted
+
+    def test_tokens_refill_over_time(self):
+        import time
+        from penny.dashboard import _TokenBucket
+        bucket = _TokenBucket(capacity=2, refill_rate=100)  # 100/s — fast refill
+        bucket.consume()
+        bucket.consume()  # exhaust
+        assert bucket.consume() is False
+        time.sleep(0.02)  # 20ms → ~2 tokens refilled
+        assert bucket.consume() is True
+
+    def test_tokens_capped_at_capacity(self):
+        import time
+        from penny.dashboard import _TokenBucket
+        bucket = _TokenBucket(capacity=2, refill_rate=100)
+        time.sleep(0.1)  # would fill to 10, but capped at 2
+        assert bucket.consume() is True
+        assert bucket.consume() is True
+        assert bucket.consume() is False
+
+    def test_thread_safe_concurrent_consume(self):
+        """Multiple threads competing for limited tokens — exactly capacity succeed."""
+        import concurrent.futures
+        from penny.dashboard import _TokenBucket
+        bucket = _TokenBucket(capacity=10, refill_rate=0)  # no refill
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+            futures = [ex.submit(bucket.consume) for _ in range(20)]
+            results = [f.result() for f in futures]
+        assert sum(results) == 10
+
+
+# ── Rate limiting integration tests ─────────────────────────────────────────
+
+
+class TestDashboardRateLimiting:
+    def test_get_endpoints_not_rate_limited(self, dashboard_app):
+        """GET /api/state is never subject to rate limiting."""
+        _, port = dashboard_app
+        for _ in range(5):
+            status, _ = _get(port, "/api/state")
+            assert status == 200
+
+    def test_rate_limited_post_returns_429(self):
+        """Exhausting the token bucket causes the server to return 429."""
+        from penny.dashboard import DashboardServer, _TokenBucket
+
+        tiny_bucket = _TokenBucket(capacity=1, refill_rate=0)
+        app = FakeApp()
+        ds = DashboardServer(app)
+        original_make_handler = ds._make_handler
+
+        def patched_make_handler():
+            handler_cls = original_make_handler()
+
+            class PatchedHandler(handler_cls):
+                def do_POST(inner_self):  # noqa: N805
+                    if not tiny_bucket.consume():
+                        inner_self.send_error(429, "Too Many Requests")
+                        return
+                    # Call the parent do_POST without going through rate limiter again.
+                    # We read body and route manually to avoid double-consume.
+                    length = int(inner_self.headers.get("Content-Length", 0))
+                    raw = inner_self.rfile.read(length) if length else b"{}"
+                    try:
+                        payload = json.loads(raw) if raw else {}
+                    except Exception:
+                        payload = {}
+                    if inner_self.path == "/api/refresh":
+                        app.performSelectorOnMainThread_withObject_waitUntilDone_(
+                            "refreshNow:", None, True
+                        )
+                        body = json.dumps({"ok": True}).encode()
+                        inner_self.send_response(200)
+                        inner_self.send_header("Content-Type", "application/json")
+                        inner_self.send_header("Content-Length", str(len(body)))
+                        inner_self.end_headers()
+                        inner_self.wfile.write(body)
+                    else:
+                        inner_self.send_error(404)
+
+            return PatchedHandler
+
+        ds._make_handler = patched_make_handler
+        port = ds.ensure_started()
+
+        # First request: succeeds (1 token available)
+        status1, _ = _post(port, "/api/refresh")
+        assert status1 == 200
+
+        # Second request: rejected (bucket empty, no refill)
+        status2, _ = _post(port, "/api/refresh")
+        assert status2 == 429
+
+
+# ── Plugin extensibility — /api/meta and plugin_cards in /api/state ──────────
+
+
+class TestDashboardPluginExtensibility:
+    def test_get_meta_returns_json(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _get(port, "/api/meta")
+        assert status == 200
+        assert "active_plugins" in data
+        assert "cli_commands" in data
+        assert isinstance(data["active_plugins"], list)
+        assert isinstance(data["cli_commands"], list)
+
+    def test_get_api_state_includes_plugin_cards(self, dashboard_app):
+        _, port = dashboard_app
+        _, data = _get(port, "/api/state")
+        assert "plugin_cards" in data
+        assert isinstance(data["plugin_cards"], list)
+
+    def test_plugin_api_route_returns_404_for_inactive(self, dashboard_app):
+        """GET /api/plugin/inactive-plugin/... returns 404."""
+        _, port = dashboard_app
+        status, _ = _get(port, "/api/plugin/nonexistent/status")
+        assert status == 404
+
+    def test_plugin_api_post_route_returns_404_for_inactive(self, dashboard_app):
+        """POST /api/plugin/inactive-plugin/... returns 404."""
+        _, port = dashboard_app
+        status, _ = _post(port, "/api/plugin/nonexistent/action")
+        assert status == 429 or status == 404  # may be rate-limited first

@@ -57,6 +57,13 @@ class PennyPlugin(ABC):
     def on_activate(self, app: Any) -> None:
         """Called when the plugin is activated. `app` is the PennyApp delegate."""
 
+    def on_first_activated(self, app: Any) -> None:
+        """Called once the very first time the plugin transitions to active.
+
+        Use this to show a one-time welcome notification (e.g., when the user
+        installs 'bd' after Penny is already running and the plugin auto-detects it).
+        """
+
     @abstractmethod
     def on_deactivate(self) -> None:
         """Called when the plugin is deactivated."""
@@ -108,8 +115,13 @@ class PennyPlugin(ABC):
         """Declare plugin-specific config keys and defaults."""
         return {}
 
-    def cli_commands(self) -> list[Any]:
-        """Register CLI subcommands."""
+    def cli_commands(self) -> list[dict[str, Any]]:
+        """Register CLI subcommands exposed via `penny help` and the dashboard API.
+
+        Each item must be a dict with at minimum:
+          {"name": "tasks", "description": "List ready tasks"}
+        Optional keys: "api_path", "method", "arg" (arg name if one positional arg needed).
+        """
         return []
 
     def handle_action(self, action: str, payload: Any) -> bool:
@@ -119,6 +131,32 @@ class PennyPlugin(ABC):
         """
         return False
 
+    def dashboard_card_html(self, state: dict[str, Any], config: dict[str, Any]) -> str | None:
+        """Return an HTML snippet to render as a card in the live dashboard.
+
+        Called on every /api/state poll. Return None to contribute nothing.
+        The snippet is wrapped in a .card div automatically.
+        """
+        return None
+
+    def dashboard_api_handler(
+        self, method: str, path_suffix: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Handle a dashboard API request routed to this plugin.
+
+        Called for requests matching /api/plugin/<name>/<path_suffix>.
+        Return a JSON-serializable dict on success, None if not handled.
+        The caller returns HTTP 200 on non-None, 404 on None.
+        """
+        return None
+
+    def report_section(self, state: dict[str, Any], config: dict[str, Any]) -> str | None:
+        """Return an HTML section to append to the static status report.
+
+        Return None to contribute nothing.
+        """
+        return None
+
 
 class PluginManager:
     """Discovers, loads, and manages Penny plugins."""
@@ -127,6 +165,9 @@ class PluginManager:
         self._plugins: dict[str, PennyPlugin] = {}
         self._active: dict[str, PennyPlugin] = {}
         self._load_errors: list[PreflightIssue] = []
+        # Track which plugins have ever been activated so we can detect
+        # the first-time activation (e.g., user installed bd after launch).
+        self._ever_activated: set[str] = set()
 
     @property
     def active_plugins(self) -> list[PennyPlugin]:
@@ -237,6 +278,14 @@ class PluginManager:
         try:
             plugin.on_activate(app)
             self._active[name] = plugin
+            is_new = name not in self._ever_activated
+            self._ever_activated.add(name)
+            if is_new:
+                # First-ever activation — notify the user (e.g., beads just installed)
+                try:
+                    plugin.on_first_activated(app)
+                except Exception as exc:
+                    print(f"[penny] on_first_activated error in plugin {name}: {exc}", flush=True)
             return True
         except Exception as exc:
             print(f"[penny] Failed to activate plugin {name}: {exc}", flush=True)
@@ -392,3 +441,59 @@ class PluginManager:
             except Exception as exc:
                 print(f"[penny] action error in plugin {plugin.name}: {exc}", flush=True)
         return False
+
+    def get_dashboard_cards(
+        self, state: dict[str, Any], config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Collect {name, html} card snippets from all active plugins."""
+        cards: list[dict[str, Any]] = []
+        for plugin in self._active.values():
+            try:
+                html = plugin.dashboard_card_html(state, config)
+                if html:
+                    cards.append({"name": plugin.name, "html": html})
+            except Exception as exc:
+                print(f"[penny] dashboard_card_html error in plugin {plugin.name}: {exc}", flush=True)
+        return cards
+
+    def handle_dashboard_route(
+        self, plugin_name: str, method: str, path_suffix: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Route /api/plugin/<name>/<suffix> to the named plugin.
+
+        Returns the plugin's response dict, or None if not handled (→ 404).
+        """
+        plugin = self._active.get(plugin_name)
+        if plugin is None:
+            return None
+        try:
+            return plugin.dashboard_api_handler(method, path_suffix, payload)
+        except Exception as exc:
+            print(f"[penny] dashboard_api_handler error in plugin {plugin_name}: {exc}", flush=True)
+            return None
+
+    def get_report_sections(
+        self, state: dict[str, Any], config: dict[str, Any]
+    ) -> list[str]:
+        """Collect HTML sections from all active plugins for the static report."""
+        sections: list[str] = []
+        for plugin in self._active.values():
+            try:
+                html = plugin.report_section(state, config)
+                if html:
+                    sections.append(html)
+            except Exception as exc:
+                print(f"[penny] report_section error in plugin {plugin.name}: {exc}", flush=True)
+        return sections
+
+    def get_all_cli_commands(self) -> list[dict[str, Any]]:
+        """Collect CLI command specs from all active plugins."""
+        commands: list[dict[str, Any]] = []
+        for plugin in self._active.values():
+            try:
+                cmds = plugin.cli_commands()
+                for cmd in cmds:
+                    commands.append({**cmd, "plugin": plugin.name})
+            except Exception as exc:
+                print(f"[penny] cli_commands error in plugin {plugin.name}: {exc}", flush=True)
+        return commands

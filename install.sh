@@ -144,12 +144,11 @@ if [[ "$SKIP_DEP_CHECK" -eq 0 ]]; then
 
   BD_BIN=$(command -v bd 2>/dev/null || true)
   if [[ -z "$BD_BIN" ]]; then
-    echo "❌ 'bd' (beads) CLI not found in PATH."
-    echo "   Install: brew install beads  (or: npm install -g @beads/bd)"
-    echo "   Then re-run: bash install.sh"
-    DEP_ERRORS=1
+    echo "⚡ Optional: 'bd' (beads) CLI not found."
+    echo "   Install beads for task management: brew install beads"
+    echo "   Penny will detect and activate the beads plugin automatically when you install it."
   else
-    echo "✓ bd found at $BD_BIN"
+    echo "✓ bd found at $BD_BIN — Beads detected, task management plugin will activate automatically."
   fi
 
   # tmux is required for agent spawning

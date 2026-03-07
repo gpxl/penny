@@ -110,6 +110,17 @@ class Plugin(PennyPlugin):
     def on_activate(self, app: Any) -> None:
         self._app = app
 
+    def on_first_activated(self, app: Any) -> None:
+        """Notify the user that beads was detected and task management is now active."""
+        try:
+            from ..spawner import send_notification
+            send_notification(
+                "Penny",
+                "Beads detected \u2014 task management activated. Run \u2018bd ready\u2019 to see ready tasks.",
+            )
+        except Exception:
+            pass
+
     def on_deactivate(self) -> None:
         self._app = None
 
@@ -240,6 +251,16 @@ class Plugin(PennyPlugin):
         except Exception as exc:
             print(f"[penny] bd {str_args} exception: {exc}", flush=True)
         return True
+
+    def cli_commands(self) -> list[dict[str, Any]]:
+        return [
+            {"name": "tasks",         "description": "List ready beads tasks",       "api_path": "/api/state", "method": "GET"},
+            {"name": "agents",        "description": "List running Claude agents",    "api_path": "/api/state", "method": "GET"},
+            {"name": "run",           "description": "Spawn a Claude agent for a task", "api_path": "/api/run",  "method": "POST", "arg": "task-id"},
+            {"name": "stop-agent",    "description": "Stop a running agent",          "api_path": "/api/stop-agent", "method": "POST", "arg": "task-id"},
+            {"name": "dismiss",       "description": "Dismiss a completed task",      "api_path": "/api/dismiss",    "method": "POST", "arg": "task-id"},
+            {"name": "clear-completed", "description": "Clear all completed tasks",   "api_path": "/api/clear-completed", "method": "POST"},
+        ]
 
     def config_schema(self) -> dict[str, Any]:
         return {

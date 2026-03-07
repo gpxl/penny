@@ -847,3 +847,261 @@ class TestConfigHotReload:
         # Simulating what _hot_reload_config does: mtime is updated after reload
         assert mt2 is not None
         assert mt2 != mt1
+
+
+# ── _script_dir_from_plist ────────────────────────────────────────────────────
+
+
+class TestScriptDirFromPlist:
+    def test_returns_none_when_plist_missing(self, tmp_path):
+        from penny.app import _script_dir_from_plist
+        with patch("penny.app.PLIST_LAUNCHAGENTS", tmp_path / "missing.plist"):
+            assert _script_dir_from_plist() is None
+
+    def test_returns_path_from_plist(self, tmp_path):
+        import plistlib
+        plist_file = tmp_path / "test.plist"
+        plist_file.write_bytes(plistlib.dumps({"WorkingDirectory": "/usr/local/penny"}))
+        from penny.app import _script_dir_from_plist
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist_file):
+            result = _script_dir_from_plist()
+        assert result == Path("/usr/local/penny")
+
+    def test_returns_none_when_working_directory_empty(self, tmp_path):
+        import plistlib
+        plist_file = tmp_path / "test.plist"
+        plist_file.write_bytes(plistlib.dumps({"WorkingDirectory": ""}))
+        from penny.app import _script_dir_from_plist
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist_file):
+            assert _script_dir_from_plist() is None
+
+    def test_returns_none_when_working_directory_absent(self, tmp_path):
+        import plistlib
+        plist_file = tmp_path / "test.plist"
+        plist_file.write_bytes(plistlib.dumps({"Label": "com.gpxl.penny"}))
+        from penny.app import _script_dir_from_plist
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist_file):
+            assert _script_dir_from_plist() is None
+
+    def test_returns_none_on_corrupt_plist(self, tmp_path):
+        plist_file = tmp_path / "test.plist"
+        plist_file.write_bytes(b"not a valid plist")
+        from penny.app import _script_dir_from_plist
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist_file):
+            assert _script_dir_from_plist() is None
+
+
+# ── dismissCompleted_ / clearAllCompleted_ logic ─────────────────────────────
+
+
+class TestDismissAndClearLogic:
+    """Test the list-filtering logic from dismissCompleted_ and clearAllCompleted_."""
+
+    def _dismiss(self, state: dict, task_id: str) -> dict:
+        """Reproduce dismissCompleted_ state mutation."""
+        rc = state.get("recently_completed", [])
+        state["recently_completed"] = [a for a in rc if a.get("task_id") != task_id]
+        return state
+
+    def _clear_all(self, state: dict) -> dict:
+        """Reproduce clearAllCompleted_ state mutation."""
+        state["recently_completed"] = []
+        return state
+
+    def test_dismiss_removes_matching_task(self):
+        state = {"recently_completed": [
+            {"task_id": "t-1", "title": "Fix A"},
+            {"task_id": "t-2", "title": "Fix B"},
+        ]}
+        self._dismiss(state, "t-1")
+        assert len(state["recently_completed"]) == 1
+        assert state["recently_completed"][0]["task_id"] == "t-2"
+
+    def test_dismiss_noop_when_task_not_found(self):
+        state = {"recently_completed": [{"task_id": "t-1"}]}
+        self._dismiss(state, "t-999")
+        assert len(state["recently_completed"]) == 1
+
+    def test_dismiss_on_empty_list(self):
+        state = {"recently_completed": []}
+        self._dismiss(state, "t-1")
+        assert state["recently_completed"] == []
+
+    def test_clear_all_removes_everything(self):
+        state = {"recently_completed": [
+            {"task_id": "t-1"}, {"task_id": "t-2"}, {"task_id": "t-3"},
+        ]}
+        self._clear_all(state)
+        assert state["recently_completed"] == []
+
+    def test_clear_all_on_empty_list(self):
+        state = {"recently_completed": []}
+        self._clear_all(state)
+        assert state["recently_completed"] == []
+
+
+# ── stopAgentByTaskId_ logic ─────────────────────────────────────────────────
+
+
+class TestStopAgentByTaskIdLogic:
+    """Test the state-mutation logic from stopAgentByTaskId_."""
+
+    def _stop_by_task_id(self, state: dict, task_id: str) -> tuple[bool, dict]:
+        """Reproduce stopAgentByTaskId_ state filtering (without process kill)."""
+        if not task_id:
+            return False, state
+        agent = next(
+            (a for a in state.get("agents_running", []) if a.get("task_id") == task_id),
+            None,
+        )
+        if agent is None:
+            return False, state
+        state["agents_running"] = [
+            a for a in state.get("agents_running", []) if a.get("task_id") != task_id
+        ]
+        return True, state
+
+    def test_stops_matching_agent(self):
+        state = {"agents_running": [{"task_id": "t-1", "pid": 100}]}
+        found, state = self._stop_by_task_id(state, "t-1")
+        assert found is True
+        assert state["agents_running"] == []
+
+    def test_preserves_other_agents(self):
+        state = {"agents_running": [
+            {"task_id": "t-1", "pid": 100},
+            {"task_id": "t-2", "pid": 200},
+        ]}
+        found, state = self._stop_by_task_id(state, "t-1")
+        assert found is True
+        assert len(state["agents_running"]) == 1
+        assert state["agents_running"][0]["task_id"] == "t-2"
+
+    def test_noop_when_empty_task_id(self):
+        state = {"agents_running": [{"task_id": "t-1"}]}
+        found, state = self._stop_by_task_id(state, "")
+        assert found is False
+        assert len(state["agents_running"]) == 1
+
+    def test_noop_when_task_id_not_found(self):
+        state = {"agents_running": [{"task_id": "t-1"}]}
+        found, state = self._stop_by_task_id(state, "t-999")
+        assert found is False
+        assert len(state["agents_running"]) == 1
+
+    def test_noop_when_agents_empty(self):
+        state = {"agents_running": []}
+        found, state = self._stop_by_task_id(state, "t-1")
+        assert found is False
+        assert state["agents_running"] == []
+
+
+# ── _write_config logic ───────────────────────────────────────────────────────
+
+
+class TestWriteConfigLogic:
+    """Test the YAML serialization logic from _write_config."""
+
+    def test_writes_valid_yaml(self, tmp_path):
+        import yaml
+        cfg_file = tmp_path / "config.yaml"
+        config = {"projects": [{"path": "/tmp/proj"}], "work": {"agent_permissions": "off"}}
+        with cfg_file.open("w") as f:
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+        reloaded = yaml.safe_load(cfg_file.read_text())
+        assert reloaded["projects"] == [{"path": "/tmp/proj"}]
+        assert reloaded["work"]["agent_permissions"] == "off"
+
+    def test_write_handles_unicode(self, tmp_path):
+        import yaml
+        cfg_file = tmp_path / "config.yaml"
+        config = {"name": "ñoño"}
+        with cfg_file.open("w") as f:
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+        assert "ñoño" in cfg_file.read_text()
+
+    def test_write_and_reload_round_trip(self, tmp_path):
+        import yaml
+        cfg_file = tmp_path / "config.yaml"
+        original = {"service": {"keep_alive": True, "launch_at_login": False}}
+        with cfg_file.open("w") as f:
+            yaml.dump(original, f, default_flow_style=False, allow_unicode=True)
+        reloaded = yaml.safe_load(cfg_file.read_text())
+        assert reloaded == original
+
+
+# ── _sync_launchd_service plist logic ────────────────────────────────────────
+
+
+class TestSyncLaunchAgentPlistLogic:
+    """Test the plist read/write logic from _sync_launchd_service (no launchctl)."""
+
+    def _apply_service_config(self, plist_path: Path, svc: dict) -> bool:
+        """Reproduce the plist-update portion of _sync_launchd_service.
+
+        Returns True if the plist was updated, False if it was already in sync.
+        """
+        import plistlib
+        want_keep_alive = bool(svc.get("keep_alive", True))
+        want_run_at_load = bool(svc.get("launch_at_login", True))
+
+        if not plist_path.exists():
+            return False
+
+        with plist_path.open("rb") as f:
+            pl = plistlib.load(f)
+
+        if (pl.get("KeepAlive", True) == want_keep_alive
+                and pl.get("RunAtLoad", True) == want_run_at_load):
+            return False  # no-op
+
+        pl["KeepAlive"] = want_keep_alive
+        pl["RunAtLoad"] = want_run_at_load
+        plist_path.write_bytes(plistlib.dumps(pl))
+        return True
+
+    def _make_plist(self, path: Path, keep_alive: bool = True, run_at_load: bool = True) -> None:
+        import plistlib
+        path.write_bytes(plistlib.dumps({
+            "Label": "com.gpxl.penny",
+            "KeepAlive": keep_alive,
+            "RunAtLoad": run_at_load,
+        }))
+
+    def test_noop_when_plist_missing(self, tmp_path):
+        updated = self._apply_service_config(tmp_path / "missing.plist", {})
+        assert updated is False
+
+    def test_noop_when_already_in_sync(self, tmp_path):
+        plist = tmp_path / "test.plist"
+        self._make_plist(plist, keep_alive=True, run_at_load=True)
+        svc = {"keep_alive": True, "launch_at_login": True}
+        updated = self._apply_service_config(plist, svc)
+        assert updated is False
+
+    def test_updates_when_keep_alive_changes(self, tmp_path):
+        import plistlib
+        plist = tmp_path / "test.plist"
+        self._make_plist(plist, keep_alive=True, run_at_load=True)
+        svc = {"keep_alive": False, "launch_at_login": True}
+        updated = self._apply_service_config(plist, svc)
+        assert updated is True
+        pl = plistlib.loads(plist.read_bytes())
+        assert pl["KeepAlive"] is False
+
+    def test_updates_when_run_at_load_changes(self, tmp_path):
+        import plistlib
+        plist = tmp_path / "test.plist"
+        self._make_plist(plist, keep_alive=True, run_at_load=True)
+        svc = {"keep_alive": True, "launch_at_login": False}
+        updated = self._apply_service_config(plist, svc)
+        assert updated is True
+        pl = plistlib.loads(plist.read_bytes())
+        assert pl["RunAtLoad"] is False
+
+    def test_defaults_to_true_when_keys_absent(self, tmp_path):
+        """Empty service config defaults keep_alive=True, launch_at_login=True."""
+        plist = tmp_path / "test.plist"
+        self._make_plist(plist, keep_alive=True, run_at_load=True)
+        updated = self._apply_service_config(plist, {})
+        assert updated is False  # defaults match current state

@@ -48,12 +48,21 @@ class TestCLIHelp:
         assert result.returncode == 0
         assert "Usage:" in result.stdout
 
-    def test_help_lists_all_commands(self):
+    def test_help_lists_core_commands(self):
         result = _run(["help"])
-        for cmd in ["start", "stop", "status", "quit", "refresh", "tasks",
-                     "agents", "run", "stop-agent", "dismiss", "clear-completed",
-                     "open", "logs", "prefs", "version", "help"]:
+        # Core (always-present) commands
+        for cmd in ["start", "stop", "status", "quit", "refresh",
+                    "open", "logs", "prefs", "version", "help"]:
             assert cmd in result.stdout, f"Missing command: {cmd}"
+
+    def test_help_shows_plugin_hint_when_stopped(self):
+        """When Penny is not running, help shows a hint about plugin commands."""
+        result = _run(["status"])
+        if "is running" in result.stdout and "not running" not in result.stdout:
+            pytest.skip("Penny is running — skipping stopped-state hint test")
+        result = _run(["help"])
+        # Hint mentions beads plugin commands
+        assert "beads" in result.stdout or "Plugin Commands" in result.stdout
 
 
 class TestCLIVersion:

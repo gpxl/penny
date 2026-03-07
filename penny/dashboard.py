@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,35 @@ from typing import Any
 from .analysis import format_reset_label
 
 PREFERRED_PORT = 7432
+
+# POST endpoints dispatch ObjC selectors on the main thread. A burst of rapid
+# calls can queue up work faster than the thread can process it. Rate-limit to
+# 10 requests/s steady-state (burst of 20) to protect against accidental loops.
+_POST_RATE_CAPACITY = 20     # max burst
+_POST_RATE_PER_SECOND = 10   # steady-state refill rate
+
+
+class _TokenBucket:
+    """Thread-safe token bucket for rate limiting."""
+
+    def __init__(self, capacity: float, refill_rate: float) -> None:
+        self._capacity = capacity
+        self._tokens = float(capacity)
+        self._refill_rate = refill_rate  # tokens per second
+        self._last_refill = time.monotonic()
+        self._lock = threading.Lock()
+
+    def consume(self) -> bool:
+        """Return True and consume one token, or return False if rate-limited."""
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._capacity, self._tokens + elapsed * self._refill_rate)
+            self._last_refill = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True
+            return False
 
 
 def _port_file() -> Path:
@@ -65,6 +95,7 @@ class DashboardServer:
 
     def _make_handler(self):
         app = self._app
+        rate_limiter = _TokenBucket(_POST_RATE_CAPACITY, _POST_RATE_PER_SECOND)
 
         def _dispatch(selector: str, obj: Any = None, wait: bool = True) -> None:
             """Dispatch an ObjC selector to the main thread."""
@@ -90,10 +121,28 @@ class DashboardServer:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+                elif self.path == "/api/meta":
+                    meta = _meta(app)
+                    body = json.dumps(meta, default=str).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                 else:
-                    self.send_error(404)
+                    # Route /api/plugin/<name>/... to plugin handler
+                    result = _try_plugin_route(app, "GET", self.path, {})
+                    if result is not None:
+                        self._json(result)
+                    else:
+                        self.send_error(404)
 
             def do_POST(self):
+                if not rate_limiter.consume():
+                    self.send_error(429, "Too Many Requests")
+                    return
+
                 length = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(length) if length else b"{}"
                 try:
@@ -138,10 +187,18 @@ class DashboardServer:
                     self._ok({"ok": True})
 
                 else:
-                    self.send_error(404)
+                    # Route /api/plugin/<name>/... to plugin handler
+                    result = _try_plugin_route(app, "POST", self.path, payload)
+                    if result is not None:
+                        self._json(result)
+                    else:
+                        self.send_error(404)
 
             def _ok(self, data: dict) -> None:
-                body = json.dumps(data).encode()
+                self._json(data)
+
+            def _json(self, data: dict) -> None:
+                body = json.dumps(data, default=str).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -173,6 +230,15 @@ def _snapshot(app) -> dict[str, Any]:
     if pred_dict.get("session_reset_label"):
         pred_dict["session_reset_label"] = format_reset_label(pred_dict["session_reset_label"])
 
+    # Plugin-contributed cards ({name, html} per active plugin)
+    plugin_cards: list[dict[str, Any]] = []
+    plugin_mgr = getattr(app, "_plugin_mgr", None)
+    if plugin_mgr is not None:
+        try:
+            plugin_cards = plugin_mgr.get_dashboard_cards(state, app.config or {})
+        except Exception:
+            pass
+
     return {
         "generated_at": datetime.now().isoformat(),
         "state": state,
@@ -180,7 +246,44 @@ def _snapshot(app) -> dict[str, Any]:
         "ready_tasks": ready,
         "completed_this_period": completed,
         "session_history": state.get("session_history", []),
+        "plugin_cards": plugin_cards,
     }
+
+
+def _meta(app) -> dict[str, Any]:
+    """Return metadata about the running app: active plugins and CLI commands."""
+    plugin_mgr = getattr(app, "_plugin_mgr", None)
+    active: list[str] = []
+    cli_commands: list[dict[str, Any]] = []
+    if plugin_mgr is not None:
+        try:
+            active = [p.name for p in plugin_mgr.active_plugins]
+            cli_commands = plugin_mgr.get_all_cli_commands()
+        except Exception:
+            pass
+    return {
+        "active_plugins": active,
+        "cli_commands": cli_commands,
+    }
+
+
+def _try_plugin_route(app, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Route /api/plugin/<name>/<suffix> to the named plugin.
+
+    Returns plugin response dict on success, None if path doesn't match or plugin not found.
+    """
+    prefix = "/api/plugin/"
+    if not path.startswith(prefix):
+        return None
+    rest = path[len(prefix):]
+    parts = rest.split("/", 1)
+    plugin_name = parts[0]
+    path_suffix = parts[1] if len(parts) > 1 else ""
+
+    plugin_mgr = getattr(app, "_plugin_mgr", None)
+    if plugin_mgr is None:
+        return None
+    return plugin_mgr.handle_dashboard_route(plugin_name, method, path_suffix, payload)
 
 
 _DASHBOARD_HTML = """<!DOCTYPE html>
@@ -229,6 +332,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card" id="card-agents"><h2>Agents Running</h2><p>…</p></div>
   <div class="card" id="card-completed"><h2>Completed This Period</h2><p>…</p></div>
 </div>
+<div id="plugin-cards-container"></div>
 
 <script>
 let lastOk = null;
@@ -341,6 +445,14 @@ function renderCompleted(items) {
   return `<table><thead><tr><th>ID</th><th>Project</th><th>Task</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
+function renderPluginCards(cards) {
+  const container = document.getElementById('plugin-cards-container');
+  if (!container) return;
+  container.innerHTML = (cards || []).map(c =>
+    `<div class="card" style="margin-bottom:12px">${c.html}</div>`
+  ).join('');
+}
+
 function render(data) {
   lastData = data;
   const pred = data.prediction || {};
@@ -352,6 +464,7 @@ function render(data) {
   document.getElementById('card-agents').innerHTML = '<h2>Agents Running (' + (state.agents_running||[]).length + ')</h2>' + renderAgents(state.agents_running);
   const completed = data.completed_this_period || [];
   document.getElementById('card-completed').innerHTML = '<h2>Completed This Period (' + completed.length + ')</h2>' + renderCompleted(completed);
+  renderPluginCards(data.plugin_cards);
 }
 
 async function refresh() {

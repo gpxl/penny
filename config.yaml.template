@@ -5,10 +5,13 @@
 #
 #   [ ] 1. Install the claude CLI:  npm install -g @anthropic-ai/claude-code
 #   [ ] 2. Authenticate:            claude auth login
-#   [ ] 3. Install beads CLI:       brew install beads  (or: npm install -g @beads/bd)
-#   [ ] 4. Init beads in a project: cd ~/your-repo && bd init
-#   [ ] 5. Edit this file:          Replace PLACEHOLDER_PROJECT_PATH below
-#   [ ] 6. Verify setup:            bash install.sh --check
+#   [ ] 3. Edit this file:          Replace PLACEHOLDER_PROJECT_PATH below
+#   [ ] 4. Verify setup:            bash install.sh --check
+#
+# Optional (unlocks task management):
+#   [ ] Install beads CLI:   brew install beads  (or: npm install -g @beads/bd)
+#   [ ] Init beads:          cd ~/your-repo && bd init
+#   → Penny auto-detects beads and activates the task management plugin.
 #
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -45,3 +48,7 @@ stats_cache_path: ~/.claude/stats-cache.json
 service:
   keep_alive: true       # launchd restarts Penny automatically if it exits
   launch_at_login: true  # Penny starts when you log in
+
+plugins:
+  beads: auto   # auto = activate when 'bd' CLI is found in PATH (default)
+                # true = always activate | false = disable

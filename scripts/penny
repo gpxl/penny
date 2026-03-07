@@ -43,14 +43,6 @@ Service:
 
 Data:
   refresh            Trigger a live data refresh
-  tasks              List ready tasks
-  agents             List running agents
-
-Actions:
-  run <task-id>      Spawn a Claude agent for a task
-  stop-agent <id>    Stop a running agent
-  dismiss <id>       Dismiss a completed task notification
-  clear-completed    Clear all completed task notifications
 
 UI / Config:
   open               Open the dashboard in your browser
@@ -61,6 +53,28 @@ Info:
   version, -v        Show Penny version number
   help, -h, -?, -?   Show this help
 HELP
+
+  # Show plugin commands if Penny is running; otherwise show static hints
+  if _is_running 2>/dev/null; then
+    meta=$(_api_get /api/meta 2>/dev/null || echo "{}")
+    python3 - "$meta" <<'PYEOF'
+import sys, json
+try:
+    meta = json.loads(sys.argv[1])
+except Exception:
+    meta = {}
+commands = meta.get("cli_commands", [])
+if commands:
+    print("\nPlugin Commands:")
+    for cmd in commands:
+        arg = (" <" + cmd["arg"] + ">") if cmd.get("arg") else ""
+        print(f"  {cmd['name'] + arg:<22} {cmd['description']}")
+PYEOF
+  else
+    echo ""
+    echo "Plugin Commands (requires Penny to be running to see current list):"
+    echo "  tasks, agents, run, stop-agent, dismiss, clear-completed (beads plugin)"
+  fi
 }
 
 _get_version() {

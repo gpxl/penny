@@ -199,8 +199,9 @@ def run_onboarding(
     welcome.setMessageText_("Welcome to Penny")
     welcome.setInformativeText_(
         "Penny watches your Claude Max usage and automatically runs Claude agents "
-        "on your Beads tasks when spare weekly capacity is about to expire.\n\n"
-        "To get started, add a project folder that has been initialised with Beads."
+        "when spare weekly capacity is about to expire.\n\n"
+        "To get started, add a project folder. Task management is optional \u2014 "
+        "install the beads CLI (brew install beads) at any time to unlock it."
     )
     welcome.addButtonWithTitle_("Add Project Folder\u2026")   # default (blue)
     welcome.addButtonWithTitle_("Set Up Later")
@@ -216,21 +217,23 @@ def run_onboarding(
         if path is None:
             break
 
-        # Auto-setup Beads if .beads/ is absent
+        # Try to set up Beads if bd CLI is available and .beads/ is absent
         if not (path / ".beads").exists():
-            if not _init_beads(path):
-                # bd init failed — let the user decide
-                warn = NSAlert.alloc().init()
-                warn.setMessageText_(f"Couldn\u2019t Set Up Beads in \u201c{path.name}\u201d")
-                warn.setInformativeText_(
-                    "Penny tried to run \u2018bd init\u2019 but it failed.\n\n"
-                    "Make sure \u2018bd\u2019 is installed and try again, or pick a different folder."
-                )
-                warn.addButtonWithTitle_("Pick a Different Folder")   # default
-                warn.addButtonWithTitle_("Add Anyway")
-                _bring_to_front()
-                if warn.runModal() == NSAlertFirstButtonReturn:
-                    continue    # loop back to picker
+            import shutil
+            if shutil.which("bd") is not None:
+                if not _init_beads(path):
+                    # bd init failed — let the user decide
+                    warn = NSAlert.alloc().init()
+                    warn.setMessageText_(f"Couldn\u2019t Set Up Beads in \u201c{path.name}\u201d")
+                    warn.setInformativeText_(
+                        "Penny tried to run \u2018bd init\u2019 but it failed.\n\n"
+                        "You can run \u2018bd init\u2019 manually later, or pick a different folder."
+                    )
+                    warn.addButtonWithTitle_("Pick a Different Folder")   # default
+                    warn.addButtonWithTitle_("Add Anyway")
+                    _bring_to_front()
+                    if warn.runModal() == NSAlertFirstButtonReturn:
+                        continue    # loop back to picker
 
         collected.append({"path": str(path), "priority": len(collected) + 1})
 
@@ -246,6 +249,21 @@ def run_onboarding(
 
     if not collected:
         return None
+
+    # ── Beads hint (non-blocking) ─────────────────────────────────────────
+    import shutil
+    if shutil.which("bd") is None:
+        hint = NSAlert.alloc().init()
+        hint.setMessageText_("Task Management \u2014 Optional")
+        hint.setInformativeText_(
+            "Install the beads CLI to unlock automatic task management:\n\n"
+            "  brew install beads\n\n"
+            "Then run \u2018bd init\u2019 in any project. Penny will detect it automatically "
+            "and activate the task management plugin \u2014 no restart needed."
+        )
+        hint.addButtonWithTitle_("Got It")
+        _bring_to_front()
+        hint.runModal()
 
     # ── Agent permission mode ─────────────────────────────────────────────
     perm_mode, allowed_tools = _ask_agent_permissions()
