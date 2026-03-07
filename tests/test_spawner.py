@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from penny.spawner import (
+    _build_claude_flags,
     _get_screen_pid,
     _get_tmux_pid,
     _pid_is_alive,
@@ -30,6 +31,43 @@ def _make_task(**overrides):
     }
     defaults.update(overrides)
     return Task(**defaults)
+
+
+class TestBuildClaudeFlags:
+    def test_full_mode_returns_dangerously_skip(self):
+        assert _build_claude_flags({"work": {"agent_permissions": "full"}}) == [
+            "--dangerously-skip-permissions"
+        ]
+
+    def test_default_mode_returns_dangerously_skip(self):
+        assert _build_claude_flags({}) == ["--dangerously-skip-permissions"]
+
+    def test_none_config_returns_dangerously_skip(self):
+        assert _build_claude_flags(None) == ["--dangerously-skip-permissions"]
+
+    def test_scoped_mode_returns_allowed_tools(self):
+        config = {
+            "work": {
+                "agent_permissions": "scoped",
+                "allowed_tools": ["Read", "Edit", "Bash(git:*)"],
+            }
+        }
+        flags = _build_claude_flags(config)
+        assert flags == ["--allowed-tools", "Read,Edit,Bash(git:*)"]
+
+    def test_scoped_mode_without_tools_falls_back_to_full(self):
+        config = {"work": {"agent_permissions": "scoped", "allowed_tools": []}}
+        assert _build_claude_flags(config) == ["--dangerously-skip-permissions"]
+
+    def test_scoped_mode_missing_allowed_tools_key_falls_back_to_full(self):
+        config = {"work": {"agent_permissions": "scoped"}}
+        assert _build_claude_flags(config) == ["--dangerously-skip-permissions"]
+
+    def test_off_mode_returns_dangerously_skip(self):
+        # off mode is handled by callers — _build_claude_flags is not called
+        # when mode is off, but if it were called, it defaults to full
+        config = {"work": {"agent_permissions": "off"}}
+        assert _build_claude_flags(config) == ["--dangerously-skip-permissions"]
 
 
 class TestTmuxAvailable:

@@ -17,13 +17,24 @@ try:
     from AppKit import (
         NSAlert,
         NSAlertFirstButtonReturn,
-        NSAlertSecondButtonReturn,  # noqa: F401
+        NSAlertSecondButtonReturn,
+        NSAlertThirdButtonReturn,  # noqa: F401
         NSApp,
         NSOpenPanel,
     )
     _HAS_APPKIT = True
 except ImportError:
     _HAS_APPKIT = False
+
+_DEFAULT_SCOPED_TOOLS = [
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "Bash(git:*)",
+    "Bash(bd:*)",
+]
 
 
 def needs_onboarding(config: dict[str, Any]) -> bool:
@@ -72,6 +83,87 @@ def _init_beads(path: Path) -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _ask_agent_permissions() -> tuple[str, list[str]]:
+    """Show an NSAlert asking the user to choose an agent_permissions mode.
+
+    Returns (mode, allowed_tools) where mode is 'off' | 'scoped' | 'full'
+    and allowed_tools is a list (empty unless mode is 'scoped').
+
+    Defaults to 'off' (safest) if AppKit is unavailable.
+    """
+    if not _HAS_APPKIT:
+        return "off", []
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("Agent Permission Mode")
+    alert.setInformativeText_(
+        "Choose how much access Claude agents have when working on your projects.\n\n"
+        "\u2022 Off \u2014 Monitoring only. Penny tracks capacity but never spawns agents.\n\n"
+        "\u2022 Scoped \u2014 Agents may only use a limited set of tools (read, edit, git, bd). "
+        "No arbitrary shell commands.\n\n"
+        "\u2022 Full \u2014 Agents run with --dangerously-skip-permissions. They can read, "
+        "write, delete files, run any shell command, commit code, and open pull requests "
+        "without confirmation. Use only if you trust the tasks fully."
+    )
+    # First button = default (blue, Enter key). Off is the safest default.
+    alert.addButtonWithTitle_("Off \u2014 Monitoring Only")
+    alert.addButtonWithTitle_("Scoped \u2014 Limited Tools")
+    alert.addButtonWithTitle_("Full \u2014 No Restrictions")
+    _bring_to_front()
+    response = alert.runModal()
+
+    if response == NSAlertSecondButtonReturn:
+        return "scoped", list(_DEFAULT_SCOPED_TOOLS)
+    if response == NSAlertThirdButtonReturn:
+        return "full", []
+    return "off", []
+
+
+def check_full_permissions_consent(config: dict[str, Any], state: dict[str, Any]) -> bool:
+    """Return True (and record consent) if the user confirms full-permission mode.
+
+    Shows a one-time confirmation when agent_permissions transitions to 'full'
+    without prior consent recorded in state.json.
+
+    Returns True if the user consented or consent was already given.
+    Returns False if the user declined (caller should revert mode).
+    """
+    mode = config.get("work", {}).get("agent_permissions", "full")
+    if mode != "full":
+        return True
+
+    consent = state.get("agent_permissions_consent", {})
+    if consent.get("mode") == "full" and consent.get("given"):
+        return True   # already consented
+
+    if not _HAS_APPKIT:
+        return True   # non-GUI context — assume ok
+
+    from datetime import datetime, timezone
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("Enable Full Agent Permissions?")
+    alert.setInformativeText_(
+        "agent_permissions is set to \u201cfull\u201d in config.yaml.\n\n"
+        "This means Claude agents will run with --dangerously-skip-permissions and "
+        "can read, write, delete files, run shell commands, commit code, and open "
+        "pull requests \u2014 all without asking for confirmation.\n\n"
+        "Only proceed if you have reviewed your ready Beads tasks and trust them."
+    )
+    alert.addButtonWithTitle_("Understood \u2014 Enable Full Mode")
+    alert.addButtonWithTitle_("Cancel \u2014 Keep Off")
+    _bring_to_front()
+    if alert.runModal() == NSAlertFirstButtonReturn:
+        state["agent_permissions_consent"] = {
+            "given": True,
+            "mode": "full",
+            "date": datetime.now(timezone.utc).isoformat(),
+        }
+        return True
+
+    return False
 
 
 def fix_missing_beads(config: dict[str, Any]) -> list[str]:
@@ -155,12 +247,18 @@ def run_onboarding(
     if not collected:
         return None
 
+    # ── Agent permission mode ─────────────────────────────────────────────
+    perm_mode, allowed_tools = _ask_agent_permissions()
+
     # ── Write config ──────────────────────────────────────────────────────
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_config_with_comments(config_path, collected, config)
+    _write_config_with_comments(config_path, collected, config, perm_mode, allowed_tools)
 
     updated = dict(config)
     updated["projects"] = collected
+    updated.setdefault("work", {})["agent_permissions"] = perm_mode
+    if perm_mode == "scoped":
+        updated["work"]["allowed_tools"] = allowed_tools
     return updated
 
 
@@ -168,6 +266,8 @@ def _write_config_with_comments(
     config_path: Path,
     projects: list[dict[str, Any]],
     existing_config: dict[str, Any],
+    agent_permissions: str = "off",
+    allowed_tools: list[str] | None = None,
 ) -> None:
     """Write config preserving template comments.
 
@@ -202,10 +302,28 @@ def _write_config_with_comments(
             count=1,
             flags=re.DOTALL,
         )
+        # Update agent_permissions in the work: section
+        new_text = re.sub(
+            r'(agent_permissions:\s*)"[^"]*"',
+            f'\\1"{agent_permissions}"',
+            new_text,
+        )
+        if agent_permissions == "scoped" and allowed_tools:
+            tools_yaml = "\n".join(f"  #   - {t}" for t in allowed_tools)
+            # Uncomment the allowed_tools block if it's present as comments
+            new_text = re.sub(
+                r"  # allowed_tools:.*?(?=\n\w|\Z)",
+                "  allowed_tools:\n" + "\n".join(f"    - {t}" for t in allowed_tools) + "\n",
+                new_text,
+                flags=re.DOTALL,
+            )
         config_path.write_text(new_text, encoding="utf-8")
     else:
         # Fallback: yaml.dump (loses comments but stays correct)
         updated = dict(existing_config)
         updated["projects"] = projects
+        updated.setdefault("work", {})["agent_permissions"] = agent_permissions
+        if agent_permissions == "scoped" and allowed_tools:
+            updated["work"]["allowed_tools"] = allowed_tools
         with config_path.open("w") as fh:
             yaml.dump(updated, fh, default_flow_style=False, allow_unicode=True)

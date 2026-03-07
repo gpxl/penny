@@ -15,6 +15,25 @@ from typing import Any
 
 from .paths import data_dir
 
+
+def _build_claude_flags(config: dict) -> list[str]:
+    """Return the Claude CLI permission flags for the configured agent_permissions mode.
+
+    - full (default): --dangerously-skip-permissions
+    - scoped: --allowed-tools <comma-separated list from config>
+    - off: callers must skip spawning before calling this function
+    """
+    work = (config or {}).get("work", {})
+    mode = work.get("agent_permissions", "full")
+
+    if mode == "scoped":
+        tools: list[str] = work.get("allowed_tools", [])
+        if tools:
+            return ["--allowed-tools", ",".join(tools)]
+        # No tools configured — fall through to full
+    return ["--dangerously-skip-permissions"]
+
+
 DEFAULT_AGENT_PROMPT_TEMPLATE = """\
 You are a background agent working on the project at {project_path}.
 
@@ -132,6 +151,7 @@ def spawn_claude_agent(
     dry_run: bool = False,
     interactive: bool = False,
     prompt_template: str | None = None,
+    config: dict | None = None,
 ) -> dict[str, Any]:
     """
     Spawn a Claude agent for a task inside a named tmux session.
@@ -181,6 +201,9 @@ def spawn_claude_agent(
         record["status"] = "dry_run"
         return record
 
+    # Resolve permission flags from config before touching the filesystem.
+    claude_flags = _build_claude_flags(config or {})
+
     # Resolve binaries at spawn time so terminal PATH gaps don't matter
     claude_bin = shutil.which("claude")
     if claude_bin is None:
@@ -223,7 +246,7 @@ def spawn_claude_agent(
             # the start. No blank-terminal wait, no context loss between phases.
             proc = subprocess.Popen(
                 [tmux_bin, "new-session", "-d", "-s", session_name,
-                 "-x", "220", "-y", "50", claude_bin, "--dangerously-skip-permissions"],
+                 "-x", "220", "-y", "50", claude_bin] + claude_flags,
                 cwd=task.project_path, env=env, start_new_session=True,
             )
             proc.wait()
@@ -255,12 +278,13 @@ def spawn_claude_agent(
             # ── Background path: batch runner ──────────────────────────────────────
             # claude -p runs to completion and exits; PID tracking detects when done.
             runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
+            _flags_repr = ", ".join(repr(f) for f in claude_flags)
             _write_secure_file(
                 runner_file,
                 "import os\n"
                 f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
                 "    prompt = f.read()\n"
-                f"os.execv({repr(claude_bin)}, [{repr(claude_bin)}, '--dangerously-skip-permissions',"
+                f"os.execv({repr(claude_bin)}, [{repr(claude_bin)}, {_flags_repr},"
                 " '-p', prompt])\n",
             )
             proc = subprocess.Popen(
@@ -273,12 +297,13 @@ def spawn_claude_agent(
     else:
         # ── Screen fallback (background only) ──────────────────────────────────────
         runner_file = _logs_dir() / f"agent-{task.task_id}-{timestamp}.runner.py"
+        _flags_repr = ", ".join(repr(f) for f in claude_flags)
         _write_secure_file(
             runner_file,
             "import os\n"
             f"with open({repr(str(prompt_file))}, encoding='utf-8') as f:\n"
             "    prompt = f.read()\n"
-            f"os.execv({repr(claude_bin)}, [{repr(claude_bin)}, '--dangerously-skip-permissions',"
+            f"os.execv({repr(claude_bin)}, [{repr(claude_bin)}, {_flags_repr},"
             " '-p', prompt])\n",
         )
         proc = subprocess.Popen(

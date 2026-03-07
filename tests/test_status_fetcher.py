@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,10 +12,12 @@ import pytest
 
 from penny.status_fetcher import (
     LiveStatus,
+    _cache_file,
     _detect_api_error,
     _load_cache,
     _parse_usage_screen,
     _save_cache,
+    fetch_live_status,
     status_as_prediction_overrides,
 )
 
@@ -168,6 +171,64 @@ class TestCache:
             assert _load_cache() is None
 
 
+# ── _cache_file ───────────────────────────────────────────────────────────────
+
+
+class TestCacheFile:
+    def test_uses_penny_home_when_set(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PENNY_HOME", str(tmp_path))
+        result = _cache_file()
+        assert result == tmp_path / "status_cache.json"
+
+    def test_defaults_to_home_dot_penny(self, monkeypatch):
+        monkeypatch.delenv("PENNY_HOME", raising=False)
+        result = _cache_file()
+        assert result == Path.home() / ".penny" / "status_cache.json"
+
+
+# ── _parse_usage_screen edge cases ────────────────────────────────────────────
+
+
+class TestParseUsageScreenEdgeCases:
+    def test_returns_none_when_no_resets_found(self):
+        # Has percentages but no "Resets..." lines
+        screen = """\
+Settings   Config   Usage
+Current session 16% used
+Current week (all models) 30% used
+Current week (Sonnet only) 41% used
+"""
+        result = _parse_usage_screen(screen)
+        assert result is None
+
+    def test_uses_first_reset_for_session_when_only_one_reset(self):
+        # Only one Resets line — session and weekly both point to it
+        screen = """\
+Settings   Config   Usage
+Current session 16% used
+Resets 3pm (US/Eastern)
+Current week (all models) 30% used
+Current week (Sonnet only) 41% used
+"""
+        result = _parse_usage_screen(screen)
+        assert result is not None
+        assert result.session_reset_label == "3pm"
+        assert result.weekly_reset_label == "3pm"
+
+    def test_tab_bar_not_found_parses_whole_screen(self):
+        # No tab bar line — falls back to whole screen
+        screen = """\
+Current session 16% used
+Resets 2pm (UTC)
+Current week (all models) 30% used
+Current week (Sonnet only) 41% used
+Resets Mar 7 at 5pm (UTC)
+"""
+        result = _parse_usage_screen(screen)
+        assert result is not None
+        assert result.session_pct == 16.0
+
+
 # ── status_as_prediction_overrides ────────────────────────────────────────────
 
 
@@ -190,3 +251,127 @@ class TestStatusAsPredictionOverrides:
         assert result["reset_label"] == "Mar 6 at 9pm"
         assert result["session_reset_label"] == "2pm"
         assert result["reset_tz"] == "Europe/Amsterdam"
+
+
+# ── fetch_live_status TTL / no-claude behaviour ───────────────────────────────
+
+
+def _make_live_status(**overrides):
+    defaults = dict(
+        session_pct=16.0,
+        session_reset_label="2pm",
+        session_reset_tz="UTC",
+        weekly_pct_all=30.0,
+        weekly_pct_sonnet=41.0,
+        weekly_reset_label="Mar 6 at 9pm",
+        weekly_reset_tz="UTC",
+        fetched_at=datetime.now(timezone.utc),
+    )
+    defaults.update(overrides)
+    return LiveStatus(**defaults)
+
+
+class TestFetchLiveStatusTTL:
+    def setup_method(self):
+        # Reset the module-level in-memory cache before each test
+        import penny.status_fetcher as sf
+        sf._cache = None
+
+    def test_returns_in_memory_cache_when_fresh(self):
+        """A recent in-memory cache should be returned without spawning claude."""
+        import penny.status_fetcher as sf
+
+        cached = _make_live_status(session_pct=99.0)
+        sf._cache = cached
+
+        with patch("penny.status_fetcher.shutil.which", return_value=None):
+            result = fetch_live_status(force=False)
+
+        # Should return cached value even though claude is not available
+        assert result is cached
+        assert result.session_pct == 99.0
+
+    def test_force_bypasses_in_memory_cache_when_claude_missing(self):
+        """force=True skips TTL but returns None when claude is not available."""
+        import penny.status_fetcher as sf
+
+        cached = _make_live_status(session_pct=99.0)
+        sf._cache = cached
+
+        with patch("penny.status_fetcher.shutil.which", return_value=None):
+            result = fetch_live_status(force=True)
+
+        assert result is None
+
+    def test_returns_none_when_claude_not_in_path(self):
+        """No in-memory or disk cache, and claude is absent → returns None."""
+        import penny.status_fetcher as sf
+        sf._cache = None
+
+        with (
+            patch("penny.status_fetcher.shutil.which", return_value=None),
+            patch("penny.status_fetcher._load_cache", return_value=None),
+        ):
+            result = fetch_live_status()
+
+        assert result is None
+
+    def test_stale_cache_attempts_live_fetch(self):
+        """An expired in-memory cache should attempt a live fetch (falls back to None when claude absent)."""
+        import penny.status_fetcher as sf
+
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        sf._cache = _make_live_status(session_pct=50.0, fetched_at=old_time)
+
+        with patch("penny.status_fetcher.shutil.which", return_value=None):
+            result = fetch_live_status(force=False)
+
+        # Cache is stale, claude not available → None
+        assert result is None
+
+    def test_outage_cache_uses_shorter_ttl(self):
+        """An outage result cached within the short retry window should still be returned."""
+        import penny.status_fetcher as sf
+
+        # Cache set 1 minute ago (within 2-minute outage retry TTL)
+        recent = datetime.now(timezone.utc) - timedelta(seconds=60)
+        sf._cache = _make_live_status(fetched_at=recent, outage=True)
+
+        with patch("penny.status_fetcher.shutil.which", return_value=None):
+            result = fetch_live_status(force=False)
+
+        # Still within outage TTL → cached value returned
+        assert result is not None
+        assert result.outage is True
+
+    def test_expired_outage_cache_retries(self):
+        """An outage result older than the retry TTL should trigger a new fetch attempt."""
+        import penny.status_fetcher as sf
+
+        # Cache set 3 minutes ago (outside 2-minute outage retry TTL)
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=180)
+        sf._cache = _make_live_status(fetched_at=old_time, outage=True)
+
+        with patch("penny.status_fetcher.shutil.which", return_value=None):
+            result = fetch_live_status(force=False)
+
+        # Outage TTL expired, claude not available → None
+        assert result is None
+
+    def test_loads_disk_cache_on_cold_start(self, tmp_path):
+        """Cold start (no in-memory cache) should read from disk and populate memory cache."""
+        import penny.status_fetcher as sf
+        sf._cache = None
+
+        disk_status = _make_live_status(session_pct=77.0)
+
+        with (
+            patch("penny.status_fetcher._load_cache", return_value=disk_status),
+            patch("penny.status_fetcher.shutil.which", return_value=None),
+        ):
+            result = fetch_live_status(force=False)
+
+        # Should return the disk-cached value and populate in-memory cache
+        assert result is not None
+        assert result.session_pct == 77.0
+        assert sf._cache is disk_status
