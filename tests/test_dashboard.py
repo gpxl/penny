@@ -330,3 +330,81 @@ class TestDashboardServerLifecycle:
         port_file = tmp_path / ".dashboard_port"
         assert port_file.exists()
         assert int(port_file.read_text()) == port
+
+
+# ── Port fallback ────────────────────────────────────────────────────────────
+
+
+class TestPortFallback:
+    def test_falls_back_when_preferred_port_in_use(self):
+        """When port 7432 is occupied, _pick_port assigns a random port."""
+        import socket
+
+        blocker = socket.socket()
+        try:
+            blocker.bind(("127.0.0.1", 7432))
+        except OSError:
+            pytest.skip("Port 7432 already in use by another process")
+
+        try:
+            app = FakeApp()
+            ds = DashboardServer(app)
+            port = ds._pick_port()
+            assert port != 7432
+            assert port > 0
+        finally:
+            blocker.close()
+
+    def test_random_port_is_usable(self):
+        """The fallback random port can actually be used for a server."""
+        import socket
+
+        blocker = socket.socket()
+        try:
+            blocker.bind(("127.0.0.1", 7432))
+        except OSError:
+            pytest.skip("Port 7432 already in use by another process")
+
+        try:
+            app = FakeApp()
+            ds = DashboardServer(app)
+            port = ds._pick_port()
+            # Verify we can actually bind to the returned port
+            test_sock = socket.socket()
+            test_sock.bind(("127.0.0.1", port))
+            test_sock.close()
+        finally:
+            blocker.close()
+
+
+# ── Malformed POST body ──────────────────────────────────────────────────────
+
+
+class TestDashboardEdgeCases:
+    def test_empty_post_body_parsed_as_empty_dict(self, dashboard_app):
+        """POST with no body should be treated as empty dict."""
+        _, port = dashboard_app
+        # /api/refresh doesn't need a body
+        status, data = _post(port, "/api/refresh", None)
+        assert status == 200
+        assert data["ok"] is True
+
+    def test_malformed_json_treated_as_empty(self, dashboard_app):
+        """POST with invalid JSON body should not crash the server."""
+        _, port = dashboard_app
+        # Send raw bytes that aren't valid JSON
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/refresh",
+            data=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 200
+
+    def test_get_index_html_alias(self, dashboard_app):
+        """GET /index.html serves the same dashboard as GET /."""
+        _, port = dashboard_app
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/index.html", timeout=5) as r:
+            assert r.status == 200
+            body = r.read().decode()
+            assert "Penny Dashboard" in body

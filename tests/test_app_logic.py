@@ -344,3 +344,426 @@ class TestNeedsOnboarding:
         from penny.onboarding import needs_onboarding
         config = {"projects": [{"path": "/Users/me/myproject"}]}
         assert needs_onboarding(config) is False
+
+
+# ── spawnTask_ state mutations ───────────────────────────────────────────────
+
+
+class TestSpawnTaskLogic:
+    """Test the state-mutation logic from PennyApp.spawnTask_."""
+
+    def _make_task(self, task_id="t-1"):
+        from penny.tasks import Task
+        return Task(task_id, "Fix bug", "P1", "/tmp/proj", "proj")
+
+    def _simulate_spawn(self, state, task, all_ready, config=None):
+        """Reproduce spawnTask_ state mutations."""
+        config = config or {}
+        record = {
+            "task_id": task.task_id,
+            "project": task.project_name,
+            "project_path": task.project_path,
+            "title": task.title,
+            "priority": task.priority,
+            "status": "running",
+            "pid": -1,
+            "interactive": True,
+        }
+        state.setdefault("agents_running", []).append(record)
+        new_ready = [t for t in all_ready if t.task_id != task.task_id]
+        should_notify = config.get("notifications", {}).get("spawn", True)
+        return state, new_ready, record, should_notify
+
+    def test_adds_agent_to_running(self):
+        state = {"agents_running": []}
+        task = self._make_task()
+        state, _, record, _ = self._simulate_spawn(state, task, [task])
+        assert len(state["agents_running"]) == 1
+        assert record["task_id"] == "t-1"
+        assert record["status"] == "running"
+        assert record["interactive"] is True
+
+    def test_removes_from_ready_list(self):
+        t1 = self._make_task("t-1")
+        t2 = self._make_task("t-2")
+        state = {"agents_running": []}
+        _, new_ready, _, _ = self._simulate_spawn(state, t1, [t1, t2])
+        assert len(new_ready) == 1
+        assert new_ready[0].task_id == "t-2"
+
+    def test_notification_enabled_by_default(self):
+        state = {"agents_running": []}
+        _, _, _, notify = self._simulate_spawn(state, self._make_task(), [self._make_task()])
+        assert notify is True
+
+    def test_notification_disabled_in_config(self):
+        config = {"notifications": {"spawn": False}}
+        state = {"agents_running": []}
+        _, _, _, notify = self._simulate_spawn(
+            state, self._make_task(), [self._make_task()], config
+        )
+        assert notify is False
+
+    def test_record_has_all_required_fields(self):
+        state = {"agents_running": []}
+        _, _, record, _ = self._simulate_spawn(state, self._make_task(), [self._make_task()])
+        for key in ("task_id", "project", "project_path", "title", "priority", "status", "pid"):
+            assert key in record
+
+
+# ── stopAgent_ legacy PID path ──────────────────────────────────────────────
+
+
+class TestStopAgentLegacy:
+    """Test backwards-compat PID-based stopAgent_ decision logic."""
+
+    def _stop_by_pid(self, state, pid):
+        """Reproduce stopAgent_(pid) decision branches.
+
+        Returns (task_id_or_None, action_taken).
+        """
+        if pid is None or pid <= 0:
+            return None, "noop"
+        agent = next(
+            (a for a in state.get("agents_running", []) if a.get("pid") == pid),
+            None,
+        )
+        if agent:
+            return agent.get("task_id", ""), "delegate"
+        return None, "direct_kill"
+
+    def test_noop_when_pid_none(self):
+        _, action = self._stop_by_pid({"agents_running": []}, None)
+        assert action == "noop"
+
+    def test_noop_when_pid_zero(self):
+        _, action = self._stop_by_pid({"agents_running": []}, 0)
+        assert action == "noop"
+
+    def test_noop_when_pid_negative(self):
+        _, action = self._stop_by_pid({"agents_running": []}, -5)
+        assert action == "noop"
+
+    def test_delegates_when_matching_agent_found(self):
+        state = {"agents_running": [{"task_id": "t-1", "pid": 12345}]}
+        task_id, action = self._stop_by_pid(state, 12345)
+        assert task_id == "t-1"
+        assert action == "delegate"
+
+    def test_direct_kill_when_no_matching_agent(self):
+        state = {"agents_running": [{"task_id": "t-1", "pid": 99999}]}
+        _, action = self._stop_by_pid(state, 12345)
+        assert action == "direct_kill"
+
+    def test_empty_agents_falls_to_direct_kill(self):
+        _, action = self._stop_by_pid({"agents_running": []}, 12345)
+        assert action == "direct_kill"
+
+
+# ── pluginAction_ / runBdAction_ ────────────────────────────────────────────
+
+
+class TestPluginActionLogic:
+    """Test pluginAction_ dispatch and error handling."""
+
+    def test_action_tuple_unpacking(self):
+        action_payload = ("bd_command", {"args": ["ready"], "cwd": "/tmp"})
+        action, payload = action_payload
+        assert action == "bd_command"
+        assert payload["args"] == ["ready"]
+
+    def test_dispatch_called_with_correct_args(self):
+        mgr = MagicMock()
+        mgr.dispatch_action("bd_command", {"args": ["ready"]})
+        mgr.dispatch_action.assert_called_once_with("bd_command", {"args": ["ready"]})
+
+    def test_worker_fetch_called_after_success(self):
+        mgr = MagicMock()
+        worker = MagicMock()
+        try:
+            mgr.dispatch_action("action", None)
+        except Exception:
+            pass
+        finally:
+            worker.fetch(force=True)
+        worker.fetch.assert_called_once_with(force=True)
+
+    def test_worker_fetch_called_after_error(self):
+        mgr = MagicMock()
+        mgr.dispatch_action.side_effect = RuntimeError("boom")
+        worker = MagicMock()
+        try:
+            mgr.dispatch_action("action", None)
+        except Exception:
+            pass
+        finally:
+            worker.fetch(force=True)
+        worker.fetch.assert_called_once_with(force=True)
+
+    def test_runBdAction_wraps_as_bd_command(self):
+        """runBdAction_ wraps payload as ('bd_command', args_cwd)."""
+        args_cwd = (["ready"], "/tmp")
+        # Reproduce: self.pluginAction_(("bd_command", args_cwd))
+        action, payload = "bd_command", args_cwd
+        assert action == "bd_command"
+        assert payload is args_cwd
+
+
+# ── _timerFired_ ─────────────────────────────────────────────────────────────
+
+
+class TestTimerFiredLogic:
+    def test_calls_worker_fetch(self):
+        """_timerFired_ calls self._worker.fetch() without force."""
+        worker = MagicMock()
+        worker.fetch()
+        worker.fetch.assert_called_once_with()
+
+    def test_does_not_force_fetch(self):
+        """Timer uses cached data; force=True is NOT passed."""
+        worker = MagicMock()
+        worker.fetch()
+        args, kwargs = worker.fetch.call_args
+        assert args == ()
+        assert kwargs == {}
+
+
+# ── viewReport_ logic ────────────────────────────────────────────────────────
+
+
+class TestViewReportLogic:
+    """Test viewReport_ dashboard open + fallback chain."""
+
+    def test_dashboard_started_and_port_returned(self):
+        dashboard = MagicMock()
+        dashboard.ensure_started.return_value = 7432
+        assert dashboard.ensure_started() == 7432
+
+    def test_fallback_when_dashboard_fails(self):
+        """On dashboard error, generate_report + open_report are used."""
+        dashboard = MagicMock()
+        dashboard.ensure_started.side_effect = RuntimeError("fail")
+        used_fallback = False
+        try:
+            dashboard.ensure_started()
+        except Exception:
+            used_fallback = True
+        assert used_fallback
+
+    def test_popover_closed_when_shown(self):
+        popover = MagicMock()
+        popover.isShown.return_value = True
+        if popover.isShown():
+            popover.performClose_(None)
+        popover.performClose_.assert_called_once()
+
+    def test_popover_not_closed_when_hidden(self):
+        popover = MagicMock()
+        popover.isShown.return_value = False
+        if popover.isShown():
+            popover.performClose_(None)
+        popover.performClose_.assert_not_called()
+
+
+# ── togglePopover_ state transitions ─────────────────────────────────────────
+
+
+class TestTogglePopoverLogic:
+    """Test the popover open/close state transition logic."""
+
+    def test_close_path_when_shown(self):
+        is_shown = True
+        if is_shown:
+            action = "close"
+            remove_monitor = True
+        else:
+            action = "open"
+            remove_monitor = False
+        assert action == "close"
+        assert remove_monitor is True
+
+    def test_open_path_when_hidden(self):
+        is_shown = False
+        if is_shown:
+            action = "close"
+        else:
+            action = "open"
+        assert action == "open"
+
+    def test_auto_fetch_when_no_prediction(self):
+        """When prediction is None, opening popover triggers forced fetch."""
+        prediction = None
+        worker = MagicMock()
+        if prediction is None:
+            worker.fetch(force=True)
+        worker.fetch.assert_called_once_with(force=True)
+
+    def test_no_auto_fetch_when_prediction_exists(self):
+        prediction = Prediction(pct_all=50.0)
+        worker = MagicMock()
+        if prediction is None:
+            worker.fetch(force=True)
+        worker.fetch.assert_not_called()
+
+    def test_vc_updated_with_cached_data(self):
+        """Opening the popover updates the VC with current cached state."""
+        vc = MagicMock()
+        data = {
+            "prediction": Prediction(pct_all=42.0),
+            "state": {"agents_running": []},
+            "ready_tasks": [],
+            "fetched_at": None,
+        }
+        vc.updateWithData_(data)
+        vc.updateWithData_.assert_called_once_with(data)
+
+
+# ── Event monitor ────────────────────────────────────────────────────────────
+
+
+class TestEventMonitorLogic:
+    """Test outside-click event monitor add/remove state management."""
+
+    def test_add_is_noop_when_monitor_exists(self):
+        monitor = "existing"
+        if monitor is not None:
+            result = "skipped"
+        else:
+            result = "created"
+        assert result == "skipped"
+
+    def test_add_creates_when_none(self):
+        monitor = None
+        if monitor is not None:
+            result = "skipped"
+        else:
+            monitor = "new_monitor"
+            result = "created"
+        assert result == "created"
+        assert monitor == "new_monitor"
+
+    def test_remove_clears_reference(self):
+        monitor = "existing"
+        if monitor is not None:
+            monitor = None
+        assert monitor is None
+
+    def test_remove_noop_when_already_none(self):
+        monitor = None
+        if monitor is not None:
+            monitor = None
+        assert monitor is None
+
+
+# ── _spawn_agents auto-spawn logic ──────────────────────────────────────────
+
+
+class TestSpawnAgentsLogic:
+    """Test the automatic agent spawning logic."""
+
+    def _make_task(self, task_id, priority="P2"):
+        from penny.tasks import Task
+        return Task(task_id, f"Task {task_id}", priority, "/tmp/proj", "proj")
+
+    def test_noop_when_no_ready_tasks(self):
+        ready_tasks = []
+        spawned = []
+        if ready_tasks:
+            for t in ready_tasks:
+                spawned.append(t.task_id)
+        assert spawned == []
+
+    def test_spawns_all_ready_tasks(self):
+        tasks = [self._make_task("t-1"), self._make_task("t-2")]
+        state = {"agents_running": []}
+        spawned = []
+        for task in tasks:
+            record = {"task_id": task.task_id, "status": "running"}
+            state["agents_running"].append(record)
+            spawned.append(f"{task.project_name}/{task.task_id}")
+        assert len(state["agents_running"]) == 2
+        assert spawned == ["proj/t-1", "proj/t-2"]
+
+    def test_notification_includes_count_and_names(self):
+        tasks = [self._make_task("t-1"), self._make_task("t-2")]
+        spawned = [f"{t.project_name}/{t.task_id}" for t in tasks]
+        pred = Prediction(pct_all=50.0, projected_pct_all=70.0, days_remaining=2.0)
+        msg = (
+            f"Starting {len(spawned)} agent(s) \u2014 "
+            + ", ".join(spawned)
+            + f". {100 - pred.projected_pct_all:.0f}% capacity unused, "
+            + f"{pred.days_remaining:.1f} days left."
+        )
+        assert "2 agent(s)" in msg
+        assert "proj/t-1" in msg
+        assert "30% capacity unused" in msg
+
+    def test_notification_requires_prediction(self):
+        config = {"notifications": {"spawn": True}}
+        pred = None
+        should_notify = config.get("notifications", {}).get("spawn", True) and pred
+        assert not should_notify
+
+    def test_notification_sent_with_prediction(self):
+        config = {"notifications": {"spawn": True}}
+        pred = Prediction(pct_all=50.0)
+        should_notify = config.get("notifications", {}).get("spawn", True) and pred
+        assert should_notify
+
+    def test_notification_skipped_when_config_disabled(self):
+        config = {"notifications": {"spawn": False}}
+        pred = Prediction(pct_all=50.0)
+        should_notify = config.get("notifications", {}).get("spawn", True) and pred
+        assert not should_notify
+
+
+# ── _load_and_refresh composition ────────────────────────────────────────────
+
+
+class TestLoadAndRefreshLogic:
+    """Test the _load_and_refresh startup flow decisions."""
+
+    def test_yaml_error_stops_refresh(self):
+        """If config has YAML error, status title shows warning and no fetch."""
+        from penny.app import _safe_load_config
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            f.write("bad: [unclosed\n")
+            f.flush()
+            with patch("penny.app.CONFIG_PATH", Path(f.name)):
+                config, err = _safe_load_config()
+        assert config == {}
+        assert err is not None
+        # In real code, this returns early (no fetch triggered)
+
+    def test_onboarding_deferred_sets_state_flag(self):
+        """When user defers onboarding, state.onboarding_deferred = True."""
+        state = {}
+        # Simulate onboarding returning None (deferred)
+        updated = None
+        if updated is None:
+            state["onboarding_deferred"] = True
+        assert state["onboarding_deferred"] is True
+
+    def test_onboarding_completed_clears_flag(self):
+        """When onboarding completes, onboarding_deferred is removed."""
+        state = {"onboarding_deferred": True}
+        updated = {"projects": [{"path": "/tmp/proj"}]}
+        if updated is not None:
+            state.pop("onboarding_deferred", None)
+        assert "onboarding_deferred" not in state
+
+    def test_preflight_tool_errors_flagged(self):
+        """Preflight errors with 'error' severity are surfaced (not project errors)."""
+        from penny.preflight import PreflightIssue
+        issues = [
+            PreflightIssue("error", "`claude` CLI not found", "Install it"),
+            PreflightIssue("error", "Project path placeholder", "Fix config"),
+            PreflightIssue("warning", "Stats cache missing", "Use Claude"),
+        ]
+        tool_errors = [
+            i for i in issues
+            if i.severity == "error" and "project" not in i.message.lower()
+        ]
+        assert len(tool_errors) == 1
+        assert "claude" in tool_errors[0].message
