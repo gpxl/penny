@@ -62,6 +62,14 @@ def _safe_load_config() -> tuple[dict[str, Any], str | None]:
         return {}, str(exc)
 
 
+def _config_mtime() -> float | None:
+    """Return config.yaml's mtime, or None if the file doesn't exist."""
+    try:
+        return CONFIG_PATH.stat().st_mtime
+    except (FileNotFoundError, OSError):
+        return None
+
+
 class PennyApp(NSObject):
     """Main application delegate — NSStatusItem + NSPopover, no RUMPS."""
 
@@ -109,6 +117,12 @@ class PennyApp(NSObject):
         # Refresh timer: 5 minutes
         self._timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             300.0, self, "_timerFired:", None, True
+        )
+
+        # Config watcher: poll mtime every 5s (single stat() syscall, ~1μs)
+        self._config_mtime: float | None = None
+        self._config_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            5.0, self, "_checkConfig:", None, True
         )
 
         return self
@@ -185,6 +199,27 @@ class PennyApp(NSObject):
 
     def _timerFired_(self, timer: Any) -> None:
         self._worker.fetch()
+
+    # ── Config hot-reload ──────────────────────────────────────────────────
+
+    def _checkConfig_(self, timer: Any) -> None:
+        """Lightweight timer callback: reload config if file changed on disk."""
+        mt = _config_mtime()
+        if mt is not None and mt != self._config_mtime:
+            self._hot_reload_config()
+
+    @objc.python_method
+    def _hot_reload_config(self) -> None:
+        """Re-read config.yaml and apply changes without restarting."""
+        config, yaml_err = _safe_load_config()
+        if yaml_err:
+            print(f"[penny] config hot-reload skipped (YAML error): {yaml_err}", flush=True)
+            return
+        self._config_mtime = _config_mtime()
+        self.config = config
+        self._sync_launchd_service()
+        self._plugin_mgr.sync_with_config(self, config)
+        print("[penny] config.yaml reloaded", flush=True)
 
     def refreshNow_(self, sender: Any) -> None:
         """Refresh button: force-bypass cache and fetch live /status data."""
@@ -557,6 +592,7 @@ class PennyApp(NSObject):
                 return
 
         self.config = config
+        self._config_mtime = _config_mtime()
         self._sync_launchd_service()   # apply any config.yaml service changes at startup
         self._plugin_mgr.sync_with_config(self, config)
 

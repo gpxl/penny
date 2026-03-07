@@ -25,7 +25,7 @@ Users should NOT need terminal commands for normal operation.
   - Source: $SCRIPT_DIR/com.gpxl.penny.plist
   - Active: ~/Library/LaunchAgents/com.gpxl.penny.plist
 - SCRIPT_DIR readable from plist WorkingDirectory key at runtime
-- Config loaded at startup in _load_and_refresh() (app.py); no hot-reload
+- Config hot-reloads automatically — _checkConfig_ polls mtime every 5s, _hot_reload_config applies changes
 - self._vc._app = self → VC has a reference to the app delegate
 
 ## Tech Stack
