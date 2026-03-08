@@ -86,6 +86,7 @@ class PennyApp(NSObject):
         self._has_setup_issues: bool = False
         self._last_fetch_at: datetime | None = None
         self._event_monitor: Any = None
+        self._pending_spawns: dict = {}
 
         # Plugin system
         self._plugin_mgr = PluginManager()
@@ -221,6 +222,14 @@ class PennyApp(NSObject):
         self._plugin_mgr.sync_with_config(self, config)
         if self._vc is not None:
             self._vc.rebuild_plugin_sections()
+            # Populate newly-added plugin sections with cached data immediately
+            # so users see content without needing to close/reopen the popover.
+            self._vc.updateWithData_({
+                "prediction": self._prediction,
+                "state": self.state,
+                "ready_tasks": self._all_ready_tasks,
+                "fetched_at": self._last_fetch_at,
+            })
         print("[penny] config.yaml reloaded", flush=True)
 
     @objc.python_method
@@ -398,21 +407,60 @@ class PennyApp(NSObject):
         if self.config.get("work", {}).get("agent_permissions") == "off":
             print(f"[penny] agent_permissions=off — skipping spawn of {task.task_id}", flush=True)
             return
-        desc = self._plugin_mgr.get_task_description(task)
-        prompt_tmpl = self._plugin_mgr.get_agent_prompt_template(task)
-        record = spawn_claude_agent(task, desc, interactive=True, prompt_template=prompt_tmpl, config=self.config)
-        self.state.setdefault("agents_running", []).append(record)
-        self._plugin_mgr.notify_agent_spawned(task, record, self.state)
-        # Remove from ready list immediately so the popover reflects the change now
+
+        # Optimistic main-thread state update before background thread starts
         self._all_ready_tasks = [t for t in self._all_ready_tasks if t.task_id != task.task_id]
+        self._pending_spawns[task.task_id] = task
+
+        self._update_status_title()
+        self._vc.updateWithData_({
+            "prediction": self._prediction,
+            "state": self.state,
+            "ready_tasks": self._all_ready_tasks,
+            "fetched_at": self._last_fetch_at,
+        })
+
+        task_id = task.task_id
+        config_snapshot = dict(self.config)
+
+        def _bg() -> None:
+            try:
+                desc = self._plugin_mgr.get_task_description(task)
+                prompt_tmpl = self._plugin_mgr.get_agent_prompt_template(task)
+                record = spawn_claude_agent(
+                    task, desc, interactive=True,
+                    prompt_template=prompt_tmpl, config=config_snapshot,
+                )
+                payload: dict = {"task_id": task_id, "record": record, "error": None}
+            except Exception as exc:
+                print(f"[penny] spawn error for {task_id}: {exc}", flush=True)
+                payload = {"task_id": task_id, "record": None, "error": str(exc)}
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "_finishSpawn:", payload, False
+            )
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _finishSpawn_(self, payload: dict) -> None:
+        """Main-thread callback when background spawn completes or fails."""
+        task_id = payload["task_id"]
+        task = self._pending_spawns.pop(task_id, None)
+
+        if payload.get("error") or payload.get("record") is None:
+            print(f"[penny] spawn failed for {task_id}: {payload.get('error')}", flush=True)
+            self._worker.fetch()
+            return
+
+        record = payload["record"]
+        self.state.setdefault("agents_running", []).append(record)
+        if task:
+            self._plugin_mgr.notify_agent_spawned(task, record, self.state)
         save_state(self.state)
         self._update_status_title()
         if self.config.get("notifications", {}).get("spawn", True):
-            send_notification(
-                "Penny",
-                f"Starting agent \u2014 {task.task_id}: {task.title} ({task.project_name})",
-            )
-        # Immediately update UI — task moves from Ready → Running Agents without reopen
+            title = task.title if task else task_id
+            project = task.project_name if task else ""
+            send_notification("Penny", f"Starting agent \u2014 {task_id}: {title} ({project})")
         self._vc.updateWithData_({
             "prediction": self._prediction,
             "state": self.state,

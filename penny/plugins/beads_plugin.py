@@ -388,6 +388,13 @@ class BeadsUIController(NSObject):
         task_id = str(sender.representedObject() or "")
         task = next((t for t in self._latest_tasks if t.task_id == task_id), None)
         if task and self._app:
+            # Immediate visual feedback — mirrors _stopAgent_ pattern
+            sender.setTitle_("Launching\u2026")
+            sender.setEnabled_(False)
+            # Optimistically remove from local list and rebuild so the row disappears now
+            self._latest_tasks = [t for t in self._latest_tasks if t.task_id != task_id]
+            self._rebuild_tasks_section(self._latest_tasks, self._latest_agents)
+            self._relayout()
             self._app.spawnTask_(task)
 
     def _stopAgent_(self, sender: Any) -> None:

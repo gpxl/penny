@@ -7,7 +7,6 @@ the full code path: session naming, log path generation, and state recording.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch

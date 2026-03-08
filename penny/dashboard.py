@@ -326,8 +326,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <h1>Penny Dashboard</h1>
 
 <div class="grid">
-  <div class="card" id="card-period"><h2>Billing Period Usage</h2><p>…</p></div>
-  <div class="card" id="card-session"><h2>Current Sub-Session</h2><p>…</p></div>
+  <div class="card" id="card-period"><h2>Current Week</h2><p>…</p></div>
+  <div class="card" id="card-session"><h2>Current Session</h2><p>…</p></div>
 </div>
 <div class="card" id="card-history" style="margin-bottom:12px"><h2>Session History</h2><p>…</p></div>
 <div class="card" id="card-tasks" style="margin-bottom:12px"><h2>Task Queue</h2><p>…</p></div>
@@ -361,9 +361,9 @@ function renderPeriod(pred) {
     ${bar(pred.pct_all||0, barColor(pred.pct_all||0))}
     <div class="stat-row"><span>Sonnet Only</span><span><b>${ps}%</b></span></div>
     ${bar(pred.pct_sonnet||0, barColor(pred.pct_sonnet||0))}
-    <div class="stat-row" style="margin-top:8px"><span>Days remaining</span><span>${(pred.days_remaining||0).toFixed(1)}</span></div>
-    <div class="stat-row"><span>Projected end-of-period</span><span>${proj}%</span></div>
-    <div class="stat-row"><span>Resets</span><span>${pred.reset_label||'–'}</span></div>`;
+    <div class="stat-row" style="margin-top:8px"><span>${(pred.days_remaining||0).toFixed(1)} days remaining</span></div>
+    <div class="stat-row"><span>Projected token use</span><span>${proj}%</span></div>
+    <div class="stat-row"><span>Resets at</span><span>${pred.reset_label||'–'}</span></div>`;
 }
 
 function renderSession(pred) {
@@ -371,8 +371,8 @@ function renderSession(pred) {
   return `
     <div class="stat-row"><span>Session Usage</span><span><b>${sp}%</b></span></div>
     ${bar(pred.session_pct_all||0, barColor(pred.session_pct_all||0))}
-    <div class="stat-row" style="margin-top:8px"><span>Resets</span><span>${pred.session_reset_label||'–'}</span></div>
-    <div class="stat-row"><span>Hours remaining</span><span>${(pred.session_hours_remaining||0).toFixed(1)}</span></div>`;
+    <div class="stat-row" style="margin-top:8px"><span>Resets at</span><span>${pred.session_reset_label||'–'}</span></div>
+    <div class="stat-row"><span>${(pred.session_hours_remaining||0).toFixed(1)} hours remaining</span></div>`;
 }
 
 function filterHistory(history, periodStart) {
@@ -467,8 +467,8 @@ function render(data) {
   lastData = data;
   const pred = data.prediction || {};
   const state = data.state || {};
-  document.getElementById('card-period').innerHTML = '<h2>Billing Period Usage</h2>' + renderPeriod(pred);
-  document.getElementById('card-session').innerHTML = '<h2>Current Sub-Session</h2>' + renderSession(pred);
+  document.getElementById('card-period').innerHTML = '<h2>Current Week</h2>' + renderPeriod(pred);
+  document.getElementById('card-session').innerHTML = '<h2>Current Session</h2>' + renderSession(pred);
   document.getElementById('card-history').innerHTML = '<h2>Session History</h2>' + renderHistory_card(data.session_history, pred.period_start);
   document.getElementById('card-tasks').innerHTML = '<h2>Task Queue (' + (data.ready_tasks||[]).length + ' ready)</h2>' + renderTasks(data.ready_tasks, data.active_plugins);
   document.getElementById('card-agents').innerHTML = '<h2>Agents Running (' + (state.agents_running||[]).length + ')</h2>' + renderAgents(state.agents_running);

@@ -1105,3 +1105,580 @@ class TestSyncLaunchAgentPlistLogic:
         self._make_plist(plist, keep_alive=True, run_at_load=True)
         updated = self._apply_service_config(plist, {})
         assert updated is False  # defaults match current state
+
+
+# ── FakeApp helper ─────────────────────────────────────────────────────────────
+#
+# PennyApp.init() requires a live AppKit event loop, so we cannot instantiate it
+# normally. Instead, we build a FakeApp struct with the same attributes and call
+# the @objc.python_method methods as plain functions via PennyApp.<method>(fake).
+# Since conftest stubs objc.python_method as a passthrough, these methods are
+# regular functions on the class.
+
+
+def _make_fake_app(config=None, state=None, tmp_path=None):
+    """Return a lightweight FakeApp struct for testing PennyApp instance methods."""
+    from unittest.mock import MagicMock
+
+    class FakeApp:
+        pass
+
+    app = FakeApp()
+    app.config = config if config is not None else {}
+    app.state = state if state is not None else {}
+    app._prediction = None
+    app._all_ready_tasks = []
+    app._ready_tasks = []
+    app._last_fetch_at = None
+    app._vc = MagicMock()
+    app._status_item = MagicMock()
+    app._status_item.button.return_value = MagicMock()
+    app._worker = MagicMock()
+    app._plugin_mgr = MagicMock()
+    app._plugin_mgr.get_all_tasks.return_value = []
+    app._plugin_mgr.get_all_completed_tasks.return_value = []
+    app._plugin_mgr.filter_all_tasks.return_value = []
+    app._plugin_mgr.notify_agent_completed.return_value = None
+    app._plugin_mgr.notify_agent_spawned.return_value = None
+    app._config_mtime = None
+    # Stub methods that may be called internally (override per-test as needed)
+    app._hot_reload_config = MagicMock()
+    app._sync_launchd_service = MagicMock()
+    app._update_status_title = MagicMock()
+    app._spawn_agents = MagicMock()
+    app._write_config = MagicMock()
+    if tmp_path:
+        app._state_path = tmp_path / "state.json"
+    return app
+
+
+# ── set_plugin_enabled (direct call into penny/app.py) ───────────────────────
+
+
+class TestSetPluginEnabled:
+    """Call PennyApp.set_plugin_enabled directly to cover lines 237-245."""
+
+    def _make_app(self, config=None, tmp_path=None):
+        return _make_fake_app(config=config, tmp_path=tmp_path)
+
+    def test_enables_new_plugin(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("{}\n")
+        app = self._make_app(config={})
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp.set_plugin_enabled(app, "beads", True)
+        assert app.config["plugins"]["beads"]["enabled"] is True
+
+    def test_disables_existing_plugin(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("plugins:\n  beads:\n    enabled: true\n")
+        app = self._make_app(config={"plugins": {"beads": {"enabled": True}}})
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp.set_plugin_enabled(app, "beads", False)
+        assert app.config["plugins"]["beads"]["enabled"] is False
+
+    def test_converts_bool_plugin_entry_to_dict(self, tmp_path):
+        """If the plugin config is a bare bool, it must be converted to a dict."""
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("plugins:\n  beads: true\n")
+        app = self._make_app(config={"plugins": {"beads": True}})
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp.set_plugin_enabled(app, "beads", False)
+        assert isinstance(app.config["plugins"]["beads"], dict)
+        assert app.config["plugins"]["beads"]["enabled"] is False
+
+    def test_calls_write_config_and_hot_reload(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("{}\n")
+        app = self._make_app(config={})
+        hot_reload_called = []
+        write_called = []
+        app._hot_reload_config = lambda: hot_reload_called.append(True)
+        app._write_config = lambda: write_called.append(True)
+        PennyApp.set_plugin_enabled(app, "x", True)
+        assert write_called   # _write_config was called
+        assert hot_reload_called  # _hot_reload_config was called
+
+
+# ── _write_config (direct call into penny/app.py) ────────────────────────────
+
+
+class TestWriteConfigDirect:
+    """Call PennyApp._write_config directly to cover lines 534-538."""
+
+    def test_writes_config_to_disk(self, tmp_path):
+        import yaml
+
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        app = _make_fake_app(config={"projects": [{"path": "/tmp/p"}]})
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp._write_config(app)
+        data = yaml.safe_load(cfg_file.read_text())
+        assert data["projects"] == [{"path": "/tmp/p"}]
+
+    def test_handles_write_error_gracefully(self, tmp_path):
+        """If the file cannot be written, the method prints an error (no raise)."""
+        from penny.app import PennyApp
+        app = _make_fake_app(config={"k": "v"})
+        # Point CONFIG_PATH to a directory (write will fail)
+        with patch("penny.app.CONFIG_PATH", tmp_path):
+            PennyApp._write_config(app)  # must not raise
+
+
+# ── _didFetchData_ state mutations (direct call into penny/app.py) ────────────
+
+
+class TestDidFetchDataDirect:
+    """Call PennyApp._didFetchData_ directly to cover the real lines in app.py."""
+
+    def _make_result(self, **kwargs):
+        base = {
+            "state": {"agents_running": [], "recently_completed": []},
+            "prediction": None,
+            "newly_done": [],
+        }
+        base.update(kwargs)
+        return base
+
+    def test_non_dict_result_returns_early(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        PennyApp._didFetchData_(app, "not a dict")
+        # VC must have had setRefreshing_(False) called
+        app._vc.setRefreshing_.assert_called_once_with(False)
+
+    def test_error_result_returns_early(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        PennyApp._didFetchData_(app, {"error": "something went wrong"})
+        app._vc.setRefreshing_.assert_called_once_with(False)
+
+    def test_updates_state_and_prediction(self):
+        from penny.analysis import Prediction
+        from penny.app import PennyApp
+        pred = Prediction(pct_all=55.0)
+        app = _make_fake_app()
+        result = self._make_result(
+            state={"agents_running": [], "recently_completed": []},
+            prediction=pred,
+            newly_done=[],
+        )
+        with patch("penny.app.should_trigger", return_value=False):
+            PennyApp._didFetchData_(app, result)
+        assert app.state == result["state"]
+        assert app._prediction is pred
+
+    def test_newly_done_appended_to_recently_completed(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        state = {"agents_running": [], "recently_completed": []}
+        agent = {
+            "task_id": "t-1",
+            "title": "Fix",
+            "project": "proj",
+            "status": "completed",
+        }
+        result = self._make_result(state=state, newly_done=[agent])
+        config = {"notifications": {"completion": False}}
+        app.config = config
+        with patch("penny.app.should_trigger", return_value=False):
+            with patch("penny.app.save_state"):
+                PennyApp._didFetchData_(app, result)
+        assert any(a["task_id"] == "t-1" for a in app.state.get("recently_completed", []))
+
+    def test_completion_notification_sent_when_enabled(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        state = {"agents_running": [], "recently_completed": []}
+        agent = {"task_id": "t-1", "title": "Fix", "project": "proj", "status": "done"}
+        result = self._make_result(state=state, newly_done=[agent])
+        app.config = {"notifications": {"completion": True}}
+        with (
+            patch("penny.app.should_trigger", return_value=False),
+            patch("penny.app.save_state"),
+            patch("penny.app.send_notification") as mock_notify,
+        ):
+            PennyApp._didFetchData_(app, result)
+        mock_notify.assert_called_once()
+
+    def test_auto_spawn_triggered_when_should_trigger_true(self):
+        from penny.analysis import Prediction
+        from penny.app import PennyApp
+        pred = Prediction(pct_all=90.0)
+        app = _make_fake_app()
+        result = self._make_result(
+            state={"agents_running": [], "recently_completed": []},
+            prediction=pred,
+            newly_done=[],
+        )
+        spawn_called = []
+        app._spawn_agents = lambda: spawn_called.append(True)  # type: ignore[method-assign]
+        with patch("penny.app.should_trigger", return_value=True):
+            PennyApp._didFetchData_(app, result)
+        assert spawn_called
+
+
+# ── spawnTaskById_ (direct call into penny/app.py) ───────────────────────────
+
+
+class TestSpawnTaskByIdDirect:
+    """Call PennyApp.spawnTaskById_ directly to cover lines 434-436."""
+
+    def _make_task(self, task_id="t-1"):
+        from penny.tasks import Task
+        return Task(task_id, "Fix bug", "P1", "/tmp/proj", "proj")
+
+    def test_spawns_matching_task(self):
+        from penny.app import PennyApp
+        task = self._make_task("t-1")
+        app = _make_fake_app()
+        app._all_ready_tasks = [task]
+        spawned = []
+
+        def fake_spawn(t):
+            spawned.append(t.task_id)
+
+        app.spawnTask_ = fake_spawn  # type: ignore[method-assign]
+        PennyApp.spawnTaskById_(app, "t-1")
+        assert spawned == ["t-1"]
+
+    def test_noop_when_task_not_in_ready_list(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._all_ready_tasks = []
+        spawned = []
+        app.spawnTask_ = lambda t: spawned.append(t)  # type: ignore[method-assign]
+        PennyApp.spawnTaskById_(app, "t-99")
+        assert spawned == []
+
+
+# ── _finishSpawn_ callback ────────────────────────────────────────────────────
+
+
+class TestFinishSpawnDirect:
+    """Call PennyApp._finishSpawn_ directly to cover the main-thread callback."""
+
+    def _make_task(self, task_id="t-1"):
+        from penny.tasks import Task
+        return Task(task_id, "Fix bug", "P1", "/tmp/proj", "proj")
+
+    def test_success_appends_agent_record(self):
+        from penny.app import PennyApp
+        task = self._make_task("t-1")
+        app = _make_fake_app(state={"agents_running": []})
+        app._pending_spawns = {"t-1": task}
+        record = {"task_id": "t-1", "status": "running", "pid": 42}
+        PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
+        assert len(app.state["agents_running"]) == 1
+        assert app.state["agents_running"][0]["task_id"] == "t-1"
+
+    def test_success_clears_pending(self):
+        from penny.app import PennyApp
+        task = self._make_task("t-1")
+        app = _make_fake_app(state={"agents_running": []})
+        app._pending_spawns = {"t-1": task}
+        record = {"task_id": "t-1", "status": "running", "pid": 42}
+        PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
+        assert "t-1" not in app._pending_spawns
+
+    def test_error_triggers_fetch_not_state(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": []})
+        app._pending_spawns = {}
+        PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": None, "error": "boom"})
+        assert app.state.get("agents_running") == []
+        app._worker.fetch.assert_called_once()
+
+    def test_error_with_record_none_triggers_fetch(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": []})
+        app._pending_spawns = {}
+        PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": None, "error": None})
+        app._worker.fetch.assert_called_once()
+
+    def test_notification_disabled_skips_send(self):
+        from unittest.mock import patch
+
+        from penny.app import PennyApp
+        task = self._make_task("t-1")
+        app = _make_fake_app(
+            config={"notifications": {"spawn": False}},
+            state={"agents_running": []},
+        )
+        app._pending_spawns = {"t-1": task}
+        record = {"task_id": "t-1", "status": "running", "pid": 42}
+        with patch("penny.app.send_notification") as mock_notify:
+            PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
+        mock_notify.assert_not_called()
+
+    def test_notification_sent_when_enabled(self):
+        from unittest.mock import patch
+
+        from penny.app import PennyApp
+        task = self._make_task("t-1")
+        app = _make_fake_app(state={"agents_running": []})
+        app._pending_spawns = {"t-1": task}
+        record = {"task_id": "t-1", "status": "running", "pid": 42}
+        with patch("penny.app.send_notification") as mock_notify, \
+             patch("penny.app.save_state"):
+            PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
+        mock_notify.assert_called_once()
+
+
+# ── dismissCompleted_ / clearAllCompleted_ (direct call) ─────────────────────
+
+
+class TestDismissCompletedDirect:
+    """Call PennyApp.dismissCompleted_ and clearAllCompleted_ directly."""
+
+    def test_dismiss_removes_task(self):
+        from penny.app import PennyApp
+        state = {"agents_running": [], "recently_completed": [
+            {"task_id": "t-1"}, {"task_id": "t-2"},
+        ]}
+        app = _make_fake_app(state=state)
+        with patch("penny.app.save_state"):
+            PennyApp.dismissCompleted_(app, "t-1")
+        assert len(app.state["recently_completed"]) == 1
+        assert app.state["recently_completed"][0]["task_id"] == "t-2"
+
+    def test_clear_all_removes_all(self):
+        from penny.app import PennyApp
+        state = {"agents_running": [], "recently_completed": [
+            {"task_id": "t-1"}, {"task_id": "t-2"},
+        ]}
+        app = _make_fake_app(state=state)
+        with patch("penny.app.save_state"):
+            PennyApp.clearAllCompleted_(app, None)
+        assert app.state["recently_completed"] == []
+
+
+# ── stopAgentByTaskId_ (direct call) ─────────────────────────────────────────
+
+
+class TestStopAgentByTaskIdDirect:
+    """Call PennyApp.stopAgentByTaskId_ directly to cover lines 439-473."""
+
+    def test_noop_on_empty_task_id(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": [{"task_id": "t-1", "pid": 99}]})
+        with patch("penny.app.save_state"):
+            PennyApp.stopAgentByTaskId_(app, "")
+        assert len(app.state["agents_running"]) == 1
+
+    def test_noop_when_task_id_not_found(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": [{"task_id": "t-1", "pid": 99}]})
+        with patch("penny.app.save_state"):
+            PennyApp.stopAgentByTaskId_(app, "t-999")
+        assert len(app.state["agents_running"]) == 1
+
+    def test_removes_matching_agent(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={
+            "agents_running": [
+                {"task_id": "t-1", "pid": 100, "session": "", "tmux_bin": ""},
+                {"task_id": "t-2", "pid": 200, "session": "", "tmux_bin": ""},
+            ],
+            "recently_completed": [],
+        })
+        with (
+            patch("penny.app.save_state"),
+            patch("subprocess.run"),
+        ):
+            PennyApp.stopAgentByTaskId_(app, "t-1")
+        running_ids = [a["task_id"] for a in app.state["agents_running"]]
+        assert running_ids == ["t-2"]
+
+    def test_kills_process_via_pid(self):
+        """When agent has a pid > 0, os.killpg is called."""
+        from penny.app import PennyApp
+        app = _make_fake_app(state={
+            "agents_running": [
+                {"task_id": "t-1", "pid": 99999, "session": "", "tmux_bin": ""},
+            ],
+            "recently_completed": [],
+        })
+        with (
+            patch("penny.app.save_state"),
+            patch("subprocess.run"),
+            patch("os.killpg") as mock_kill,
+        ):
+            PennyApp.stopAgentByTaskId_(app, "t-1")
+        mock_kill.assert_called_once_with(99999, mock_kill.call_args[0][1])
+
+    def test_gracefully_handles_process_lookup_error(self):
+        """ProcessLookupError from os.killpg is swallowed."""
+        from penny.app import PennyApp
+        app = _make_fake_app(state={
+            "agents_running": [
+                {"task_id": "t-1", "pid": 99999, "session": "", "tmux_bin": ""},
+            ],
+            "recently_completed": [],
+        })
+        with (
+            patch("penny.app.save_state"),
+            patch("subprocess.run"),
+            patch("os.killpg", side_effect=ProcessLookupError),
+        ):
+            PennyApp.stopAgentByTaskId_(app, "t-1")  # must not raise
+
+
+# ── stopAgent_ legacy PID shim (direct call) ─────────────────────────────────
+
+
+class TestStopAgentDirect:
+    """Call PennyApp.stopAgent_ directly to cover lines 477-490."""
+
+    def test_noop_when_pid_none(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": []})
+        stopped = []
+        app.stopAgentByTaskId_ = lambda tid: stopped.append(tid)  # type: ignore[method-assign]
+        PennyApp.stopAgent_(app, None)
+        assert stopped == []
+
+    def test_noop_when_pid_zero(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": []})
+        stopped = []
+        app.stopAgentByTaskId_ = lambda tid: stopped.append(tid)  # type: ignore[method-assign]
+        PennyApp.stopAgent_(app, 0)
+        assert stopped == []
+
+    def test_delegates_to_stop_by_task_id_when_pid_found(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={
+            "agents_running": [{"task_id": "t-1", "pid": 12345}],
+        })
+        stopped = []
+        app.stopAgentByTaskId_ = lambda tid: stopped.append(tid)  # type: ignore[method-assign]
+        PennyApp.stopAgent_(app, 12345)
+        assert stopped == ["t-1"]
+
+    def test_direct_kill_when_pid_not_in_agents(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": []})
+        app.stopAgentByTaskId_ = lambda tid: None  # type: ignore[method-assign]
+        with patch("os.killpg") as mock_kill:
+            PennyApp.stopAgent_(app, 12345)
+        mock_kill.assert_called_once()
+
+    def test_gracefully_handles_process_lookup_error(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": []})
+        app.stopAgentByTaskId_ = lambda tid: None  # type: ignore[method-assign]
+        with patch("os.killpg", side_effect=ProcessLookupError):
+            PennyApp.stopAgent_(app, 12345)  # must not raise
+
+
+# ── _hot_reload_config (direct call into penny/app.py) ───────────────────────
+
+
+class TestHotReloadConfigDirect:
+    """Call PennyApp._hot_reload_config directly to cover lines 214-232."""
+
+    def test_skips_on_yaml_error(self, tmp_path, capsys):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("bad: [unclosed\n")
+        app = _make_fake_app()
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp._hot_reload_config(app)
+        out = capsys.readouterr().out
+        assert "YAML error" in out
+
+    def test_applies_new_config(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects:\n  - path: /tmp/proj\n")
+        app = _make_fake_app()
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp._hot_reload_config(app)
+        assert app.config.get("projects") == [{"path": "/tmp/proj"}]
+
+    def test_updates_config_mtime(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects: []\n")
+        app = _make_fake_app()
+        assert app._config_mtime is None
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp._hot_reload_config(app)
+        assert app._config_mtime is not None
+
+    def test_calls_sync_launchd_service(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects: []\n")
+        app = _make_fake_app()
+        sync_called = []
+        app._sync_launchd_service = lambda: sync_called.append(True)
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp._hot_reload_config(app)
+        assert sync_called
+
+    def test_calls_plugin_mgr_sync(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects: []\n")
+        app = _make_fake_app()
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp._hot_reload_config(app)
+        app._plugin_mgr.sync_with_config.assert_called_once()
+
+    def test_rebuilds_plugin_sections(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects: []\n")
+        app = _make_fake_app()
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp._hot_reload_config(app)
+        app._vc.rebuild_plugin_sections.assert_called_once()
+
+
+# ── _compact_reset_time (direct call via PennyApp class method) ───────────────
+
+
+class TestCompactResetTimeDirect:
+    """Call PennyApp._compact_reset_time directly to cover lines 352-379."""
+
+    def _call(self, label: str) -> str:
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        return PennyApp._compact_reset_time(app, label)
+
+    def test_empty_returns_empty(self):
+        assert self._call("") == ""
+
+    def test_em_dash_returns_empty(self):
+        assert self._call("\u2014") == ""
+
+    def test_long_form_12h_12h_mode(self):
+        with patch("penny.app.uses_24h_time", return_value=False):
+            assert self._call("Today at 4:59 PM") == "4:59pm"
+
+    def test_long_form_12h_24h_mode(self):
+        with patch("penny.app.uses_24h_time", return_value=True):
+            assert self._call("Today at 4:59 PM") == "16:59"
+
+    def test_long_form_24h(self):
+        with patch("penny.app.uses_24h_time", return_value=False):
+            assert self._call("Today at 16:59") == "16:59"
+
+    def test_compact_passthrough_in_12h_mode(self):
+        with patch("penny.app.uses_24h_time", return_value=False):
+            assert self._call("9pm") == "9pm"
+
+    def test_compact_to_24h(self):
+        with patch("penny.app.uses_24h_time", return_value=True):
+            assert self._call("9pm") == "21"
+
+    def test_unknown_label_returned_as_is(self):
+        with patch("penny.app.uses_24h_time", return_value=False):
+            assert self._call("some label") == "some label"

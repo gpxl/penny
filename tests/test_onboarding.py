@@ -6,12 +6,9 @@ All tests avoid requiring AppKit — NSAlert calls are either not reached
 
 from __future__ import annotations
 
-import re
 import textwrap
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 import yaml
 
 from penny.onboarding import (
@@ -20,7 +17,6 @@ from penny.onboarding import (
     fix_missing_beads,
     needs_onboarding,
 )
-
 
 # ── needs_onboarding ─────────────────────────────────────────────────────────
 

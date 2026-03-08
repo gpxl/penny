@@ -426,6 +426,7 @@ class TestTokenBucket:
 
     def test_tokens_refill_over_time(self):
         import time
+
         from penny.dashboard import _TokenBucket
         bucket = _TokenBucket(capacity=2, refill_rate=100)  # 100/s — fast refill
         bucket.consume()
@@ -436,6 +437,7 @@ class TestTokenBucket:
 
     def test_tokens_capped_at_capacity(self):
         import time
+
         from penny.dashboard import _TokenBucket
         bucket = _TokenBucket(capacity=2, refill_rate=100)
         time.sleep(0.1)  # would fill to 10, but capped at 2
@@ -446,6 +448,7 @@ class TestTokenBucket:
     def test_thread_safe_concurrent_consume(self):
         """Multiple threads competing for limited tokens — exactly capacity succeed."""
         import concurrent.futures
+
         from penny.dashboard import _TokenBucket
         bucket = _TokenBucket(capacity=10, refill_rate=0)  # no refill
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:

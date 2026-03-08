@@ -1234,6 +1234,7 @@ class TestReportPluginSections:
 
     def test_plugin_section_appended_to_report(self, tmp_path):
         from unittest.mock import patch
+
         import penny.report as rep
 
         plugin_section = "<h2>Beads Section</h2><p>Task data here</p>"
@@ -1246,6 +1247,7 @@ class TestReportPluginSections:
 
     def test_no_plugin_section_when_mgr_is_none(self, tmp_path):
         from unittest.mock import patch
+
         import penny.report as rep
 
         with patch.object(rep, "REPORT_DIR", tmp_path):
@@ -1256,6 +1258,7 @@ class TestReportPluginSections:
 
     def test_plugin_section_skipped_when_empty(self, tmp_path):
         from unittest.mock import patch
+
         import penny.report as rep
 
         mgr = self._make_plugin_mgr(section_html=None)  # returns []

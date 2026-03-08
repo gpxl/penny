@@ -14,12 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from penny.analysis import SONNET_MODELS, TokenUsage, count_tokens_since
-
 
 # ---------------------------------------------------------------------------
 # Shared test constants

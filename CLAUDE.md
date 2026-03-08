@@ -30,3 +30,45 @@ Users should NOT need terminal commands for normal operation.
 
 ## Tech Stack
 Python 3.9+, PyObjC, AppKit/Foundation, yaml, launchd (no RUMPS)
+
+## Code Quality Agent
+
+After implementing any non-trivial change, delegate quality verification to the
+code quality agent instead of running checks manually.
+
+### When to delegate
+
+| Trigger | Example |
+|---------|---------|
+| New module created | Added `penny/rate_limiter.py` |
+| Logic change in existing module | Modified `penny/spawner.py` |
+| Bug fix | Fixed off-by-one in `penny/analysis.py` |
+| Refactor | Extracted helper from `penny/app.py` |
+
+UI-only changes to `popover_vc.py`, `ui_components.py`, or `onboarding.py`
+do **not** need delegation — those modules are excluded from coverage.
+
+### How to delegate
+
+Use the Claude Code `Agent` tool with `subagent_type="code-quality"`. Pass only
+the changed files — the agent's system prompt comes from the spec automatically:
+
+```
+Changed files: penny/spawner.py, penny/tasks.py
+```
+
+Do **not** use `isolation="worktree"` — the agent intentionally writes test
+files to the working tree; isolation would strand those files on a separate
+branch.
+
+> ⚠️ Sub-agents cannot spawn code-quality. If you are running as a sub-agent,
+> do **not** run `pytest` manually or attempt to call code-quality. Simply
+> return your results. The top-level session will delegate to code-quality
+> after you return.
+
+### Interpreting the result
+
+The agent ends its response with a `CODE QUALITY RESULT: PASS` or
+`CODE QUALITY RESULT: FAIL` block. On PASS, close the beads issue and continue.
+On FAIL, read the details — if pre-existing tests broke, investigate before
+closing; if coverage is the issue, the agent will have added tests already.
