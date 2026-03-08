@@ -219,7 +219,22 @@ class PennyApp(NSObject):
         self.config = config
         self._sync_launchd_service()
         self._plugin_mgr.sync_with_config(self, config)
+        if self._vc is not None:
+            self._vc.rebuild_plugin_sections()
         print("[penny] config.yaml reloaded", flush=True)
+
+    @objc.python_method
+    def set_plugin_enabled(self, plugin_name: str, enabled: bool) -> None:
+        """Enable or disable a plugin by name, writing to config.yaml."""
+        plugins_cfg = self.config.setdefault("plugins", {})
+        pcfg = plugins_cfg.get(plugin_name, {})
+        if isinstance(pcfg, bool):
+            pcfg = {}
+        pcfg["enabled"] = enabled
+        plugins_cfg[plugin_name] = pcfg
+        self.config["plugins"] = plugins_cfg
+        self._write_config()
+        self._hot_reload_config()
 
     def refreshNow_(self, sender: Any) -> None:
         """Refresh button: force-bypass cache and fetch live /status data."""

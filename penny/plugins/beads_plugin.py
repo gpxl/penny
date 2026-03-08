@@ -6,15 +6,175 @@ for projects using the Beads issue tracker (bd CLI).
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
 import shutil
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from ..plugin import PennyPlugin
+import objc
+from AppKit import (
+    NSAttributedString,
+    NSButton,
+    NSColor,
+    NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSMutableAttributedString,
+    NSScrollView,
+    NSStackView,
+    NSTextView,
+)
+from Foundation import NSObject
+
+from ..plugin import PennyPlugin, UISection
 from ..preflight import PreflightIssue
 from ..tasks import Task
+from ..ui_components import make_button, make_label
+
+# ── Layout constants (must match popover_vc._WIDTH/_PADDING) ───────────────
+
+_WIDTH: float = 380.0
+_PADDING: float = 16.0
+_PAGE_SIZE: int = 5
+_TASK_LIMIT: int = 20
+
+# ── Markdown helpers (copied from popover_vc, used for task descriptions) ──
+
+_SECTION_HDR_RE = re.compile(r"^[A-Z][A-Z_\s]{3,}$")
+_INLINE_MARKUP_RE = re.compile(r"\*\*(.+?)\*\*|`(.+?)`")
+
+
+def _extract_description(bd_show_output: str) -> str:
+    """Strip bd show header lines; return from first ALL-CAPS section header onward."""
+    lines = bd_show_output.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and _SECTION_HDR_RE.match(stripped):
+            return "\n".join(lines[i:]).strip()
+    return bd_show_output.strip()
+
+
+def _markdown_to_attrstr(text: str) -> Any:
+    """Convert **bold**, `code`, ALL-CAPS headers, and bullets to NSMutableAttributedString."""
+    body_font = NSFont.systemFontOfSize_(12.0)
+    bold_font = NSFont.boldSystemFontOfSize_(12.0)
+    code_font = NSFont.userFixedPitchFontOfSize_(11.0)
+    hdr_font = NSFont.boldSystemFontOfSize_(11.0)
+    _body_color = NSColor.labelColor()
+    dim_color = NSColor.secondaryLabelColor()
+
+    result = NSMutableAttributedString.alloc().init()
+
+    def _append(txt: str, font: Any, color: Any = None) -> None:
+        attrs: dict = {NSFontAttributeName: font}
+        if color is not None:
+            attrs[NSForegroundColorAttributeName] = color
+        result.appendAttributedString_(
+            NSAttributedString.alloc().initWithString_attributes_(txt, attrs)
+        )
+
+    def _append_inline(line: str, nl: str) -> None:
+        last = 0
+        for m in _INLINE_MARKUP_RE.finditer(line):
+            if m.start() > last:
+                _append(line[last:m.start()], body_font)
+            if m.group(1) is not None:   # **bold**
+                _append(m.group(1), bold_font)
+            else:                         # `code`
+                _append(m.group(2), code_font)
+            last = m.end()
+        if last < len(line):
+            _append(line[last:], body_font)
+        if nl:
+            _append(nl, body_font)
+
+    for raw_line in text.splitlines(True):
+        line = raw_line.rstrip("\n\r")
+        nl = "\n" if len(raw_line) > len(line) else ""
+        stripped = line.strip()
+
+        if stripped and _SECTION_HDR_RE.match(stripped):
+            _append(line + nl, hdr_font, dim_color)
+            continue
+
+        bullet_m = re.match(r"^(\s*)[-*]\s+(.+)$", line)
+        if bullet_m:
+            _append(bullet_m.group(1) + "• ", body_font)
+            _append_inline(bullet_m.group(2), nl)
+            continue
+
+        _append_inline(line, nl)
+
+    return result
+
+
+def _make_desc_scroll_view(text: str) -> Any:
+    """Return a width-constrained NSScrollView containing a markdown-rendered NSTextView."""
+    inner_w = _WIDTH - _PADDING * 2
+
+    tv = NSTextView.alloc().initWithFrame_(((0, 0), (inner_w, 400.0)))
+    tv.textStorage().setAttributedString_(_markdown_to_attrstr(text))
+    tv.setEditable_(False)
+    tv.setSelectable_(True)
+    tv.setDrawsBackground_(False)
+    tv.setVerticallyResizable_(True)
+    tv.setHorizontallyResizable_(False)
+    tv.textContainer().setWidthTracksTextView_(True)
+    tv.textContainer().setContainerSize_((inner_w, 1e7))
+
+    lm = tv.layoutManager()
+    lm.ensureLayoutForTextContainer_(tv.textContainer())
+    used = lm.usedRectForTextContainer_(tv.textContainer())
+    content_h = max(min(used.size.height + 8.0, 160.0), 40.0)
+
+    sv = NSScrollView.alloc().initWithFrame_(((0, 0), (inner_w, content_h)))
+    sv.setDocumentView_(tv)
+    sv.setHasVerticalScroller_(True)
+    sv.setHasHorizontalScroller_(False)
+    sv.setAutohidesScrollers_(True)
+    sv.setDrawsBackground_(False)
+    sv.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    sv.widthAnchor().constraintEqualToConstant_(inner_w).setActive_(True)
+    sv.heightAnchor().constraintEqualToConstant_(content_h).setActive_(True)
+    return sv
+
+
+def _make_inner_stack() -> Any:
+    """Return a plain vertical NSStackView for a paginated section."""
+    inner = NSStackView.alloc().init()
+    inner.setOrientation_(1)
+    inner.setAlignment_(9)
+    inner.setSpacing_(4.0)
+    inner.setDistribution_(0)
+    inner.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    inner.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
+    return inner
+
+
+def _update_pagination_nav(
+    nav_row: Any,
+    prev_btn: Any,
+    next_btn: Any,
+    page_lbl: Any,
+    page: int,
+    total_pages: int,
+) -> None:
+    """Refresh pagination nav controls for a section."""
+    if nav_row is None:
+        return
+    if total_pages <= 1:
+        nav_row.setHidden_(True)
+        return
+    nav_row.setHidden_(False)
+    page_lbl.setStringValue_(f"{page + 1} / {total_pages}")
+    prev_btn.setEnabled_(page > 0)
+    next_btn.setEnabled_(page < total_pages - 1)
+
 
 AGENT_PROMPT_TEMPLATE = """\
 You are a background agent working on the project at {project_path}.
@@ -115,11 +275,417 @@ def _parse_bd_list(output: str, project_path: str) -> list[Task]:
     return tasks
 
 
+# ── Beads UI Controller ────────────────────────────────────────────────────
+
+class BeadsUIController(NSObject):
+    """NSObject target for Beads UI button actions.
+
+    Holds all task/agent/completed section state and UI rebuild methods.
+    Button actions on beads-contributed UI views target this object.
+    """
+
+    def init(self) -> BeadsUIController:
+        self = objc.super(BeadsUIController, self).init()
+        if self is None:
+            return self
+
+        self._plugin: Any = None
+        self._app: Any = None
+
+        # Tasks section state
+        self._tasks_stack: Any = None
+        self._task_views: list = []
+        self._tasks_page: int = 0
+        self._tasks_total_pages: int = 1
+        self._tasks_nav_row: Any = None
+        self._tasks_prev_btn: Any = None
+        self._tasks_next_btn: Any = None
+        self._tasks_page_lbl: Any = None
+        self._tasks_header_lbl: Any = None
+        self._expanded_task_id: str | None = None
+        self._latest_tasks: list = []
+        self._latest_agents: list = []
+        self._latest_completed: list = []
+
+        # Agents section state
+        self._agents_stack: Any = None
+        self._agent_views: list = []
+        self._agents_header_lbl: Any = None
+        self._agents_page: int = 0
+        self._agents_total_pages: int = 1
+        self._agents_nav_row: Any = None
+        self._agents_prev_btn: Any = None
+        self._agents_next_btn: Any = None
+        self._agents_page_lbl: Any = None
+
+        # Completed section state
+        self._completed_stack: Any = None
+        self._completed_views: list = []
+        self._completed_header_row: Any = None
+        self._completed_outer: Any = None
+        self._completed_nav_row: Any = None
+        self._completed_prev_btn: Any = None
+        self._completed_next_btn: Any = None
+        self._completed_page_lbl: Any = None
+        self._completed_page: int = 0
+        self._completed_total_pages: int = 1
+
+        return self
+
+    # ── ObjC action selectors — immediate UI rebuilds ──────────────────────
+
+    def _toggleTask_(self, sender: Any) -> None:
+        task_id = str(sender.representedObject() or "")
+        if not task_id:
+            return
+        if self._expanded_task_id == task_id:
+            self._expanded_task_id = None
+        else:
+            self._expanded_task_id = task_id
+            task = next((t for t in self._latest_tasks if t.task_id == task_id), None)
+            if task and not getattr(task, "_cached_desc", None):
+                mgr = getattr(self._app, "_plugin_mgr", None)
+                if mgr:
+                    task._cached_desc = mgr.get_task_description(task)
+                else:
+                    task._cached_desc = task.title
+        self._rebuild_tasks_section(self._latest_tasks, self._latest_agents)
+        self._relayout()
+
+    def _tasksPrev_(self, sender: Any) -> None:
+        self._tasks_page = max(0, self._tasks_page - 1)
+        self._rebuild_tasks_section(self._latest_tasks, self._latest_agents)
+        self._relayout()
+
+    def _tasksNext_(self, sender: Any) -> None:
+        self._tasks_page = min(self._tasks_total_pages - 1, self._tasks_page + 1)
+        self._rebuild_tasks_section(self._latest_tasks, self._latest_agents)
+        self._relayout()
+
+    def _agentsPrev_(self, sender: Any) -> None:
+        self._agents_page = max(0, self._agents_page - 1)
+        self._rebuild_agents_section(self._latest_agents)
+        self._relayout()
+
+    def _agentsNext_(self, sender: Any) -> None:
+        self._agents_page = min(self._agents_total_pages - 1, self._agents_page + 1)
+        self._rebuild_agents_section(self._latest_agents)
+        self._relayout()
+
+    def _completedPrev_(self, sender: Any) -> None:
+        self._completed_page = max(0, self._completed_page - 1)
+        self._rebuild_completed_section(self._latest_completed)
+        self._relayout()
+
+    def _completedNext_(self, sender: Any) -> None:
+        self._completed_page = min(self._completed_total_pages - 1, self._completed_page + 1)
+        self._rebuild_completed_section(self._latest_completed)
+        self._relayout()
+
+    # ── ObjC action selectors — data-mutating, forwarded through app ───────
+
+    def _runTask_(self, sender: Any) -> None:
+        task_id = str(sender.representedObject() or "")
+        task = next((t for t in self._latest_tasks if t.task_id == task_id), None)
+        if task and self._app:
+            self._app.spawnTask_(task)
+
+    def _stopAgent_(self, sender: Any) -> None:
+        task_id = str(sender.representedObject() or "")
+        if not task_id:
+            return
+        sender.setTitle_("Stopping\u2026")
+        sender.setEnabled_(False)
+        if self._app:
+            self._app.stopAgentByTaskId_(task_id)
+
+    def _controlAgent_(self, sender: Any) -> None:
+        task_id = str(sender.representedObject() or "")
+        if not task_id or not self._app:
+            return
+        agent = next(
+            (a for a in self._latest_agents if a.get("task_id") == task_id), None
+        )
+        if agent is None:
+            return
+        session = agent.get("session", "")
+        if not session:
+            return
+        tmux_bin = agent.get("tmux_bin") or "/opt/homebrew/bin/tmux"
+        if subprocess.run(
+            [tmux_bin, "has-session", "-t", session], capture_output=True
+        ).returncode == 0:
+            attach_cmd = shlex.join([tmux_bin, "attach-session", "-t", session])
+        else:
+            attach_cmd = shlex.join(["screen", "-x", session])
+        script_content = f"#!/bin/sh\n{attach_cmd}\n"
+        fd, tmp_path = tempfile.mkstemp(suffix=".command")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(script_content)
+            os.chmod(tmp_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
+            subprocess.Popen(["open", tmp_path], start_new_session=True)
+        except Exception as exc:
+            print(f"[penny] BeadsUIController _controlAgent_ failed: {exc}", flush=True)
+
+    def _dismissCompleted_(self, sender: Any) -> None:
+        task_id = str(sender.representedObject() or "")
+        if task_id and self._app:
+            self._app.dismissCompleted_(task_id)
+
+    def _clearAllCompleted_(self, sender: Any) -> None:
+        if self._app:
+            self._app.clearAllCompleted_(None)
+
+    # ── Internal helpers ───────────────────────────────────────────────────
+
+    @objc.python_method
+    def _relayout(self) -> None:
+        if self._app and hasattr(self._app, "_vc") and self._app._vc:
+            self._app._vc._relayout()
+
+    # ── View rebuild methods ───────────────────────────────────────────────
+
+    @objc.python_method
+    def _rebuild_tasks_section(self, tasks: list, agents_running: list) -> None:
+        if self._tasks_stack is None:
+            return
+        for v in self._task_views:
+            v.removeFromSuperview()
+        self._task_views = []
+
+        running_ids = {a.get("task_id") for a in agents_running}
+        shown = [t for t in tasks if t.task_id not in running_ids][:_TASK_LIMIT]
+
+        if not shown:
+            placeholder = make_label("No ready tasks", size=12.0, secondary=True)
+            self._tasks_stack.addArrangedSubview_(placeholder)
+            self._task_views.append(placeholder)
+            if self._tasks_header_lbl:
+                self._tasks_header_lbl.setStringValue_("Ready Tasks")
+            if self._tasks_nav_row:
+                self._tasks_nav_row.setHidden_(True)
+            return
+
+        ready_count = len(shown)
+        if self._tasks_header_lbl:
+            self._tasks_header_lbl.setStringValue_(f"Ready Tasks ({ready_count})")
+
+        total_pages = max(1, (len(shown) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+        self._tasks_total_pages = total_pages
+        self._tasks_page = min(self._tasks_page, total_pages - 1)
+
+        start = self._tasks_page * _PAGE_SIZE
+        page_tasks = shown[start:start + _PAGE_SIZE]
+
+        if self._expanded_task_id and not any(
+            t.task_id == self._expanded_task_id for t in page_tasks
+        ):
+            self._expanded_task_id = None
+
+        for task in page_tasks:
+            is_expanded = (task.task_id == self._expanded_task_id)
+            row_view = self._make_task_row(task, is_expanded, running_ids)
+            self._tasks_stack.addArrangedSubview_(row_view)
+            self._task_views.append(row_view)
+
+        _update_pagination_nav(
+            self._tasks_nav_row,
+            self._tasks_prev_btn,
+            self._tasks_next_btn,
+            self._tasks_page_lbl,
+            self._tasks_page,
+            total_pages,
+        )
+
+    @objc.python_method
+    def _rebuild_agents_section(self, agents: list) -> None:
+        if self._agents_stack is None:
+            return
+        for v in self._agent_views:
+            v.removeFromSuperview()
+        self._agent_views = []
+
+        hidden = not agents
+        if self._agents_header_lbl:
+            self._agents_header_lbl.setHidden_(hidden)
+        self._agents_stack.setHidden_(hidden)
+
+        if hidden:
+            if self._agents_nav_row:
+                self._agents_nav_row.setHidden_(True)
+            return
+
+        total_pages = max(1, (len(agents) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+        self._agents_total_pages = total_pages
+        self._agents_page = min(self._agents_page, total_pages - 1)
+
+        start = self._agents_page * _PAGE_SIZE
+        page_agents = agents[start:start + _PAGE_SIZE]
+
+        for agent in page_agents:
+            row = self._make_agent_row(agent)
+            self._agents_stack.addArrangedSubview_(row)
+            self._agent_views.append(row)
+
+        _update_pagination_nav(
+            self._agents_nav_row,
+            self._agents_prev_btn,
+            self._agents_next_btn,
+            self._agents_page_lbl,
+            self._agents_page,
+            total_pages,
+        )
+
+    @objc.python_method
+    def _rebuild_completed_section(self, completed: list) -> None:
+        if self._completed_stack is None:
+            return
+        for v in self._completed_views:
+            v.removeFromSuperview()
+        self._completed_views = []
+
+        hidden = not completed
+        if self._completed_header_row:
+            self._completed_header_row.setHidden_(hidden)
+        if self._completed_stack:
+            self._completed_stack.setHidden_(hidden)
+        # Hide/show the entire outer view so _insert_plugin_sections
+        # separators collapse properly when there's nothing to show.
+        if self._completed_outer:
+            self._completed_outer.setHidden_(hidden)
+
+        if hidden:
+            if self._completed_nav_row:
+                self._completed_nav_row.setHidden_(True)
+            return
+
+        items = list(reversed(completed[-20:]))   # newest first
+
+        total_pages = max(1, (len(items) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+        self._completed_total_pages = total_pages
+        self._completed_page = min(self._completed_page, total_pages - 1)
+
+        start = self._completed_page * _PAGE_SIZE
+        page_items = items[start:start + _PAGE_SIZE]
+
+        for agent in page_items:
+            row = self._make_completed_row(agent)
+            self._completed_stack.addArrangedSubview_(row)
+            self._completed_views.append(row)
+
+        _update_pagination_nav(
+            self._completed_nav_row,
+            self._completed_prev_btn,
+            self._completed_next_btn,
+            self._completed_page_lbl,
+            self._completed_page,
+            total_pages,
+        )
+
+    @objc.python_method
+    def _make_task_row(self, task: Any, expanded: bool, running_ids: set) -> Any:
+        """Build one task row (collapsed or expanded)."""
+        container = NSStackView.alloc().init()
+        container.setOrientation_(1)
+        container.setAlignment_(9)
+        container.setSpacing_(4.0)
+
+        is_running = task.task_id in running_ids
+
+        title_row = NSStackView.alloc().init()
+        title_row.setOrientation_(0)
+        title_row.setSpacing_(6.0)
+
+        pri_badge = make_label(f"[{task.priority}]", size=11.0, secondary=True)
+        id_lbl = make_label(f"{task.task_id}", size=11.0, bold=True)
+
+        title_btn = NSButton.buttonWithTitle_target_action_(
+            task.title[:50], self, "_toggleTask:"
+        )
+        title_btn.setRepresentedObject_(task.task_id)
+        title_btn.setBordered_(False)
+        title_btn.setBezelStyle_(0)
+        title_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+        title_btn.setAlignment_(0)
+        title_btn.setLineBreakMode_(4)
+        title_btn.setContentCompressionResistancePriority_forOrientation_(249, 0)
+
+        title_row.addArrangedSubview_(pri_badge)
+        title_row.addArrangedSubview_(id_lbl)
+        title_row.addArrangedSubview_(title_btn)
+
+        if is_running:
+            status_lbl = make_label("\u2699 Running\u2026", size=11.0, secondary=True)
+            title_row.addArrangedSubview_(status_lbl)
+        else:
+            run_btn = make_button("\u25b6 Run", self, "_runTask:")
+            run_btn.setRepresentedObject_(task.task_id)
+            title_row.addArrangedSubview_(run_btn)
+
+        container.addArrangedSubview_(title_row)
+
+        if expanded and not is_running:
+            desc = getattr(task, "_cached_desc", task.title)
+            desc_view = _make_desc_scroll_view(_extract_description(desc))
+            container.addArrangedSubview_(desc_view)
+
+        return container
+
+    @objc.python_method
+    def _make_agent_row(self, agent: dict) -> Any:
+        row = NSStackView.alloc().init()
+        row.setOrientation_(0)
+        row.setSpacing_(8.0)
+
+        task_id = agent.get("task_id", "?")
+        title = agent.get("title", "")[:40]
+        lbl = make_label(f"\u2699 {task_id} \u00b7 {title}", size=12.0)
+        lbl.setContentCompressionResistancePriority_forOrientation_(250, 0)
+
+        log_btn = make_button("Control", self, "_controlAgent:")
+        log_btn.setRepresentedObject_(agent.get("task_id", ""))
+        stop_btn = make_button("\u25a0 Stop", self, "_stopAgent:")
+        stop_btn.setRepresentedObject_(agent.get("task_id", ""))
+
+        row.addArrangedSubview_(lbl)
+        row.addArrangedSubview_(log_btn)
+        row.addArrangedSubview_(stop_btn)
+        return row
+
+    @objc.python_method
+    def _make_completed_row(self, agent: dict) -> Any:
+        row = NSStackView.alloc().init()
+        row.setOrientation_(0)
+        row.setSpacing_(6.0)
+        row.setDistribution_(0)
+
+        task_id = agent.get("task_id", "?")
+        title = agent.get("title", "")[:38]
+        project = agent.get("project", "")
+        status = agent.get("status", "completed")
+        icon = "\u2753" if status == "unknown" else "\u2713"
+        lbl = make_label(f"{icon} {task_id} \u00b7 {title} ({project})", size=12.0)
+        if status == "unknown":
+            lbl.setTextColor_(NSColor.secondaryLabelColor())
+        lbl.setContentCompressionResistancePriority_forOrientation_(249, 0)
+
+        dismiss_btn = make_button("\u2715", self, "_dismissCompleted:")
+        dismiss_btn.setRepresentedObject_(task_id)
+
+        row.addArrangedSubview_(lbl)
+        row.addArrangedSubview_(dismiss_btn)
+        return row
+
+
+# ── Plugin ─────────────────────────────────────────────────────────────────
+
 class Plugin(PennyPlugin):
     """Beads issue tracker integration."""
 
     def __init__(self) -> None:
         self._app: Any = None
+        self._ui_ctrl: Any = None
 
     @property
     def name(self) -> str:
@@ -147,6 +713,7 @@ class Plugin(PennyPlugin):
             pass
 
     def on_deactivate(self) -> None:
+        self._ui_ctrl = None
         self._app = None
 
     def preflight_checks(self, config: dict[str, Any]) -> list[PreflightIssue]:
@@ -295,3 +862,160 @@ class Plugin(PennyPlugin):
                 "description": "Enable beads plugin: true, false, or auto (detect)",
             },
         }
+
+    # ── UISection contributions ────────────────────────────────────────────
+
+    def ui_sections(self) -> list[UISection]:
+        if self._ui_ctrl is None:
+            self._ui_ctrl = BeadsUIController.alloc().init()
+            self._ui_ctrl._plugin = self
+            self._ui_ctrl._app = self._app
+        return [
+            UISection(
+                name="beads_tasks",
+                sort_order=10,
+                build_view=self._build_tasks_view,
+                rebuild=self._rebuild_tasks_view,
+            ),
+            UISection(
+                name="beads_completed",
+                sort_order=20,
+                build_view=self._build_completed_view,
+                rebuild=self._rebuild_completed_view,
+            ),
+        ]
+
+    @objc.python_method
+    def _build_tasks_view(self) -> Any:
+        """Build the outer NSStackView for tasks + agents."""
+        ctrl = self._ui_ctrl
+        outer = NSStackView.alloc().init()
+        outer.setOrientation_(1)
+        outer.setAlignment_(9)
+        outer.setSpacing_(4.0)
+        outer.setTranslatesAutoresizingMaskIntoConstraints_(False)
+
+        # Tasks header label
+        ctrl._tasks_header_lbl = make_label("Ready Tasks", size=11.0, secondary=True)
+        outer.addArrangedSubview_(ctrl._tasks_header_lbl)
+
+        # Tasks inner stack
+        ctrl._tasks_stack = _make_inner_stack()
+        outer.addArrangedSubview_(ctrl._tasks_stack)
+
+        # Tasks pagination nav
+        tasks_nav = NSStackView.alloc().init()
+        tasks_nav.setOrientation_(0)
+        tasks_nav.setSpacing_(8.0)
+        tasks_nav.setDistribution_(2)
+        ctrl._tasks_prev_btn = make_button("\u25c0", ctrl, "_tasksPrev:")
+        ctrl._tasks_page_lbl = make_label("1 / 1", size=11.0, secondary=True)
+        ctrl._tasks_page_lbl.setAlignment_(1)
+        ctrl._tasks_next_btn = make_button("\u25b6", ctrl, "_tasksNext:")
+        tasks_nav.addArrangedSubview_(ctrl._tasks_prev_btn)
+        tasks_nav.addArrangedSubview_(ctrl._tasks_page_lbl)
+        tasks_nav.addArrangedSubview_(ctrl._tasks_next_btn)
+        tasks_nav.setHidden_(True)
+        ctrl._tasks_nav_row = tasks_nav
+        outer.addArrangedSubview_(tasks_nav)
+
+        # Agents header (hidden when no agents running)
+        ctrl._agents_header_lbl = make_label("Running Agents", size=11.0, secondary=True)
+        ctrl._agents_header_lbl.setHidden_(True)
+        outer.addArrangedSubview_(ctrl._agents_header_lbl)
+
+        # Agents inner stack
+        ctrl._agents_stack = _make_inner_stack()
+        ctrl._agents_stack.setHidden_(True)
+        outer.addArrangedSubview_(ctrl._agents_stack)
+
+        # Agents pagination nav
+        agents_nav = NSStackView.alloc().init()
+        agents_nav.setOrientation_(0)
+        agents_nav.setSpacing_(8.0)
+        agents_nav.setDistribution_(2)
+        ctrl._agents_prev_btn = make_button("\u25c0", ctrl, "_agentsPrev:")
+        ctrl._agents_page_lbl = make_label("1 / 1", size=11.0, secondary=True)
+        ctrl._agents_page_lbl.setAlignment_(1)
+        ctrl._agents_next_btn = make_button("\u25b6", ctrl, "_agentsNext:")
+        agents_nav.addArrangedSubview_(ctrl._agents_prev_btn)
+        agents_nav.addArrangedSubview_(ctrl._agents_page_lbl)
+        agents_nav.addArrangedSubview_(ctrl._agents_next_btn)
+        agents_nav.setHidden_(True)
+        ctrl._agents_nav_row = agents_nav
+        outer.addArrangedSubview_(agents_nav)
+
+        return outer
+
+    @objc.python_method
+    def _build_completed_view(self) -> Any:
+        """Build the outer NSStackView for the recently completed section."""
+        ctrl = self._ui_ctrl
+        outer = NSStackView.alloc().init()
+        outer.setOrientation_(1)
+        outer.setAlignment_(9)
+        outer.setSpacing_(4.0)
+        outer.setTranslatesAutoresizingMaskIntoConstraints_(False)
+
+        # Header row: "Recently Completed" + "Clear All" button
+        header_row = NSStackView.alloc().init()
+        header_row.setOrientation_(0)
+        header_row.setSpacing_(8.0)
+        header_row.setDistribution_(2)
+        comp_lbl = make_label("Recently Completed", size=11.0, secondary=True)
+        clear_btn = make_button("Clear All", ctrl, "_clearAllCompleted:")
+        header_row.addArrangedSubview_(comp_lbl)
+        header_row.addArrangedSubview_(clear_btn)
+        header_row.setHidden_(True)
+        ctrl._completed_header_row = header_row
+        outer.addArrangedSubview_(header_row)
+
+        # Completed inner stack
+        ctrl._completed_stack = _make_inner_stack()
+        ctrl._completed_stack.setHidden_(True)
+        outer.addArrangedSubview_(ctrl._completed_stack)
+
+        # Completed pagination nav
+        comp_nav = NSStackView.alloc().init()
+        comp_nav.setOrientation_(0)
+        comp_nav.setSpacing_(8.0)
+        comp_nav.setDistribution_(2)
+        ctrl._completed_prev_btn = make_button("\u25c0", ctrl, "_completedPrev:")
+        ctrl._completed_page_lbl = make_label("1 / 1", size=11.0, secondary=True)
+        ctrl._completed_page_lbl.setAlignment_(1)
+        ctrl._completed_next_btn = make_button("\u25b6", ctrl, "_completedNext:")
+        comp_nav.addArrangedSubview_(ctrl._completed_prev_btn)
+        comp_nav.addArrangedSubview_(ctrl._completed_page_lbl)
+        comp_nav.addArrangedSubview_(ctrl._completed_next_btn)
+        comp_nav.setHidden_(True)
+        ctrl._completed_nav_row = comp_nav
+        outer.addArrangedSubview_(comp_nav)
+
+        # Start hidden; shown by _rebuild_completed_section when there are items
+        outer.setHidden_(True)
+        ctrl._completed_outer = outer
+
+        return outer
+
+    @objc.python_method
+    def _rebuild_tasks_view(self, data: dict) -> None:
+        ctrl = self._ui_ctrl
+        if ctrl is None:
+            return
+        ready_tasks = data.get("ready_tasks", [])
+        agents = data.get("state", {}).get("agents_running", [])
+        completed = data.get("state", {}).get("recently_completed", [])
+        ctrl._latest_tasks = ready_tasks
+        ctrl._latest_agents = agents
+        ctrl._latest_completed = completed
+        ctrl._rebuild_tasks_section(ready_tasks, agents)
+        ctrl._rebuild_agents_section(agents)
+
+    @objc.python_method
+    def _rebuild_completed_view(self, data: dict) -> None:
+        ctrl = self._ui_ctrl
+        if ctrl is None:
+            return
+        completed = data.get("state", {}).get("recently_completed", [])
+        ctrl._latest_completed = completed
+        ctrl._rebuild_completed_section(completed)
