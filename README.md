@@ -2,6 +2,13 @@
 
 macOS menu bar app that monitors your Claude Max token usage, predicts unused weekly capacity, and autonomously spawns Claude Code agents on [Beads](https://github.com/steveyegge/beads) tasks before your billing period resets.
 
+## Screenshots
+
+| Menubar icon | Expanded popover | HTML report |
+|:---:|:---:|:---:|
+| ![Menubar icon showing token usage percentage](docs/images/menubar-icon.png) | ![Popover with ready tasks and running agents](docs/images/popover-expanded.png) | ![HTML status report with usage chart](docs/images/html-report.png) |
+| Usage % in the menu bar | Tasks queue and agent status | Weekly usage chart and history |
+
 ---
 
 ## Resources

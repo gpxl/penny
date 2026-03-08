@@ -16,6 +16,10 @@ from unittest.mock import patch
 if "objc" not in sys.modules:
     def _stub_module(name: str) -> _types.ModuleType:
         class _StubMod(_types.ModuleType):
+            # Set __file__ to None so module-introspecting tools (e.g. Hypothesis)
+            # don't receive a synthetic type object instead of a path string.
+            __file__ = None  # type: ignore[assignment]
+
             def __getattr__(self, attr: str):
                 t = type(attr, (), {})
                 object.__setattr__(self, attr, t)
