@@ -132,8 +132,10 @@ class TestBeadsPluginGetTasks:
         plugin = Plugin()
         proj1 = tmp_path / "proj1"
         proj1.mkdir()
+        (proj1 / ".beads").mkdir()
         proj2 = tmp_path / "proj2"
         proj2.mkdir()
+        (proj2 / ".beads").mkdir()
 
         def fake_run(args, **kwargs):
             cwd = kwargs.get("cwd", "")
@@ -161,6 +163,7 @@ class TestBeadsPluginGetTasks:
 class TestBeadsPluginGetCompletedTasks:
     def test_calls_bd_list_status_closed(self, tmp_path):
         plugin = Plugin()
+        (tmp_path / ".beads").mkdir()
         project = {"path": str(tmp_path), "priority": 1}
         with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="")
@@ -173,6 +176,7 @@ class TestBeadsPluginGetCompletedTasks:
         # First encounter with a project: tasks are seeded into seen_closed_ids
         # but NOT returned as notifications (avoids spam for pre-existing work).
         plugin = Plugin()
+        (tmp_path / ".beads").mkdir()
         project = {"path": str(tmp_path), "priority": 1}
         sample = "✓ proj-abc [P2] [task] - Done task\n"
         plugin_state: dict = {}
@@ -186,6 +190,7 @@ class TestBeadsPluginGetCompletedTasks:
     def test_returns_parsed_closed_tasks_after_initialization(self, tmp_path):
         # After a project has been initialized, newly closed tasks are returned.
         plugin = Plugin()
+        (tmp_path / ".beads").mkdir()
         project = {"path": str(tmp_path), "priority": 1}
         sample = "✓ proj-abc [P2] [task] - Done task\n"
         plugin_state = {"initialized_projects": [str(tmp_path)]}
@@ -198,6 +203,7 @@ class TestBeadsPluginGetCompletedTasks:
 
     def test_deduplicates_via_plugin_state(self, tmp_path):
         plugin = Plugin()
+        (tmp_path / ".beads").mkdir()
         project = {"path": str(tmp_path), "priority": 1}
         sample = "✓ proj-abc [P2] [task] - Done task\n"
         plugin_state = {"seen_closed_ids": ["proj-abc"]}
@@ -208,6 +214,7 @@ class TestBeadsPluginGetCompletedTasks:
 
     def test_updates_plugin_state_with_new_ids(self, tmp_path):
         plugin = Plugin()
+        (tmp_path / ".beads").mkdir()
         project = {"path": str(tmp_path), "priority": 1}
         sample = "✓ proj-abc [P2] [task] - Done task\n"
         plugin_state: dict = {}
@@ -661,6 +668,7 @@ def _make_ctrl() -> BeadsUIController:
     ctrl._latest_tasks = []
     ctrl._latest_agents = []
     ctrl._latest_completed = []
+    ctrl._pending_task_ids = set()
     ctrl._agents_stack = MagicMock()
     ctrl._agent_views = []
     ctrl._agents_header_lbl = MagicMock()
@@ -993,7 +1001,7 @@ class TestBeadsUIControllerActionSelectors:
             for p in patches:
                 p.stop()
 
-    def test_run_task_removes_from_list_and_spawns(self):
+    def test_run_task_marks_pending_and_spawns(self):
         ctrl = _make_ctrl()
         t = Task("t-1", "Fix", "P1", "/p", "p")
         ctrl._latest_tasks = [t]
@@ -1004,7 +1012,8 @@ class TestBeadsUIControllerActionSelectors:
             p.start()
         try:
             ctrl._runTask_(sender)
-            assert len(ctrl._latest_tasks) == 0
+            # Task stays in _latest_tasks but is marked pending
+            assert "t-1" in ctrl._pending_task_ids
             ctrl._app.spawnTask_.assert_called_once_with(t)
         finally:
             for p in patches:

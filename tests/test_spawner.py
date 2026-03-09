@@ -115,8 +115,18 @@ class TestGetTmuxPid:
 
 class TestTmuxPaneCommand:
     def test_returns_command_name(self):
-        mock_result = MagicMock(returncode=0, stdout="claude\n")
-        with patch("penny.spawner.subprocess.run", return_value=mock_result):
+        # First call: tmux list-panes returns "<pid> <basename>"
+        # Second call: ps -p returns the full command path
+        tmux_result = MagicMock(returncode=0, stdout="12345 claude\n")
+        ps_result = MagicMock(returncode=0, stdout="claude\n")
+        with patch("penny.spawner.subprocess.run", side_effect=[tmux_result, ps_result]):
+            cmd = _tmux_pane_command("penny-task-abc")
+        assert cmd == "claude"
+
+    def test_returns_command_name_falls_back_to_basename_when_ps_fails(self):
+        tmux_result = MagicMock(returncode=0, stdout="12345 claude\n")
+        ps_result = MagicMock(returncode=1, stdout="")
+        with patch("penny.spawner.subprocess.run", side_effect=[tmux_result, ps_result]):
             cmd = _tmux_pane_command("penny-task-abc")
         assert cmd == "claude"
 
