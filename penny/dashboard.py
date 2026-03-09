@@ -4,6 +4,8 @@ Auto-starts at app launch. Serves a live dashboard at http://127.0.0.1:7432/
 and exposes a JSON API for the penny CLI. Reads/writes app state via
 main-thread dispatch (same pattern as bg_worker.py).
 """
+from __future__ import annotations
+
 import dataclasses
 import http.server
 import json
