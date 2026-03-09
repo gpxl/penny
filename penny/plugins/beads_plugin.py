@@ -202,18 +202,48 @@ Work autonomously. Do not ask for confirmation. Complete the full task end-to-en
 """
 
 
+def _resolve_bd() -> str:
+    """Return the absolute path to the bd binary.
+
+    When Penny is launched as a GUI app (e.g. via Spotlight or Finder) macOS
+    provides a minimal PATH that typically omits ~/.local/bin and
+    /opt/homebrew/bin.  shutil.which() searches the current process PATH, so
+    we fall back to the canonical install locations used by the bd installer.
+    """
+    found = shutil.which("bd")
+    if found:
+        return found
+    for candidate in (
+        Path.home() / ".local" / "bin" / "bd",
+        Path("/opt/homebrew/bin/bd"),
+        Path("/usr/local/bin/bd"),
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return "bd"  # will raise FileNotFoundError at call time, caught below
+
+
+_BD_BIN: str = _resolve_bd()
+print(f"[beads] bd binary resolved to {_BD_BIN!r}", flush=True)
+
+
 def _run_bd(args: list[str], cwd: str) -> str:
     """Run a bd command in a given directory and return stdout."""
     try:
         result = subprocess.run(
-            ["bd"] + args,
+            [_BD_BIN] + args,
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=30,
         )
+        if result.returncode != 0 and result.stderr:
+            print(f"[beads] bd {args} (rc={result.returncode}): {result.stderr.strip()}", flush=True)
         return result.stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except FileNotFoundError:
+        print(f"[beads] bd binary not found (tried {_BD_BIN!r})", flush=True)
+        return ""
+    except subprocess.TimeoutExpired:
         return ""
 
 
@@ -788,6 +818,7 @@ class Plugin(PennyPlugin):
         for project in projects:
             path = str(Path(project["path"]).expanduser())
             if not Path(path).exists():
+                print(f"[beads] get_tasks: path not found: {path}", flush=True)
                 continue
             output = _run_bd(["ready"], path)
             tasks = _parse_bd_ready(output, path)
