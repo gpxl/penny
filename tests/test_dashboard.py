@@ -485,14 +485,6 @@ class TestDashboardRateLimiting:
                     if not tiny_bucket.consume():
                         inner_self.send_error(429, "Too Many Requests")
                         return
-                    # Call the parent do_POST without going through rate limiter again.
-                    # We read body and route manually to avoid double-consume.
-                    length = int(inner_self.headers.get("Content-Length", 0))
-                    raw = inner_self.rfile.read(length) if length else b"{}"
-                    try:
-                        payload = json.loads(raw) if raw else {}
-                    except Exception:
-                        payload = {}
                     if inner_self.path == "/api/refresh":
                         app.performSelectorOnMainThread_withObject_waitUntilDone_(
                             "refreshNow:", None, True

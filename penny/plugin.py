@@ -57,7 +57,7 @@ class PennyPlugin(ABC):
     def on_activate(self, app: Any) -> None:
         """Called when the plugin is activated. `app` is the PennyApp delegate."""
 
-    def on_first_activated(self, app: Any) -> None:
+    def on_first_activated(self, app: Any) -> None:  # noqa: B027
         """Called once the very first time the plugin transitions to active.
 
         Use this to show a one-time welcome notification (e.g., when the user
