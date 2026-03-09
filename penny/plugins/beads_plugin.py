@@ -469,14 +469,14 @@ class BeadsUIController(NSObject):
             self._tasks_stack.addArrangedSubview_(placeholder)
             self._task_views.append(placeholder)
             if self._tasks_header_lbl:
-                self._tasks_header_lbl.setStringValue_("Ready Tasks")
+                self._tasks_header_lbl.setStringValue_("BEADS TASKS")
             if self._tasks_nav_row:
                 self._tasks_nav_row.setHidden_(True)
             return
 
         ready_count = len(shown)
         if self._tasks_header_lbl:
-            self._tasks_header_lbl.setStringValue_(f"Ready Tasks ({ready_count})")
+            self._tasks_header_lbl.setStringValue_(f"BEADS TASKS ({ready_count} READY)")
 
         total_pages = max(1, (len(shown) + _PAGE_SIZE - 1) // _PAGE_SIZE)
         self._tasks_total_pages = total_pages
@@ -592,46 +592,77 @@ class BeadsUIController(NSObject):
 
     @objc.python_method
     def _make_task_row(self, task: Any, expanded: bool, running_ids: set) -> Any:
-        """Build one task row (collapsed or expanded)."""
+        """Build one task row (collapsed or expanded).
+
+        Layout matches the mockup:
+          Line 1: ● dot + "id · project"  [right: "● running" or "P2" badge]
+          Line 2: Full title (plain label)
+          Expanded: description scroll view
+        """
         container = NSStackView.alloc().init()
         container.setOrientation_(1)
         container.setAlignment_(9)
-        container.setSpacing_(4.0)
+        container.setSpacing_(2.0)
 
         is_running = task.task_id in running_ids
 
-        title_row = NSStackView.alloc().init()
-        title_row.setOrientation_(0)
-        title_row.setSpacing_(6.0)
+        # ── Row 1: id/project + status badge ─────────────────────────────
+        meta_row = NSStackView.alloc().init()
+        meta_row.setOrientation_(0)
+        meta_row.setSpacing_(5.0)
+        meta_row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
 
-        pri_badge = make_label(f"[{task.priority}]", size=11.0, secondary=True)
-        id_lbl = make_label(f"{task.task_id}", size=11.0, bold=True)
+        # Left: status dot + "id · project"
+        left = NSStackView.alloc().init()
+        left.setOrientation_(0)
+        left.setSpacing_(4.0)
 
+        dot = make_label("\u25cf", size=10.0)  # ●
+        dot.setTextColor_(
+            NSColor.systemOrangeColor() if is_running else NSColor.systemGreenColor()
+        )
+
+        project = getattr(task, "project_name", "") or ""
+        meta_text = f"{task.task_id} \u00b7 {project}" if project else task.task_id
+        meta_lbl = make_label(meta_text, size=11.0, secondary=True)
+
+        left.addArrangedSubview_(dot)
+        left.addArrangedSubview_(meta_lbl)
+
+        # Right: running badge or priority badge
+        if is_running:
+            badge = make_label("\u25cf running", size=11.0)
+            badge.setTextColor_(NSColor.systemOrangeColor())
+        else:
+            badge = make_label(task.priority, size=11.0, secondary=True)
+
+        meta_row.addArrangedSubview_(left)
+        meta_row.addArrangedSubview_(badge)
+        container.addArrangedSubview_(meta_row)
+
+        # ── Row 2: title (clickable to expand) ───────────────────────────
         title_btn = NSButton.buttonWithTitle_target_action_(
-            task.title[:50], self, "_toggleTask:"
+            task.title, self, "_toggleTask:"
         )
         title_btn.setRepresentedObject_(task.task_id)
         title_btn.setBordered_(False)
         title_btn.setBezelStyle_(0)
-        title_btn.setFont_(NSFont.systemFontOfSize_(12.0))
-        title_btn.setAlignment_(0)
-        title_btn.setLineBreakMode_(4)
+        title_btn.setFont_(NSFont.boldSystemFontOfSize_(13.0))
+        title_btn.setAlignment_(0)   # NSTextAlignmentLeft
+        title_btn.setLineBreakMode_(3)  # NSLineBreakByTruncatingTail
         title_btn.setContentCompressionResistancePriority_forOrientation_(249, 0)
+        container.addArrangedSubview_(title_btn)
 
-        title_row.addArrangedSubview_(pri_badge)
-        title_row.addArrangedSubview_(id_lbl)
-        title_row.addArrangedSubview_(title_btn)
-
-        if is_running:
-            status_lbl = make_label("\u2699 Running\u2026", size=11.0, secondary=True)
-            title_row.addArrangedSubview_(status_lbl)
-        else:
+        # ── Run button (only when not running and not expanded) ───────────
+        if not is_running:
             run_btn = make_button("\u25b6 Run", self, "_runTask:")
             run_btn.setRepresentedObject_(task.task_id)
-            title_row.addArrangedSubview_(run_btn)
+            run_btn.setHidden_(True)  # revealed on expand
+            container.addArrangedSubview_(run_btn)
+            if expanded:
+                run_btn.setHidden_(False)
 
-        container.addArrangedSubview_(title_row)
-
+        # ── Expanded description ──────────────────────────────────────────
         if expanded and not is_running:
             desc = getattr(task, "_cached_desc", task.title)
             desc_view = _make_desc_scroll_view(_extract_description(desc))
@@ -807,6 +838,7 @@ class Plugin(PennyPlugin):
         self, projects: list[dict[str, Any]], plugin_state: dict[str, Any]
     ) -> list[Task]:
         seen_ids = set(plugin_state.get("seen_closed_ids", []))
+        initialized = set(plugin_state.get("initialized_projects", []))
         new_tasks: list[Task] = []
         for project in projects:
             path = str(Path(project["path"]).expanduser())
@@ -814,11 +846,19 @@ class Plugin(PennyPlugin):
                 continue
             output = _run_bd(["list", "--status=closed"], path)
             tasks = _parse_bd_list(output, path)
-            for task in tasks:
-                if task.task_id not in seen_ids:
-                    new_tasks.append(task)
+            if path not in initialized:
+                # First encounter with this project: silently seed all existing
+                # closed tasks so we don't spam notifications for old work.
+                for task in tasks:
                     seen_ids.add(task.task_id)
+                initialized.add(path)
+            else:
+                for task in tasks:
+                    if task.task_id not in seen_ids:
+                        new_tasks.append(task)
+                        seen_ids.add(task.task_id)
         plugin_state["seen_closed_ids"] = list(seen_ids)
+        plugin_state["initialized_projects"] = list(initialized)
         return new_tasks
 
     def get_task_description(self, task: Task) -> str | None:
@@ -903,7 +943,7 @@ class Plugin(PennyPlugin):
         outer.setTranslatesAutoresizingMaskIntoConstraints_(False)
 
         # Tasks header label
-        ctrl._tasks_header_lbl = make_label("Ready Tasks", size=11.0, secondary=True)
+        ctrl._tasks_header_lbl = make_label("BEADS TASKS", size=11.0, secondary=True)
         outer.addArrangedSubview_(ctrl._tasks_header_lbl)
 
         # Tasks inner stack

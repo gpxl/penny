@@ -169,13 +169,29 @@ class TestBeadsPluginGetCompletedTasks:
         assert "list" in call_args
         assert "--status=closed" in call_args
 
-    def test_returns_parsed_closed_tasks(self, tmp_path):
+    def test_silently_seeds_on_first_encounter(self, tmp_path):
+        # First encounter with a project: tasks are seeded into seen_closed_ids
+        # but NOT returned as notifications (avoids spam for pre-existing work).
         plugin = Plugin()
         project = {"path": str(tmp_path), "priority": 1}
         sample = "✓ proj-abc [P2] [task] - Done task\n"
+        plugin_state: dict = {}
         with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=sample)
-            tasks = plugin.get_completed_tasks([project], {})
+            tasks = plugin.get_completed_tasks([project], plugin_state)
+        assert tasks == []
+        assert "proj-abc" in plugin_state.get("seen_closed_ids", [])
+        assert str(tmp_path) in plugin_state.get("initialized_projects", [])
+
+    def test_returns_parsed_closed_tasks_after_initialization(self, tmp_path):
+        # After a project has been initialized, newly closed tasks are returned.
+        plugin = Plugin()
+        project = {"path": str(tmp_path), "priority": 1}
+        sample = "✓ proj-abc [P2] [task] - Done task\n"
+        plugin_state = {"initialized_projects": [str(tmp_path)]}
+        with patch("penny.plugins.beads_plugin.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=sample)
+            tasks = plugin.get_completed_tasks([project], plugin_state)
         assert len(tasks) == 1
         assert tasks[0].task_id == "proj-abc"
         assert tasks[0].title == "Done task"
@@ -677,6 +693,7 @@ class TestBeadsUIControllerRebuildTasks:
             patch.object(_beads_mod, "NSStackView", MagicMock()),
             patch.object(_beads_mod, "NSButton", MagicMock()),
             patch.object(_beads_mod, "NSFont", MagicMock()),
+            patch.object(_beads_mod, "NSColor", MagicMock()),
             patch.object(_beads_mod, "_make_desc_scroll_view", return_value=MagicMock()),
         )
 
@@ -706,7 +723,7 @@ class TestBeadsUIControllerRebuildTasks:
         try:
             tasks = [Task("t-1", "Title", "P1", "/p", "p")]
             ctrl._rebuild_tasks_section(tasks, [])
-            ctrl._tasks_header_lbl.setStringValue_.assert_called_with("Ready Tasks (1)")
+            ctrl._tasks_header_lbl.setStringValue_.assert_called_with("BEADS TASKS (1 READY)")
         finally:
             for p in patches:
                 p.stop()
@@ -721,7 +738,7 @@ class TestBeadsUIControllerRebuildTasks:
             agents = [{"task_id": "t-1"}]
             ctrl._rebuild_tasks_section([task], agents)
             # Since all tasks are running, placeholder label is shown
-            ctrl._tasks_header_lbl.setStringValue_.assert_called_with("Ready Tasks")
+            ctrl._tasks_header_lbl.setStringValue_.assert_called_with("BEADS TASKS")
         finally:
             for p in patches:
                 p.stop()
@@ -819,6 +836,7 @@ class TestBeadsUIControllerActionSelectors:
             patch.object(_beads_mod, "NSStackView", MagicMock()),
             patch.object(_beads_mod, "NSButton", MagicMock()),
             patch.object(_beads_mod, "NSFont", MagicMock()),
+            patch.object(_beads_mod, "NSColor", MagicMock()),
             patch.object(_beads_mod, "_make_desc_scroll_view", return_value=MagicMock()),
         )
 

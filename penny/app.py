@@ -230,6 +230,8 @@ class PennyApp(NSObject):
                 "ready_tasks": self._all_ready_tasks,
                 "fetched_at": self._last_fetch_at,
             })
+        # Trigger a fetch so newly-added project tasks appear immediately
+        self._worker.fetch()
         print("[penny] config.yaml reloaded", flush=True)
 
     @objc.python_method
