@@ -157,18 +157,18 @@ class PennyApp(NSObject):
                 self._popover.showRelativeToRect_ofView_preferredEdge_(
                     btn.bounds(), btn, 3  # NSRectEdgeMaxY = bottom edge of menu bar
                 )
-                # Show cached data immediately — no force-fetch on open since
-                # fetch_live_status spawns claude which counts against session budget.
-                # The background timer refreshes every 5 minutes automatically.
+                # Show cached data immediately — force-fetch only on first open
+                # (fetch_live_status spawns claude which counts against session budget).
+                # Subsequent opens do a non-force fetch: uses cached Claude status but
+                # re-runs `bd ready` so newly-added tasks appear without waiting for
+                # the 5-minute background timer.
                 self._vc.updateWithData_({
                     "prediction": self._prediction,
                     "state": self.state,
                     "ready_tasks": self._all_ready_tasks,
                     "fetched_at": self._last_fetch_at,
                 })
-                # Auto-refresh on first open if no data has loaded yet
-                if self._prediction is None:
-                    self._worker.fetch(force=True)
+                self._worker.fetch(force=(self._prediction is None))
                 # Global monitor to close on outside click (ApplicationDefined behavior
                 # requires manual dismissal — avoids the click-eating bug on macOS 26+).
                 self._add_event_monitor()
@@ -616,12 +616,9 @@ class PennyApp(NSObject):
             except Exception:
                 pass
 
-        uid = str(os.getuid())
-        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{PLIST_LABEL}"],
-                       capture_output=True, check=False)
-        subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(PLIST_LAUNCHAGENTS)],
-                       capture_output=True, check=False)
-        # If bootout succeeded, this process exits here; launchd handles restart
+        # KeepAlive and RunAtLoad are evaluated by launchd at load time only.
+        # Writing the plist is sufficient; changes take effect on next launch.
+        # Do NOT bootout/bootstrap here — that would kill the running process.
 
     def toggleKeepAlive_(self, sender: Any) -> None:
         self.config.setdefault("service", {})["keep_alive"] = bool(sender.state())
