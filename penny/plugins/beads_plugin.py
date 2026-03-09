@@ -148,7 +148,7 @@ def _make_inner_stack() -> Any:
     """Return a plain vertical NSStackView for a paginated section."""
     inner = NSStackView.alloc().init()
     inner.setOrientation_(1)
-    inner.setAlignment_(9)
+    inner.setAlignment_(5)   # NSLayoutAttributeLeading
     inner.setSpacing_(4.0)
     inner.setDistribution_(0)
     inner.setTranslatesAutoresizingMaskIntoConstraints_(False)
@@ -230,15 +230,21 @@ print(f"[beads] bd binary resolved to {_BD_BIN!r}", flush=True)
 def _run_bd(args: list[str], cwd: str) -> str:
     """Run a bd command in a given directory and return stdout."""
     try:
+        env = os.environ.copy()
+        env["BEADS_DIR"] = str(Path(cwd) / ".beads")
         result = subprocess.run(
             [_BD_BIN] + args,
             cwd=cwd,
+            env=env,
             capture_output=True,
             text=True,
             timeout=30,
         )
         if result.returncode != 0 and result.stderr:
-            print(f"[beads] bd {args} (rc={result.returncode}): {result.stderr.strip()}", flush=True)
+            print(
+                f"[beads] bd {args} in {cwd!r} (rc={result.returncode}): {result.stderr.strip()}",
+                flush=True,
+            )
         return result.stdout
     except FileNotFoundError:
         print(f"[beads] bd binary not found (tried {_BD_BIN!r})", flush=True)
@@ -336,6 +342,7 @@ class BeadsUIController(NSObject):
         self._latest_tasks: list = []
         self._latest_agents: list = []
         self._latest_completed: list = []
+        self._pending_task_ids: set = set()
 
         # Agents section state
         self._agents_stack: Any = None
@@ -418,11 +425,9 @@ class BeadsUIController(NSObject):
         task_id = str(sender.representedObject() or "")
         task = next((t for t in self._latest_tasks if t.task_id == task_id), None)
         if task and self._app:
-            # Immediate visual feedback — mirrors _stopAgent_ pattern
-            sender.setTitle_("Launching\u2026")
-            sender.setEnabled_(False)
-            # Optimistically remove from local list and rebuild so the row disappears now
-            self._latest_tasks = [t for t in self._latest_tasks if t.task_id != task_id]
+            # Mark as pending — row stays visible showing "Launching…" until
+            # the next data refresh confirms the agent is running.
+            self._pending_task_ids.add(task_id)
             self._rebuild_tasks_section(self._latest_tasks, self._latest_agents)
             self._relayout()
             self._app.spawnTask_(task)
@@ -492,10 +497,13 @@ class BeadsUIController(NSObject):
         self._task_views = []
 
         running_ids = {a.get("task_id") for a in agents_running}
+        # Confirmed running → no longer pending
+        self._pending_task_ids -= running_ids
         shown = [t for t in tasks if t.task_id not in running_ids][:_TASK_LIMIT]
 
         if not shown:
             placeholder = make_label("No ready tasks", size=12.0, secondary=True)
+            placeholder.setAlignment_(2)  # NSTextAlignmentCenter
             self._tasks_stack.addArrangedSubview_(placeholder)
             self._task_views.append(placeholder)
             if self._tasks_header_lbl:
@@ -624,53 +632,60 @@ class BeadsUIController(NSObject):
     def _make_task_row(self, task: Any, expanded: bool, running_ids: set) -> Any:
         """Build one task row (collapsed or expanded).
 
-        Layout matches the mockup:
-          Line 1: ● dot + "id · project"  [right: "● running" or "P2" badge]
-          Line 2: Full title (plain label)
+        Layout:
+          Row 1 (horizontal): ● dot + "id · project  Px" (stretchy) + ▶ Run button
+          Row 2: Full title in bold (clickable to expand)
           Expanded: description scroll view
         """
+        inner_w = _WIDTH - _PADDING * 2
         container = NSStackView.alloc().init()
         container.setOrientation_(1)
-        container.setAlignment_(9)
-        container.setSpacing_(2.0)
+        container.setAlignment_(5)  # NSLayoutAttributeLeading
+        container.setSpacing_(3.0)
+        container.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        container.widthAnchor().constraintEqualToConstant_(inner_w).setActive_(True)
 
         is_running = task.task_id in running_ids
+        is_pending = task.task_id in self._pending_task_ids
 
-        # ── Row 1: id/project + status badge ─────────────────────────────
+        # ── Row 1: "● id · project  Px" (stretchy) + Run button ──────────
         meta_row = NSStackView.alloc().init()
         meta_row.setOrientation_(0)
-        meta_row.setSpacing_(5.0)
-        meta_row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
-
-        # Left: status dot + "id · project"
-        left = NSStackView.alloc().init()
-        left.setOrientation_(0)
-        left.setSpacing_(4.0)
+        meta_row.setSpacing_(4.0)
+        meta_row.setDistribution_(0)  # NSStackViewDistributionFill
+        meta_row.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        meta_row.widthAnchor().constraintEqualToConstant_(inner_w).setActive_(True)
 
         dot = make_label("\u25cf", size=10.0)  # ●
         dot.setTextColor_(
-            NSColor.systemOrangeColor() if is_running else NSColor.systemGreenColor()
+            NSColor.systemOrangeColor() if (is_running or is_pending) else NSColor.systemGreenColor()
         )
 
         project = getattr(task, "project_name", "") or ""
         meta_text = f"{task.task_id} \u00b7 {project}" if project else task.task_id
+        if not is_running and not is_pending:
+            meta_text += f"  {task.priority}"
+
         meta_lbl = make_label(meta_text, size=11.0, secondary=True)
+        # Low hugging priority so meta_lbl stretches, pushing Run button to the right
+        meta_lbl.setContentHuggingPriority_forOrientation_(249, 0)
 
-        left.addArrangedSubview_(dot)
-        left.addArrangedSubview_(meta_lbl)
+        meta_row.addArrangedSubview_(dot)
+        meta_row.addArrangedSubview_(meta_lbl)
 
-        # Right: running badge or priority badge
-        if is_running:
-            badge = make_label("\u25cf running", size=11.0)
-            badge.setTextColor_(NSColor.systemOrangeColor())
-        else:
-            badge = make_label(task.priority, size=11.0, secondary=True)
+        # Run button always visible on the right (absent only when already running)
+        if not is_running:
+            if is_pending:
+                run_btn = make_button("Launching\u2026", self, "_runTask:")
+                run_btn.setEnabled_(False)
+            else:
+                run_btn = make_button("\u25b6 Run", self, "_runTask:")
+            run_btn.setRepresentedObject_(task.task_id)
+            meta_row.addArrangedSubview_(run_btn)
 
-        meta_row.addArrangedSubview_(left)
-        meta_row.addArrangedSubview_(badge)
         container.addArrangedSubview_(meta_row)
 
-        # ── Row 2: title (clickable to expand) ───────────────────────────
+        # ── Row 2: title (clickable to expand) ────────────────────────────
         title_btn = NSButton.buttonWithTitle_target_action_(
             task.title, self, "_toggleTask:"
         )
@@ -680,17 +695,9 @@ class BeadsUIController(NSObject):
         title_btn.setFont_(NSFont.boldSystemFontOfSize_(13.0))
         title_btn.setAlignment_(0)   # NSTextAlignmentLeft
         title_btn.setLineBreakMode_(3)  # NSLineBreakByTruncatingTail
-        title_btn.setContentCompressionResistancePriority_forOrientation_(249, 0)
+        title_btn.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        title_btn.widthAnchor().constraintEqualToConstant_(inner_w).setActive_(True)
         container.addArrangedSubview_(title_btn)
-
-        # ── Run button (only when not running and not expanded) ───────────
-        if not is_running:
-            run_btn = make_button("\u25b6 Run", self, "_runTask:")
-            run_btn.setRepresentedObject_(task.task_id)
-            run_btn.setHidden_(True)  # revealed on expand
-            container.addArrangedSubview_(run_btn)
-            if expanded:
-                run_btn.setHidden_(False)
 
         # ── Expanded description ──────────────────────────────────────────
         if expanded and not is_running:
@@ -820,6 +827,8 @@ class Plugin(PennyPlugin):
             if not Path(path).exists():
                 print(f"[beads] get_tasks: path not found: {path}", flush=True)
                 continue
+            if not (Path(path) / ".beads").exists():
+                continue
             output = _run_bd(["ready"], path)
             tasks = _parse_bd_ready(output, path)
             for t in tasks:
@@ -874,6 +883,8 @@ class Plugin(PennyPlugin):
         for project in projects:
             path = str(Path(project["path"]).expanduser())
             if not Path(path).exists():
+                continue
+            if not (Path(path) / ".beads").exists():
                 continue
             output = _run_bd(["list", "--status=closed"], path)
             tasks = _parse_bd_list(output, path)
@@ -969,11 +980,12 @@ class Plugin(PennyPlugin):
         ctrl = self._ui_ctrl
         outer = NSStackView.alloc().init()
         outer.setOrientation_(1)
-        outer.setAlignment_(9)
+        outer.setAlignment_(5)   # NSLayoutAttributeLeading
         outer.setSpacing_(4.0)
         outer.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        outer.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
-        # Tasks header label
+        # Tasks header label (left-aligned)
         ctrl._tasks_header_lbl = make_label("BEADS TASKS", size=11.0, secondary=True)
         outer.addArrangedSubview_(ctrl._tasks_header_lbl)
 
@@ -1031,9 +1043,10 @@ class Plugin(PennyPlugin):
         ctrl = self._ui_ctrl
         outer = NSStackView.alloc().init()
         outer.setOrientation_(1)
-        outer.setAlignment_(9)
+        outer.setAlignment_(5)   # NSLayoutAttributeLeading
         outer.setSpacing_(4.0)
         outer.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        outer.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
         # Header row: "Recently Completed" + "Clear All" button
         header_row = NSStackView.alloc().init()
@@ -1086,6 +1099,10 @@ class Plugin(PennyPlugin):
         ctrl._latest_tasks = ready_tasks
         ctrl._latest_agents = agents
         ctrl._latest_completed = completed
+        # Fresh data is authoritative — clear all pending states.
+        # Tasks now confirmed running will disappear naturally (filtered by running_ids);
+        # failed spawns will reappear as normal ready tasks.
+        ctrl._pending_task_ids.clear()
         ctrl._rebuild_tasks_section(ready_tasks, agents)
         ctrl._rebuild_agents_section(agents)
 

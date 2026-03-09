@@ -13,14 +13,16 @@ import objc
 from AppKit import (
     NSButton,
     NSColor,
-    NSFont,
+    NSImage,
+    NSImageView,
     NSLayoutConstraint,
     NSStackView,
+    NSSwitch,
     NSTextField,
     NSView,
     NSViewController,
 )
-from Foundation import NSEdgeInsets
+from Foundation import NSEdgeInsets, NSLocale
 
 from .analysis import format_reset_label
 from .ui_components import ProgressBarView, make_button, make_label
@@ -37,6 +39,36 @@ def _make_separator() -> NSView:
     sep = NSBox.alloc().initWithFrame_(((0, 0), (_WIDTH - _PADDING * 2, 1)))
     sep.setBoxType_(2)   # NSBoxSeparator
     return sep
+
+
+def _make_currency_icon() -> NSImageView:
+    """Return a 20×20 NSImageView showing a locale-appropriate currency SF Symbol."""
+    _symbol_map = {
+        "USD": "dollarsign.circle.fill",
+        "EUR": "eurosign.circle.fill",
+        "GBP": "sterlingsign.circle.fill",
+        "JPY": "yensign.circle.fill",
+        "CNY": "yensign.circle.fill",
+        "KRW": "wonsign.circle.fill",
+        "INR": "indianrupeesign.circle.fill",
+        "RUB": "rublesign.circle.fill",
+        "BRL": "brazilianrealsign.circle.fill",
+    }
+    code = NSLocale.currentLocale().currencyCode() or "USD"
+    sym_name = _symbol_map.get(code, "centsign.circle.fill")
+    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(sym_name, "Currency")
+    if img is None:
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "dollarsign.circle.fill", "Currency"
+        )
+    view = NSImageView.alloc().init()
+    view.setImage_(img)
+    view.setImageScaling_(3)   # NSImageScaleProportionallyUpOrDown
+    view.setContentTintColor_(NSColor.systemOrangeColor())
+    view.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    view.widthAnchor().constraintEqualToConstant_(20.0).setActive_(True)
+    view.heightAnchor().constraintEqualToConstant_(20.0).setActive_(True)
+    return view
 
 
 class ControlCenterViewController(NSViewController):
@@ -153,7 +185,7 @@ class ControlCenterViewController(NSViewController):
         """Construct all subviews inside `outer`."""
         stack = NSStackView.alloc().initWithFrame_(((0, 0), (_WIDTH, 500)))
         stack.setOrientation_(1)      # NSUserInterfaceLayoutOrientationVertical
-        stack.setAlignment_(9)        # NSLayoutAttributeLeading
+        stack.setAlignment_(5)        # NSLayoutAttributeLeading
         stack.setSpacing_(_SECTION_SPACING)
         stack.setEdgeInsets_(NSEdgeInsets(_PADDING, _PADDING, _PADDING, _PADDING))
         stack.setDistribution_(0)     # NSStackViewDistributionFill
@@ -210,6 +242,8 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(make_label("Weekly Budget", size=11.0, secondary=True))
         self._bar_all, self._lbl_all_pct = self._add_bar_row(stack, "All models", 0.0)
         self._bar_sonnet, self._lbl_sonnet_pct = self._add_bar_row(stack, "Sonnet", 0.0)
+        self._bar_all.set_fixed_color(NSColor.systemBlueColor())
+        self._bar_sonnet.set_fixed_color(NSColor.systemBlueColor())
         self._lbl_weekly_reset = make_label("—", size=11.0, secondary=True)
         stack.addArrangedSubview_(self._lbl_weekly_reset)
         stack.addArrangedSubview_(_make_separator())
@@ -277,15 +311,35 @@ class ControlCenterViewController(NSViewController):
         row.setOrientation_(0)   # horizontal
         row.setSpacing_(8.0)
         row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
+        row.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
-        refresh_btn = make_button("↻ Refresh", self, "refreshNow:")
+        # Left: currency icon + "Penny" title
+        left = NSStackView.alloc().init()
+        left.setOrientation_(0)
+        left.setSpacing_(6.0)
+        left.setAlignment_(8)    # NSLayoutAttributeCenterY
+        left.addArrangedSubview_(_make_currency_icon())
+        left.addArrangedSubview_(make_label("Penny", size=15.0, bold=True))
+
+        # Right: refresh button + last refresh label
+        right = NSStackView.alloc().init()
+        right.setOrientation_(0)
+        right.setSpacing_(6.0)
+        right.setAlignment_(8)    # NSLayoutAttributeCenterY
+
+        refresh_btn = make_button("↻", self, "refreshNow:")
+
         last_refresh_lbl = make_label("—", size=11.0, secondary=True)
-        last_refresh_lbl.setAlignment_(2)  # NSTextAlignmentRight
-
-        row.addArrangedSubview_(refresh_btn)
-        row.addArrangedSubview_(last_refresh_lbl)
-        self._refresh_btn = refresh_btn
         self._last_refresh_lbl = last_refresh_lbl
+
+        right.addArrangedSubview_(refresh_btn)
+        right.addArrangedSubview_(last_refresh_lbl)
+
+        row.addArrangedSubview_(left)
+        row.addArrangedSubview_(right)
+
+        self._refresh_btn = refresh_btn
         return row
 
     @objc.python_method
@@ -293,7 +347,7 @@ class ControlCenterViewController(NSViewController):
         """Create the Plugins management section (header + checkbox rows)."""
         outer = NSStackView.alloc().init()
         outer.setOrientation_(1)
-        outer.setAlignment_(9)
+        outer.setAlignment_(5)
         outer.setSpacing_(6.0)
         outer.addArrangedSubview_(make_label("Plugins", size=11.0, secondary=True))
         self._plugins_section_stack = outer
@@ -350,45 +404,60 @@ class ControlCenterViewController(NSViewController):
 
     @objc.python_method
     def _make_service_row(self) -> NSView:
-        row = NSStackView.alloc().init()
-        row.setOrientation_(0)   # horizontal
-        row.setSpacing_(12.0)
-        row.setDistribution_(0)
+        outer = NSStackView.alloc().init()
+        outer.setOrientation_(1)   # vertical
+        outer.setAlignment_(5)     # NSLayoutAttributeLeading
+        outer.setSpacing_(8.0)
 
-        keep_alive_btn = NSButton.alloc().init()
-        keep_alive_btn.setButtonType_(3)        # NSButtonTypeSwitch (checkbox)
-        keep_alive_btn.setTitle_("Auto-restart")
-        keep_alive_btn.setTarget_(self._app)
-        keep_alive_btn.setAction_("toggleKeepAlive:")
-        keep_alive_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+        _services = [
+            ("Keep Alive",       "toggleKeepAlive:",      "_keep_alive_btn"),
+            ("Launch at Login",  "toggleLaunchAtLogin:", "_login_btn"),
+        ]
+        for label_text, action, attr in _services:
+            row = NSStackView.alloc().init()
+            row.setOrientation_(0)   # horizontal
+            row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
+            row.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
-        login_btn = NSButton.alloc().init()
-        login_btn.setButtonType_(3)
-        login_btn.setTitle_("Launch at login")
-        login_btn.setTarget_(self._app)
-        login_btn.setAction_("toggleLaunchAtLogin:")
-        login_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+            lbl = make_label(label_text, size=13.0)
 
-        row.addArrangedSubview_(keep_alive_btn)
-        row.addArrangedSubview_(login_btn)
+            sw = NSSwitch.alloc().init()
+            sw.setTarget_(self._app)
+            sw.setAction_(action)
+            sw.setControlSize_(1)    # NSControlSizeSmall
 
-        self._keep_alive_btn = keep_alive_btn
-        self._login_btn      = login_btn
-        return row
+            row.addArrangedSubview_(lbl)
+            row.addArrangedSubview_(sw)
+            setattr(self, attr, sw)
+            outer.addArrangedSubview_(row)
+
+        return outer
 
     @objc.python_method
     def _make_footer_row(self) -> NSView:
         row = NSStackView.alloc().init()
         row.setOrientation_(0)
         row.setSpacing_(8.0)
-        row.setDistribution_(0)
+        row.setDistribution_(3)   # NSStackViewDistributionEqualSpacing
+        row.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
-        report_btn = make_button("View Report", self, "viewReport:")
-        prefs_btn = make_button("Preferences", self, "openPrefs:")
+        report_btn = make_button("Report", self, "viewReport:")
+
+        right = NSStackView.alloc().init()
+        right.setOrientation_(0)
+        right.setSpacing_(8.0)
+
+        prefs_btn = make_button("Settings ⚙", self, "openPrefs:")
         quit_btn = make_button("Quit", self, "quitApp:")
+        quit_btn.setContentTintColor_(NSColor.systemRedColor())
 
-        for btn in (report_btn, prefs_btn, quit_btn):
-            row.addArrangedSubview_(btn)
+        right.addArrangedSubview_(prefs_btn)
+        right.addArrangedSubview_(quit_btn)
+
+        row.addArrangedSubview_(report_btn)
+        row.addArrangedSubview_(right)
 
         self._footer_btns = [report_btn, prefs_btn, quit_btn]
         return row
@@ -397,12 +466,8 @@ class ControlCenterViewController(NSViewController):
         """Update refresh button to show/hide a loading indicator."""
         if self._refresh_btn is None:
             return
-        if refreshing:
-            self._refresh_btn.setTitle_("↻ Refreshing…")
-            self._refresh_btn.setEnabled_(False)
-        else:
-            self._refresh_btn.setTitle_("↻ Refresh")
-            self._refresh_btn.setEnabled_(True)
+        self._refresh_btn.setTitle_("↻…" if refreshing else "↻")
+        self._refresh_btn.setEnabled_(not refreshing)
 
     @objc.python_method
     def _add_bar_row(self, stack: NSStackView, label: str,
@@ -411,14 +476,16 @@ class ControlCenterViewController(NSViewController):
         row.setOrientation_(0)
         row.setSpacing_(8.0)
         row.setDistribution_(0)
+        row.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
         lbl = make_label(label, size=12.0)
         lbl.setContentHuggingPriority_forOrientation_(251, 0)
 
-        bar = ProgressBarView.alloc().initWithFrame_(((0, 0), (140.0, _BAR_HEIGHT)))
+        bar = ProgressBarView.alloc().initWithFrame_(((0, 0), (100.0, _BAR_HEIGHT)))
         bar.setPct(initial_pct)
         bar.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        bar.widthAnchor().constraintEqualToConstant_(140.0).setActive_(True)
+        bar.setContentHuggingPriority_forOrientation_(1, 0)  # stretch to fill available width
         bar.heightAnchor().constraintEqualToConstant_(_BAR_HEIGHT).setActive_(True)
 
         pct_lbl = make_label(f"{initial_pct:.0f}%", size=12.0)

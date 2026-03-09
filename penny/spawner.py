@@ -110,15 +110,37 @@ def _get_screen_pid(session_name: str) -> int | None:
 
 
 def _tmux_pane_command(session_name: str) -> str | None:
-    """Return the current command running in the first pane, or None if session is gone."""
-    result = subprocess.run(
-        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_current_command}"],
+    """Return the full command line of the process running in the first pane.
+
+    Uses the pane PID to query `ps` for the full argv[0] path, so that
+    version-named binaries like `2.1.71` (claude's versioned install) are
+    matched correctly — `#{pane_current_command}` only returns the basename.
+    Falls back to the tmux basename if ps fails.
+    """
+    pane_result = subprocess.run(
+        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid} #{pane_current_command}"],
         capture_output=True, text=True,
     )
-    if result.returncode != 0:
+    if pane_result.returncode != 0:
         return None
-    line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    return line or None
+    line = pane_result.stdout.strip().splitlines()[0] if pane_result.stdout.strip() else ""
+    if not line:
+        return None
+    parts = line.split(None, 1)
+    basename = parts[1] if len(parts) > 1 else ""
+    try:
+        pane_pid = int(parts[0])
+    except (ValueError, IndexError):
+        return basename or None
+
+    # Get the full command path — catches versioned binaries like `2.1.71`
+    ps_result = subprocess.run(
+        ["ps", "-p", str(pane_pid), "-o", "command="],
+        capture_output=True, text=True,
+    )
+    if ps_result.returncode == 0 and ps_result.stdout.strip():
+        return ps_result.stdout.strip()
+    return basename or None
 
 
 def _get_tmux_pid(session_name: str) -> int | None:
@@ -142,6 +164,31 @@ def _get_session_pid(session_name: str) -> int | None:
         if pid is not None:
             return pid
     return _get_screen_pid(session_name)
+
+
+def _wait_for_claude_prompt(tmux_bin: str, session_name: str, timeout: float = 30) -> None:
+    """Poll the tmux pane until Claude's input prompt appears, then return.
+
+    Detects the prompt by capturing pane content and looking for indicators
+    that the TUI is ready: bypass-permissions hint or the `>` prompt character.
+    Falls back after `timeout` seconds so spawning never blocks indefinitely.
+    """
+    deadline = time.monotonic() + timeout
+    interval = 0.5
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [tmux_bin, "capture-pane", "-t", session_name, "-p"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            content = result.stdout
+            # Claude's TUI shows "bypass permissions" or a prompt ">" once ready
+            if "bypass permissions" in content or content.strip().endswith(">"):
+                return
+        time.sleep(interval)
+    # Timeout reached — proceed anyway (best effort)
+    print(f"[penny] _wait_for_claude_prompt: timed out after {timeout}s for {session_name}",
+          flush=True)
 
 
 def spawn_claude_agent(
@@ -250,9 +297,11 @@ def spawn_claude_agent(
             )
             proc.wait()
 
-            # Wait for Claude's TUI to render its input prompt.
-            # 7 s gives headroom on first launch (keychain prompt, slow disk).
-            time.sleep(7)
+            # Poll for Claude's input prompt to appear before injecting.
+            # The fixed 7 s sleep was unreliable: versioned installs (e.g. claude
+            # symlinked to `2.1.71`) and slow/first-launch keychain prompts caused
+            # send-keys to fire before the TUI was ready, leaving Claude idle.
+            _wait_for_claude_prompt(tmux_bin, session_name, timeout=30)
 
             # Inject a single-line message that references the prompt file.
             # Newlines in the full prompt would each trigger Enter and break injection,
@@ -266,7 +315,7 @@ def spawn_claude_agent(
             # combining them in one call leaves the text stuck in the input buffer.
             subprocess.run([tmux_bin, "send-keys", "-t", session_name, inject_msg],
                            check=False)
-            subprocess.run([tmux_bin, "send-keys", "-t", session_name, "", "Enter"],
+            subprocess.run([tmux_bin, "send-keys", "-t", session_name, "Enter"],
                            check=False)
 
             # Open Terminal.app attached via a .command file — Terminal opens these

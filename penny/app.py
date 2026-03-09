@@ -318,6 +318,22 @@ class PennyApp(NSObject):
                         f"{task.task_id} done externally \u2713 \u2014 {task.title} ({task.project_name})",
                     )
 
+        # Reconcile recently_completed against the live task list.
+        # If a task reappears in `bd ready` it was falsely detected as done
+        # (e.g. pane_current_command returning a version-named binary).
+        # Remove it from recently_completed so it re-surfaces as ready.
+        still_open_ids = {t.task_id for t in all_tasks}
+        rc_before = state.get("recently_completed", [])
+        rc_after = [a for a in rc_before if a.get("task_id") not in still_open_ids]
+        if len(rc_after) != len(rc_before):
+            state["recently_completed"] = rc_after
+            save_state(state)
+            print(
+                f"[penny] reconciled recently_completed: removed "
+                f"{len(rc_before) - len(rc_after)} false-completed task(s)",
+                flush=True,
+            )
+
         # Exclude tasks already in recently_completed or running from the display list.
         # Tasks closed in beads won't reappear in `bd ready` anyway.
         recently_ids = {a.get("task_id") for a in state.get("recently_completed", [])}
@@ -654,6 +670,22 @@ class PennyApp(NSObject):
         subprocess.run(["open", str(CONFIG_PATH)], check=False)
 
     def quitApp_(self, sender: Any) -> None:
+        # Patch KeepAlive=false so launchd does not restart us after we exit.
+        # _sync_launchd_service() restores the correct value from config.yaml on next start.
+        if PLIST_LAUNCHAGENTS.exists():
+            try:
+                with PLIST_LAUNCHAGENTS.open("rb") as f:
+                    pl = plistlib.load(f)
+                pl["KeepAlive"] = False
+                PLIST_LAUNCHAGENTS.write_bytes(plistlib.dumps(pl))
+            except Exception as exc:
+                print(f"[penny] quitApp_ plist patch failed: {exc}", flush=True)
+        # Unregister from launchd (fire-and-forget; prevents restart on exit).
+        subprocess.Popen(
+            ["launchctl", "bootout", f"gui/{os.getuid()}/{PLIST_LABEL}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         NSApplication.sharedApplication().terminate_(sender)
 
     # ── Core load/refresh cycle ───────────────────────────────────────────

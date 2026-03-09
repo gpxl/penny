@@ -38,6 +38,12 @@ class ProgressBarView(NSView):
         self._pct = max(0.0, min(100.0, pct))
         self.setNeedsDisplay_(True)
 
+    @objc.python_method
+    def set_fixed_color(self, color: Any) -> None:
+        """Use a fixed fill color instead of traffic-light thresholds."""
+        self._fixed_color = color
+        self.setNeedsDisplay_(True)
+
     # ObjC selector variant (used from popover_vc via performSelector)
     def setPct_(self, pct: float) -> None:
         self.setPct(pct)
@@ -61,7 +67,10 @@ class ProgressBarView(NSView):
         fill_rect = ((0, 0), (fill_w, h))
 
         pct = self._pct
-        if pct < 60:
+        fixed = getattr(self, "_fixed_color", None)
+        if fixed is not None:
+            fill_color = fixed
+        elif pct < 60:
             fill_color = NSColor.systemGreenColor()
         elif pct < 80:
             fill_color = NSColor.systemYellowColor()
