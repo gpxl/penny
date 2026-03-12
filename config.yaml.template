@@ -1,0 +1,50 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Penny — Configuration
+# ────────────────────────────────────────────────────────────────────────────
+# Prerequisites:
+#   [ ] 1. Install the claude CLI:  npm install -g @anthropic-ai/claude-code
+#   [ ] 2. Authenticate:            claude auth login
+#
+# Penny monitors your Claude Code token usage out of the box.
+# No further configuration is required for monitoring.
+# ────────────────────────────────────────────────────────────────────────────
+
+stats_cache_path: ~/.claude/stats-cache.json
+
+service:
+  keep_alive: true       # launchd restarts Penny automatically if it exits
+  launch_at_login: true  # Penny starts when you log in
+
+notifications:
+  weekly_summary: true
+
+# ── Plugin automation (inactive in current release) ──────────────────────────
+# The sections below configure agent spawning via plugins (e.g. Beads).
+# They have no effect unless a plugin is activated.
+
+# projects:
+#   - path: ~/Documents/GitHub/your-repo
+#     priority: 1
+#   # - path: ~/Documents/GitHub/another-project
+#   #   priority: 2
+
+# trigger:
+#   min_capacity_percent: 30    # Spawn agents if ≥30% capacity predicted unused
+#   max_days_remaining: 2       # …and ≤2 days remain in the week
+
+# work:
+#   max_agents_per_run: 2
+#   task_priority_levels: [P1, P2, P3]
+#   agent_permissions: "off"   # off | scoped | full
+#   # allowed_tools:           # only used when agent_permissions: scoped
+#   #   - Read
+#   #   - Edit
+#   #   - Write
+#   #   - Glob
+#   #   - Grep
+#   #   - "Bash(git:*)"
+#   #   - "Bash(bd:*)"
+
+# plugins:
+#   beads: auto   # auto = activate when 'bd' CLI is found in PATH
+#                  # true = always activate | false = disable

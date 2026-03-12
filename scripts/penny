@@ -1,0 +1,412 @@
+#!/usr/bin/env bash
+# penny — Penny service management CLI
+set -euo pipefail
+
+PLIST_LABEL="com.gpxl.penny"
+PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+UID_VAL="$(id -u)"
+TARGET="gui/$UID_VAL/$PLIST_LABEL"
+
+# Resolve PENNY_HOME: honour env var, else read from installed plist, else default
+if [[ -z "${PENNY_HOME:-}" ]]; then
+  PENNY_HOME=$(python3 - "$PLIST_DEST" <<'PYEOF'
+import plistlib, os, sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        pl = plistlib.load(f)
+    print(pl.get("EnvironmentVariables", {}).get("PENNY_HOME", os.path.expanduser("~/.penny")))
+except Exception:
+    print(os.path.expanduser("~/.penny"))
+PYEOF
+  )
+fi
+
+LOG_FILE="$PENNY_HOME/logs/launchd.log"
+CONFIG_FILE="$PENNY_HOME/config.yaml"
+PORT_FILE="$PENNY_HOME/.dashboard_port"
+DEFAULT_PORT=7432
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+_show_help() {
+  cat <<'HELP'
+penny — Penny service management CLI
+
+Usage:
+  penny <command> [args]
+
+Service:
+  start              Start Penny via launchd
+  stop               Stop Penny and keep it stopped (KeepAlive disabled)
+  restart            Stop then start Penny
+  quit               Quit Penny gracefully (launchd restarts if KeepAlive is on)
+  status             Show running/stopped status
+
+Data:
+  refresh            Trigger a live data refresh
+
+UI / Config:
+  open               Open the dashboard in your browser
+  logs [-f]          Show recent logs (-f to follow/stream)
+  prefs              Open config.yaml in your default editor
+
+Update:
+  update             Update Penny to the latest version
+
+Info:
+  version, -v        Show Penny version number
+  help, -h, -?, -?   Show this help
+HELP
+
+  # Show plugin commands if Penny is running; otherwise show static hints
+  if _is_running 2>/dev/null; then
+    meta=$(_api_get /api/meta 2>/dev/null || echo "{}")
+    python3 - "$meta" <<'PYEOF'
+import sys, json
+try:
+    meta = json.loads(sys.argv[1])
+except Exception:
+    meta = {}
+commands = meta.get("cli_commands", [])
+if commands:
+    print("\nPlugin Commands:")
+    for cmd in commands:
+        arg = (" <" + cmd["arg"] + ">") if cmd.get("arg") else ""
+        print(f"  {cmd['name'] + arg:<22} {cmd['description']}")
+PYEOF
+  else
+    echo ""
+    echo "Plugin Commands (requires Penny to be running to see current list):"
+    echo "  tasks, agents, run, stop-agent, dismiss, clear-completed (beads plugin)"
+  fi
+}
+
+_get_version() {
+  python3 - "$PLIST_DEST" <<'PYEOF'
+import plistlib, sys
+from pathlib import Path
+try:
+    with open(sys.argv[1], "rb") as f:
+        pl = plistlib.load(f)
+    script_dir = pl.get("WorkingDirectory", "")
+    # Primary: read __version__ from penny/__init__.py
+    if script_dir:
+        init = Path(script_dir) / "penny" / "__init__.py"
+        if init.exists():
+            for line in init.read_text().splitlines():
+                if line.startswith("__version__"):
+                    print(line.split("=", 1)[1].strip().strip('"').strip("'"))
+                    raise SystemExit(0)
+    # Fallback: CFBundleShortVersionString from Info.plist
+    if script_dir:
+        info = Path(script_dir) / "Penny.app" / "Contents" / "Info.plist"
+        if info.exists():
+            with open(info, "rb") as f:
+                ip = plistlib.load(f)
+            print(ip.get("CFBundleShortVersionString", "unknown"))
+            raise SystemExit(0)
+    print("unknown")
+except SystemExit:
+    raise
+except Exception:
+    print("unknown")
+PYEOF
+}
+
+_is_running() {
+  launchctl list "$PLIST_LABEL" &>/dev/null
+}
+
+_require_running() {
+  if ! _is_running; then
+    echo "Penny is not running. Start it with: penny start"
+    exit 1
+  fi
+}
+
+_get_port() {
+  if [[ -f "$PORT_FILE" ]]; then cat "$PORT_FILE"; else echo "$DEFAULT_PORT"; fi
+}
+
+_api_get() {
+  local path="$1"
+  local port; port=$(_get_port)
+  python3 - "$port" "$path" <<'PYEOF'
+import sys, urllib.request, json
+port, path = sys.argv[1], sys.argv[2]
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+        print(r.read().decode())
+except Exception as e:
+    print(json.dumps({"error": str(e)}))
+PYEOF
+}
+
+_api_post() {
+  local path="$1"
+  local body="${2:-{}}"
+  local port; port=$(_get_port)
+  python3 - "$port" "$path" "$body" <<'PYEOF'
+import sys, urllib.request, json
+port, path, body = sys.argv[1], sys.argv[2], sys.argv[3]
+req = urllib.request.Request(
+    f"http://127.0.0.1:{port}{path}", data=body.encode(),
+    headers={"Content-Type": "application/json"}
+)
+try:
+    with urllib.request.urlopen(req, timeout=5) as r:
+        print(r.read().decode())
+except Exception as e:
+    print(json.dumps({"error": str(e)}))
+PYEOF
+}
+
+_check_api_response() {
+  local resp="$1"
+  local ok
+  ok=$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print('ok' if d.get('ok') else d.get('error','unknown error'))" "$resp" 2>/dev/null || echo "parse error")
+  if [[ "$ok" != "ok" ]]; then
+    echo "Error: $ok" >&2
+    exit 1
+  fi
+}
+
+# ── commands ──────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+
+  help | -h | --help | '-?')
+    _show_help
+    ;;
+
+  version | -v | --version)
+    ver=$(_get_version)
+    echo "Penny $ver"
+    ;;
+
+  start)
+    if _is_running; then
+      echo "Penny is already running."
+      exit 0
+    fi
+    if [[ ! -f "$PLIST_DEST" ]]; then
+      echo "Plist not found at $PLIST_DEST — run install.sh first."
+      exit 1
+    fi
+    launchctl bootstrap "gui/$UID_VAL" "$PLIST_DEST"
+    echo "Penny started."
+    ;;
+
+  stop)
+    if ! _is_running; then
+      echo "Penny is not running."
+      exit 0
+    fi
+    # Patch KeepAlive=false before bootout so launchd does not restart.
+    # _sync_launchd_service() restores the correct value from config.yaml on next start.
+    python3 - "$PLIST_DEST" <<'PYEOF'
+import plistlib, sys
+path = sys.argv[1]
+with open(path, "rb") as f:
+    pl = plistlib.load(f)
+pl["KeepAlive"] = False
+with open(path, "wb") as f:
+    plistlib.dump(pl, f)
+PYEOF
+    launchctl bootout "$TARGET" 2>/dev/null || true
+    echo "Penny stopped. Run 'penny start' to restart."
+    ;;
+
+  restart)
+    if _is_running; then
+      # Patch KeepAlive=false before bootout so launchd does not auto-restart.
+      python3 - "$PLIST_DEST" <<'PYEOF'
+import plistlib, sys
+path = sys.argv[1]
+with open(path, "rb") as f:
+    pl = plistlib.load(f)
+pl["KeepAlive"] = False
+with open(path, "wb") as f:
+    plistlib.dump(pl, f)
+PYEOF
+      launchctl bootout "$TARGET" 2>/dev/null || true
+      # Wait up to 5s for the process to fully exit.
+      for _i in 1 2 3 4 5 6 7 8 9 10; do
+        if ! _is_running 2>/dev/null; then break; fi
+        sleep 0.5
+      done
+    fi
+    if [[ ! -f "$PLIST_DEST" ]]; then
+      echo "Plist not found at $PLIST_DEST — run install.sh first."
+      exit 1
+    fi
+    launchctl bootstrap "gui/$UID_VAL" "$PLIST_DEST"
+    echo "Penny restarted."
+    ;;
+
+  quit)
+    _require_running
+    resp=$(_api_post /api/quit)
+    _check_api_response "$resp"
+    echo "Penny quit. launchd will restart it automatically (KeepAlive is on)."
+    ;;
+
+  status)
+    if _is_running; then
+      echo "Penny is running."
+    else
+      echo "Penny is not running."
+    fi
+    ;;
+
+  refresh)
+    _require_running
+    resp=$(_api_post /api/refresh)
+    _check_api_response "$resp"
+    echo "Refresh triggered."
+    ;;
+
+  tasks)
+    _require_running
+    result=$(_api_get /api/state)
+    python3 - "$result" <<'PYEOF'
+import sys, json
+data = json.loads(sys.argv[1])
+if "error" in data:
+    print(f"Error: {data['error']}")
+    sys.exit(1)
+tasks = data.get("ready_tasks", [])
+if not tasks:
+    print("No ready tasks.")
+else:
+    print(f"{'ID':<14} {'Pri':<4} {'Project':<20} Title")
+    print("-" * 72)
+    for t in tasks:
+        print(f"{t['task_id']:<14} {t['priority']:<4} {t.get('project_name','')[:20]:<20} {t['title'][:34]}")
+PYEOF
+    ;;
+
+  agents)
+    _require_running
+    result=$(_api_get /api/state)
+    python3 - "$result" <<'PYEOF'
+import sys, json
+data = json.loads(sys.argv[1])
+if "error" in data:
+    print(f"Error: {data['error']}")
+    sys.exit(1)
+agents = data.get("state", {}).get("agents_running", [])
+if not agents:
+    print("No agents running.")
+else:
+    print(f"{'ID':<14} {'Project':<20} Title")
+    print("-" * 60)
+    for a in agents:
+        print(f"{a.get('task_id','?'):<14} {a.get('project_name','')[:20]:<20} {a.get('title','')[:26]}")
+PYEOF
+    ;;
+
+  run)
+    task_id="${2:-}"
+    if [[ -z "$task_id" ]]; then
+      echo "Usage: penny run <task-id>"
+      exit 1
+    fi
+    _require_running
+    body=$(printf '{"task_id":"%s"}' "$task_id")
+    resp=$(_api_post /api/run "$body")
+    _check_api_response "$resp"
+    echo "Agent started for $task_id."
+    ;;
+
+  stop-agent)
+    task_id="${2:-}"
+    if [[ -z "$task_id" ]]; then
+      echo "Usage: penny stop-agent <task-id>"
+      exit 1
+    fi
+    _require_running
+    body=$(printf '{"task_id":"%s"}' "$task_id")
+    resp=$(_api_post /api/stop-agent "$body")
+    _check_api_response "$resp"
+    echo "Stopped agent $task_id."
+    ;;
+
+  dismiss)
+    task_id="${2:-}"
+    if [[ -z "$task_id" ]]; then
+      echo "Usage: penny dismiss <task-id>"
+      exit 1
+    fi
+    _require_running
+    body=$(printf '{"task_id":"%s"}' "$task_id")
+    resp=$(_api_post /api/dismiss "$body")
+    _check_api_response "$resp"
+    echo "Dismissed $task_id."
+    ;;
+
+  clear-completed)
+    _require_running
+    resp=$(_api_post /api/clear-completed)
+    _check_api_response "$resp"
+    echo "Cleared completed tasks."
+    ;;
+
+  open)
+    port=$(_get_port)
+    open "http://127.0.0.1:$port/"
+    ;;
+
+  logs)
+    if [[ "${2:-}" == "-f" || "${2:-}" == "--follow" ]]; then
+      tail -f "$LOG_FILE"
+    else
+      tail -n 80 "$LOG_FILE"
+    fi
+    ;;
+
+  prefs)
+    open "$CONFIG_FILE"
+    ;;
+
+  update)
+    before=$(_get_version)
+    # Resolve source directory from installed plist
+    SRC_DIR=$(python3 - "$PLIST_DEST" <<'PYEOF'
+import plistlib, sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        pl = plistlib.load(f)
+    print(pl.get("WorkingDirectory", ""))
+except Exception:
+    print("")
+PYEOF
+    )
+    if [[ -z "$SRC_DIR" || ! -d "$SRC_DIR" ]]; then
+      echo "Cannot find Penny source directory. Is Penny installed?"
+      exit 1
+    fi
+    echo "Pulling latest changes..."
+    if ! git -C "$SRC_DIR" pull --ff-only; then
+      echo ""
+      echo "Fast-forward pull failed. You may have local changes."
+      echo "Try: cd $SRC_DIR && git stash && penny update"
+      exit 1
+    fi
+    echo "Running install..."
+    bash "$SRC_DIR/install.sh"
+    after=$(_get_version)
+    if [[ "$before" == "$after" ]]; then
+      echo "Already up to date (v$after)."
+    else
+      echo "Updated: v$before → v$after"
+    fi
+    ;;
+
+  *)
+    echo "Unknown command: ${1:-}"
+    echo "Run 'penny help' for usage."
+    exit 1
+    ;;
+
+esac

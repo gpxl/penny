@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "penny"
+version = "0.1.0"
+description = "Claude Code Token Monitor — macOS menu bar app"
+requires-python = ">=3.9"
+dependencies = [
+    "pyobjc-core>=10.0",
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyyaml>=6.0",
+    "setproctitle>=1.3",
+    "pexpect>=4.8",
+    "pyte>=0.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "hypothesis>=6.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+penny = "penny.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["penny*"]
+
+[tool.setuptools.package-data]
+penny = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --cov=penny --cov-report=term-missing --cov-fail-under=50"
+
+[tool.coverage.run]
+source = ["penny"]
+omit = [
+    "penny/popover_vc.py",
+    "penny/ui_components.py",
+    "penny/onboarding.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "except ImportError",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
