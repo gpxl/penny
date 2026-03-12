@@ -1378,3 +1378,113 @@ class TestInstallAndConfigTemplate:
         from penny.onboarding import needs_onboarding
         config = {"projects": [{"path": "/Users/me/project"}]}  # no plugins key
         assert needs_onboarding(config) is False
+
+# ── BeadsPlugin.get_dashboard_cards ──────────────────────────────────────────
+
+
+class TestBeadsPluginDashboardCards:
+    """Tests for BeadsPlugin.get_dashboard_cards() via the plugin mechanism."""
+
+    @pytest.fixture
+    def plugin(self):
+        from penny.plugins.beads_plugin import Plugin
+        return Plugin()
+
+    def _make_state(self, ready_tasks=None, agents_running=None, recently_completed=None):
+        return {
+            "ready_tasks": ready_tasks or [],
+            "agents_running": agents_running or [],
+            "recently_completed": recently_completed or [],
+        }
+
+    def test_returns_three_cards(self, plugin):
+        cards = plugin.get_dashboard_cards(self._make_state(), {})
+        assert len(cards) == 3
+        names = [c["name"] for c in cards]
+        assert names == ["beads-tasks", "beads-agents", "beads-completed"]
+
+    def test_empty_state_shows_empty_messages(self, plugin):
+        cards = plugin.get_dashboard_cards(self._make_state(), {})
+        tasks_html = cards[0]["html"]
+        agents_html = cards[1]["html"]
+        comp_html = cards[2]["html"]
+        assert "0 ready" in tasks_html
+        assert "No ready tasks." in tasks_html
+        assert "Agents Running (0)" in agents_html
+        assert "None running." in agents_html
+        assert "Completed This Period (0)" in comp_html
+        assert "None this period." in comp_html
+
+    def test_ready_tasks_rendered(self, plugin):
+        tasks = [
+            {"task_id": "t-1", "title": "Fix bug", "priority": "P1", "project_name": "proj"},
+            {"task_id": "t-2", "title": "Add feat", "priority": "P2", "project_name": "proj2"},
+        ]
+        cards = plugin.get_dashboard_cards(self._make_state(ready_tasks=tasks), {})
+        html = cards[0]["html"]
+        assert "Task Queue (2 ready)" in html
+        assert "t-1" in html
+        assert "Fix bug" in html
+        assert "p1" in html  # CSS class for P1
+        assert "t-2" in html
+        assert "p2" in html  # CSS class for P2
+
+    def test_agents_running_rendered(self, plugin):
+        agents = [
+            {"task_id": "a-1", "project_name": "proj", "title": "Running task"},
+        ]
+        cards = plugin.get_dashboard_cards(self._make_state(agents_running=agents), {})
+        html = cards[1]["html"]
+        assert "Agents Running (1)" in html
+        assert "a-1" in html
+        assert "Running task" in html
+        assert "running" in html  # badge class
+
+    def test_completed_rendered(self, plugin):
+        completed = [
+            {"task_id": "d-1", "project_name": "proj", "title": "Done task"},
+        ]
+        cards = plugin.get_dashboard_cards(self._make_state(recently_completed=completed), {})
+        html = cards[2]["html"]
+        assert "Completed This Period (1)" in html
+        assert "d-1" in html
+        assert "Done task" in html
+        assert "done" in html  # badge class
+
+    def test_run_button_in_task_row(self, plugin):
+        tasks = [{"task_id": "t-1", "title": "T", "priority": "P3", "project_name": "p"}]
+        cards = plugin.get_dashboard_cards(self._make_state(ready_tasks=tasks), {})
+        html = cards[0]["html"]
+        assert "/api/run" in html
+        assert "t-1" in html
+
+    def test_stop_button_in_agent_row(self, plugin):
+        agents = [{"task_id": "a-1", "project_name": "p", "title": "T"}]
+        cards = plugin.get_dashboard_cards(self._make_state(agents_running=agents), {})
+        html = cards[1]["html"]
+        assert "/api/stop-agent" in html
+        assert "a-1" in html
+
+    def test_dismiss_button_in_completed_row(self, plugin):
+        completed = [{"task_id": "d-1", "project_name": "p", "title": "T"}]
+        cards = plugin.get_dashboard_cards(self._make_state(recently_completed=completed), {})
+        html = cards[2]["html"]
+        assert "/api/dismiss" in html
+        assert "d-1" in html
+
+    def test_priority_css_classes(self, plugin):
+        from penny.plugins.beads_plugin import _pri_cls
+        assert _pri_cls("P1") == "p1"
+        assert _pri_cls("P2") == "p2"
+        assert _pri_cls("P3") == "p3"
+        assert _pri_cls("unknown") == "p3"
+
+    def test_plugin_manager_calls_get_dashboard_cards(self, plugin):
+        """PluginManager.get_dashboard_cards() collects cards via extend()."""
+        from penny.plugin import PluginManager
+        mgr = PluginManager()
+        mgr._active = {"beads": plugin}
+        state = self._make_state()
+        cards = mgr.get_dashboard_cards(state, {})
+        assert len(cards) == 3
+        assert cards[0]["name"] == "beads-tasks"

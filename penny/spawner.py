@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .log import logger
 from .paths import data_dir
 
 
@@ -85,7 +86,7 @@ def _open_in_terminal(cmd: str) -> None:
         os.chmod(path, stat.S_IRWXU)  # owner-only: no world-readable temp scripts
         subprocess.Popen(["open", path], start_new_session=True)
     except Exception as exc:
-        print(f"[penny] _open_in_terminal failed: {exc}", flush=True)
+        logger.error("_open_in_terminal failed: %s", exc)
 
 
 def _logs_dir() -> Path:
@@ -187,8 +188,7 @@ def _wait_for_claude_prompt(tmux_bin: str, session_name: str, timeout: float = 3
                 return
         time.sleep(interval)
     # Timeout reached — proceed anyway (best effort)
-    print(f"[penny] _wait_for_claude_prompt: timed out after {timeout}s for {session_name}",
-          flush=True)
+    logger.warning("_wait_for_claude_prompt: timed out after %ss for %s", timeout, session_name)
 
 
 def spawn_claude_agent(

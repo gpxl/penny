@@ -137,46 +137,6 @@ class TestSnapshot:
         assert "state" in result
         assert "prediction" in result
         assert "session_history" in result
-        assert "rich_metrics" in result
-        assert "intraday_samples" in result
-
-    def test_rich_metrics_defaults_to_empty_dict(self):
-        app = FakeApp(state={})
-        result = _snapshot(app)
-        assert result["rich_metrics"] == {}
-
-    def test_rich_metrics_by_window_defaults_to_empty_dict(self):
-        app = FakeApp(state={})
-        result = _snapshot(app)
-        assert result["rich_metrics_by_window"] == {}
-
-    def test_rich_metrics_by_window_passed_through_from_state(self):
-        by_window = {
-            "session": {"opus_tokens": 10},
-            "week": {"opus_tokens": 50},
-        }
-        app = FakeApp(state={"rich_metrics_by_window": by_window})
-        result = _snapshot(app)
-        assert result["rich_metrics_by_window"]["session"]["opus_tokens"] == 10
-        assert result["rich_metrics_by_window"]["week"]["opus_tokens"] == 50
-
-    def test_intraday_samples_defaults_to_empty_list(self):
-        app = FakeApp(state={})
-        result = _snapshot(app)
-        assert result["intraday_samples"] == []
-
-    def test_rich_metrics_passed_through_from_state(self):
-        rm = {"opus_tokens": 100, "sonnet_tokens": 200}
-        app = FakeApp(state={"rich_metrics": rm})
-        result = _snapshot(app)
-        assert result["rich_metrics"]["opus_tokens"] == 100
-
-    def test_intraday_samples_passed_through_from_state(self):
-        samples = [{"ts": "2025-01-10T12:00:00+00:00", "pct_all": 42.0, "pct_sonnet": 30.0}]
-        app = FakeApp(state={"intraday_samples": samples})
-        result = _snapshot(app)
-        assert len(result["intraday_samples"]) == 1
-        assert result["intraday_samples"][0]["pct_all"] == 42.0
 
     def test_prediction_is_dict_when_present(self):
         pred = Prediction(pct_all=50.0, pct_sonnet=30.0, days_remaining=2.0)

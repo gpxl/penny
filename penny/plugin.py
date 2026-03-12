@@ -8,8 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .log import logger
 from .preflight import PreflightIssue
 from .tasks import Task
+
+# Plugin API version — bump the major when breaking changes are made to
+# PennyPlugin methods. Plugins declare their target version via the
+# ``plugin_api_version`` property; incompatible plugins are skipped
+# at discovery time with a clear error message.
+PLUGIN_API_VERSION = 1
 
 
 @dataclass
@@ -28,6 +35,16 @@ class UISection:
 
 class PennyPlugin(ABC):
     """Base class for all Penny plugins."""
+
+    @property
+    def plugin_api_version(self) -> int:
+        """API version this plugin targets.
+
+        Override to pin to a specific version. Penny will skip plugins
+        whose version does not match ``PLUGIN_API_VERSION``.  The default
+        returns the current version so built-in plugins always match.
+        """
+        return PLUGIN_API_VERSION
 
     @property
     @abstractmethod
@@ -217,12 +234,23 @@ class PluginManager:
 
     def _record_load_error(self, source: str, message: str, fix_hint: str) -> None:
         full_msg = f"Plugin '{source}' {message}"
-        print(f"[penny] {full_msg}", flush=True)
+        logger.error("%s", full_msg)
         self._load_errors.append(PreflightIssue(severity="error", message=full_msg, fix_hint=fix_hint))
 
     def _validate_plugin_instance(self, instance: PennyPlugin, source: str) -> list[str]:
         """Return a list of API violation strings. Empty list means the plugin is valid."""
         errors: list[str] = []
+
+        # API version check
+        try:
+            version = instance.plugin_api_version
+            if version != PLUGIN_API_VERSION:
+                errors.append(
+                    f"targets API version {version} but Penny requires "
+                    f"version {PLUGIN_API_VERSION}"
+                )
+        except Exception as exc:
+            errors.append(f"'plugin_api_version' property raised an exception: {exc}")
 
         try:
             name = instance.name
@@ -314,10 +342,10 @@ class PluginManager:
                 try:
                     plugin.on_first_activated(app)
                 except Exception as exc:
-                    print(f"[penny] on_first_activated error in plugin {name}: {exc}", flush=True)
+                    logger.error("on_first_activated error in plugin %s: %s", name, exc)
             return True
         except Exception as exc:
-            print(f"[penny] Failed to activate plugin {name}: {exc}", flush=True)
+            logger.error("Failed to activate plugin %s: %s", name, exc)
             return False
 
     def deactivate(self, name: str) -> None:
@@ -327,7 +355,7 @@ class PluginManager:
             try:
                 plugin.on_deactivate()
             except Exception as exc:
-                print(f"[penny] Error deactivating plugin {name}: {exc}", flush=True)
+                logger.error("Error deactivating plugin %s: %s", name, exc)
 
     def sync_with_config(self, app: Any, config: dict[str, Any]) -> None:
         """Load/unload plugins based on config and availability.
@@ -368,7 +396,7 @@ class PluginManager:
             try:
                 issues.extend(plugin.preflight_checks(config))
             except Exception as exc:
-                print(f"[penny] preflight error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("preflight error in plugin %s: %s", plugin.name, exc)
         return issues
 
     def get_all_tasks(self, projects: list[dict[str, Any]]) -> list[Task]:
@@ -378,7 +406,7 @@ class PluginManager:
             try:
                 all_tasks.extend(plugin.get_tasks(projects))
             except Exception as exc:
-                print(f"[penny] get_tasks error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("get_tasks error in plugin %s: %s", plugin.name, exc)
         return all_tasks
 
     def notify_agent_spawned(self, task: Task, record: dict[str, Any], state: dict[str, Any]) -> None:
@@ -388,7 +416,7 @@ class PluginManager:
             try:
                 plugin.on_agent_spawned(task, record, plugin_state)
             except Exception as exc:
-                print(f"[penny] on_agent_spawned error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("on_agent_spawned error in plugin %s: %s", plugin.name, exc)
 
     def notify_agent_completed(self, record: dict[str, Any], state: dict[str, Any]) -> None:
         """Broadcast agent-completed event to all active plugins."""
@@ -397,7 +425,7 @@ class PluginManager:
             try:
                 plugin.on_agent_completed(record, plugin_state)
             except Exception as exc:
-                print(f"[penny] on_agent_completed error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("on_agent_completed error in plugin %s: %s", plugin.name, exc)
 
     def get_all_completed_tasks(self, projects: list[dict[str, Any]], state: dict[str, Any]) -> list[Task]:
         """Collect externally completed tasks from all active plugins.
@@ -411,7 +439,7 @@ class PluginManager:
             try:
                 all_completed.extend(plugin.get_completed_tasks(projects, plugin_state))
             except Exception as exc:
-                print(f"[penny] get_completed_tasks error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("get_completed_tasks error in plugin %s: %s", plugin.name, exc)
         return all_completed
 
     def filter_all_tasks(
@@ -425,7 +453,7 @@ class PluginManager:
             try:
                 tasks = plugin.filter_tasks(tasks, state, config)
             except Exception as exc:
-                print(f"[penny] filter_tasks error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("filter_tasks error in plugin %s: %s", plugin.name, exc)
         return tasks
 
     def get_task_description(self, task: Task) -> str:
@@ -436,7 +464,7 @@ class PluginManager:
                 if desc is not None:
                     return desc
             except Exception as exc:
-                print(f"[penny] get_task_description error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("get_task_description error in plugin %s: %s", plugin.name, exc)
         return f"Task {task.task_id}: {task.title}"
 
     def get_agent_prompt_template(self, task: Task) -> str | None:
@@ -447,7 +475,7 @@ class PluginManager:
                 if tmpl is not None:
                     return tmpl
             except Exception as exc:
-                print(f"[penny] prompt template error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("prompt template error in plugin %s: %s", plugin.name, exc)
         return None
 
     def get_all_ui_sections(self) -> list[UISection]:
@@ -457,7 +485,7 @@ class PluginManager:
             try:
                 sections.extend(plugin.ui_sections())
             except Exception as exc:
-                print(f"[penny] ui_sections error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("ui_sections error in plugin %s: %s", plugin.name, exc)
         sections.sort(key=lambda s: s.sort_order)
         return sections
 
@@ -468,7 +496,7 @@ class PluginManager:
                 if plugin.handle_action(action, payload):
                     return True
             except Exception as exc:
-                print(f"[penny] action error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("action error in plugin %s: %s", plugin.name, exc)
         return False
 
     def get_dashboard_cards(
@@ -480,7 +508,7 @@ class PluginManager:
             try:
                 cards.extend(plugin.get_dashboard_cards(state, config))
             except Exception as exc:
-                print(f"[penny] get_dashboard_cards error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("get_dashboard_cards error in plugin %s: %s", plugin.name, exc)
         return cards
 
     def handle_dashboard_route(
@@ -496,7 +524,7 @@ class PluginManager:
         try:
             return plugin.dashboard_api_handler(method, path_suffix, payload)
         except Exception as exc:
-            print(f"[penny] dashboard_api_handler error in plugin {plugin_name}: {exc}", flush=True)
+            logger.error("dashboard_api_handler error in plugin %s: %s", plugin_name, exc)
             return None
 
     def get_report_sections(
@@ -510,7 +538,7 @@ class PluginManager:
                 if html:
                     sections.append(html)
             except Exception as exc:
-                print(f"[penny] report_section error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("report_section error in plugin %s: %s", plugin.name, exc)
         return sections
 
     def get_all_cli_commands(self) -> list[dict[str, Any]]:
@@ -522,7 +550,7 @@ class PluginManager:
                 for cmd in cmds:
                     commands.append({**cmd, "plugin": plugin.name})
             except Exception as exc:
-                print(f"[penny] cli_commands error in plugin {plugin.name}: {exc}", flush=True)
+                logger.error("cli_commands error in plugin %s: %s", plugin.name, exc)
         return commands
 
     def setup_projects(self, paths: list[Path]) -> None:
@@ -534,7 +562,7 @@ class PluginManager:
                 try:
                     plugin.setup_project(path)
                 except Exception as exc:
-                    print(f"[penny] plugin setup_project error ({plugin.name}): {exc}", flush=True)
+                    logger.error("plugin setup_project error (%s): %s", plugin.name, exc)
 
     def get_default_allowed_tools(self) -> list[str]:
         """Collect extra allowed-tools contributions from all available plugins."""

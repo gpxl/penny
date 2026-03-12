@@ -11,9 +11,10 @@ from typing import Any
 
 import objc
 from AppKit import (
-    NSAnimationContext,
     NSButton,
     NSColor,
+    NSImage,
+    NSImageView,
     NSLayoutConstraint,
     NSStackView,
     NSSwitch,
@@ -21,11 +22,10 @@ from AppKit import (
     NSView,
     NSViewController,
 )
-from Foundation import NSEdgeInsets, NSTimer
-
-_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+from Foundation import NSEdgeInsets, NSLocale
 
 from .analysis import format_reset_label
+from .log import logger
 from .ui_components import ProgressBarView, make_button, make_label
 
 # Popover width (fixed). Height is dynamic.
@@ -42,6 +42,36 @@ def _make_separator() -> NSView:
     return sep
 
 
+def _make_currency_icon() -> NSImageView:
+    """Return a 20×20 NSImageView showing a locale-appropriate currency SF Symbol."""
+    _symbol_map = {
+        "USD": "dollarsign.circle.fill",
+        "EUR": "eurosign.circle.fill",
+        "GBP": "sterlingsign.circle.fill",
+        "JPY": "yensign.circle.fill",
+        "CNY": "yensign.circle.fill",
+        "KRW": "wonsign.circle.fill",
+        "INR": "indianrupeesign.circle.fill",
+        "RUB": "rublesign.circle.fill",
+        "BRL": "brazilianrealsign.circle.fill",
+    }
+    code = NSLocale.currentLocale().currencyCode() or "USD"
+    sym_name = _symbol_map.get(code, "centsign.circle.fill")
+    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(sym_name, "Currency")
+    if img is None:
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "dollarsign.circle.fill", "Currency"
+        )
+    view = NSImageView.alloc().init()
+    view.setImage_(img)
+    view.setImageScaling_(3)   # NSImageScaleProportionallyUpOrDown
+    view.setContentTintColor_(NSColor.systemOrangeColor())
+    view.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    view.widthAnchor().constraintEqualToConstant_(20.0).setActive_(True)
+    view.heightAnchor().constraintEqualToConstant_(20.0).setActive_(True)
+    return view
+
+
 class ControlCenterViewController(NSViewController):
     """Popover view controller built entirely in code."""
 
@@ -56,13 +86,11 @@ class ControlCenterViewController(NSViewController):
         self._lbl_all_pct: NSTextField | None = None
         self._lbl_sonnet_pct: NSTextField | None = None
         self._lbl_session_pct: NSTextField | None = None
-        self._lbl_weekly_header: NSTextField | None = None
-        self._lbl_session_header: NSTextField | None = None
+        self._lbl_weekly_reset: NSTextField | None = None
+        self._lbl_session_reset: NSTextField | None = None
         self._lbl_outage_warning: NSTextField | None = None
         # UI state
         self._refresh_btn: Any = None
-        self._spin_timer: Any = None
-        self._spin_frame: int = 0
         self._keep_alive_btn: Any = None
         self._login_btn: Any = None
         self._last_refresh_at: datetime | None = None
@@ -76,14 +104,6 @@ class ControlCenterViewController(NSViewController):
         # Plugins management section
         self._plugins_section_stack: Any = None
         self._plugin_row_views: list[Any] = []
-        # Collapsible settings section
-        self._settings_expanded: bool = False
-        self._settings_animating: bool = False
-        self._settings_section_view: Any = None
-        self._prefs_btn: Any = None
-        # Update banner
-        self._update_banner: Any = None
-        self._update_lbl: NSTextField | None = None
         return self
 
     def loadView(self) -> None:
@@ -122,41 +142,24 @@ class ControlCenterViewController(NSViewController):
             self._lbl_all_pct.setStringValue_(f"{pred.pct_all:.0f}%")
             self._lbl_sonnet_pct.setStringValue_(f"{pred.pct_sonnet:.0f}%")
             self._lbl_session_pct.setStringValue_(f"{pred.session_pct_all:.0f}%")
-            if pred.session_reset_label:
-                formatted = format_reset_label(pred.session_reset_label)
-                parts = formatted.split(" at ", 1)
-                sess_time = parts[1] if len(parts) > 1 else formatted
-                self._lbl_session_header.setStringValue_(
-                    f"Session Budget resets at {sess_time}"
-                )
-            else:
-                self._lbl_session_header.setStringValue_("Session Budget")
-            if pred.reset_label:
-                formatted = format_reset_label(pred.reset_label)
-                parts = formatted.split(" at ", 1)
-                if len(parts) == 2:
-                    weekly_date, weekly_time = parts[0], parts[1]
-                    self._lbl_weekly_header.setStringValue_(
-                        f"Weekly Budget resets at {weekly_time} on {weekly_date}"
-                    )
-                else:
-                    self._lbl_weekly_header.setStringValue_(
-                        f"Weekly Budget resets at {formatted}"
-                    )
-            else:
-                self._lbl_weekly_header.setStringValue_("Weekly Budget")
+            self._lbl_weekly_reset.setStringValue_(
+                f"Resets at {format_reset_label(pred.reset_label)}" if pred.reset_label else "—"
+            )
+            self._lbl_session_reset.setStringValue_(
+                f"Resets at {format_reset_label(pred.session_reset_label)}" if pred.session_reset_label else "—"
+            )
             if self._lbl_outage_warning is not None:
                 if pred.outage:
                     self._lbl_outage_warning.setStringValue_(
                         "\u26a0\ufe0f Claude API outage \u2014 usage data may be stale"
                     )
                     self._lbl_outage_warning.setHidden_(False)
-                elif pred.live_unavailable and not pred.outage and pred.budget_all is None:
+                elif pred.live_unavailable and pred.budget_all is None:
                     self._lbl_outage_warning.setStringValue_(
                         "Calibrating \u2014 need 1\u20132 weeks of usage history for budget estimates"
                     )
                     self._lbl_outage_warning.setHidden_(False)
-                elif pred.live_unavailable and not pred.outage:
+                elif pred.live_unavailable:
                     self._lbl_outage_warning.setStringValue_(
                         "Live stats unavailable \u2014 showing JSONL estimates"
                     )
@@ -180,7 +183,7 @@ class ControlCenterViewController(NSViewController):
             try:
                 section.rebuild(data)
             except Exception as exc:
-                print(f"[penny] plugin section rebuild error: {exc}", flush=True)
+                logger.error("plugin section rebuild error: %s", exc)
 
         # Refresh plugins management checkboxes
         self._rebuild_plugins_section()
@@ -227,6 +230,11 @@ class ControlCenterViewController(NSViewController):
     @objc.python_method
     def _populate_stack(self, stack: NSStackView) -> None:
         """Add all sections to the root stack."""
+        # ── Header ──────────────────────────────────────────────────────────
+        header = self._make_header_row()
+        stack.addArrangedSubview_(header)
+        stack.addArrangedSubview_(_make_separator())
+
         # ── Outage warning (hidden by default) ───────────────────────────────
         self._lbl_outage_warning = make_label("", size=11.0)
         self._lbl_outage_warning.setTextColor_(NSColor.systemOrangeColor())
@@ -234,19 +242,22 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(self._lbl_outage_warning)
 
         # ── Session Budget ───────────────────────────────────────────────────
-        self._lbl_session_header = make_label("Session Budget", size=11.0, secondary=True)
-        stack.addArrangedSubview_(self._lbl_session_header)
+        stack.addArrangedSubview_(make_label("Session Budget", size=11.0, secondary=True))
         self._bar_session, self._lbl_session_pct = self._add_bar_row(
             stack, "This session", 0.0
         )
+        self._lbl_session_reset = make_label("—", size=11.0, secondary=True)
+        stack.addArrangedSubview_(self._lbl_session_reset)
         stack.addArrangedSubview_(_make_separator())
 
         # ── Weekly Budget ────────────────────────────────────────────────────
-        self._lbl_weekly_header = make_label("Weekly Budget", size=11.0, secondary=True)
-        stack.addArrangedSubview_(self._lbl_weekly_header)
+        stack.addArrangedSubview_(make_label("Weekly Budget", size=11.0, secondary=True))
         self._bar_all, self._lbl_all_pct = self._add_bar_row(stack, "All models", 0.0)
         self._bar_sonnet, self._lbl_sonnet_pct = self._add_bar_row(stack, "Sonnet", 0.0)
-
+        self._bar_all.set_fixed_color(NSColor.systemBlueColor())
+        self._bar_sonnet.set_fixed_color(NSColor.systemBlueColor())
+        self._lbl_weekly_reset = make_label("—", size=11.0, secondary=True)
+        stack.addArrangedSubview_(self._lbl_weekly_reset)
         stack.addArrangedSubview_(_make_separator())
 
         # ── Plugin section insertion point ─────────────────────────────────────
@@ -257,11 +268,9 @@ class ControlCenterViewController(NSViewController):
         plugins_view = self._make_plugins_section()
         stack.addArrangedSubview_(plugins_view)
 
-        # ── Collapsible settings section ──────────────────────────────────────
-        settings_view = self._make_settings_section()
-        settings_view.setHidden_(True)
-        self._settings_section_view = settings_view
-        stack.addArrangedSubview_(settings_view)
+        # ── Service settings ─────────────────────────────────────────────────
+        stack.addArrangedSubview_(_make_separator())
+        stack.addArrangedSubview_(self._make_service_row())
 
         # ── Update available banner (hidden by default) ───────────────────────
         update_banner = self._make_update_banner()
@@ -315,6 +324,43 @@ class ControlCenterViewController(NSViewController):
         self._relayout()
 
     @objc.python_method
+    def _make_header_row(self) -> NSView:
+        row = NSStackView.alloc().init()
+        row.setOrientation_(0)   # horizontal
+        row.setSpacing_(8.0)
+        row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
+        row.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
+
+        # Left: currency icon + "Penny" title
+        left = NSStackView.alloc().init()
+        left.setOrientation_(0)
+        left.setSpacing_(6.0)
+        left.setAlignment_(8)    # NSLayoutAttributeCenterY
+        left.addArrangedSubview_(_make_currency_icon())
+        left.addArrangedSubview_(make_label("Penny", size=15.0, bold=True))
+
+        # Right: refresh button + last refresh label
+        right = NSStackView.alloc().init()
+        right.setOrientation_(0)
+        right.setSpacing_(6.0)
+        right.setAlignment_(8)    # NSLayoutAttributeCenterY
+
+        refresh_btn = make_button("↻", self, "refreshNow:")
+
+        last_refresh_lbl = make_label("—", size=11.0, secondary=True)
+        self._last_refresh_lbl = last_refresh_lbl
+
+        right.addArrangedSubview_(refresh_btn)
+        right.addArrangedSubview_(last_refresh_lbl)
+
+        row.addArrangedSubview_(left)
+        row.addArrangedSubview_(right)
+
+        self._refresh_btn = refresh_btn
+        return row
+
+    @objc.python_method
     def _make_plugins_section(self) -> NSView:
         """Create the Plugins management section (header + checkbox rows)."""
         outer = NSStackView.alloc().init()
@@ -322,7 +368,6 @@ class ControlCenterViewController(NSViewController):
         outer.setAlignment_(5)
         outer.setSpacing_(6.0)
         outer.addArrangedSubview_(make_label("Plugins", size=11.0, secondary=True))
-        outer.setHidden_(True)   # Hidden until plugins are registered
         self._plugins_section_stack = outer
         return outer
 
@@ -340,9 +385,6 @@ class ControlCenterViewController(NSViewController):
             self._plugins_section_stack.removeArrangedSubview_(view)
             view.removeFromSuperview()
         self._plugin_row_views = []
-
-        # Hide the entire section when no plugins are available
-        self._plugins_section_stack.setHidden_(len(mgr.all_plugins) == 0)
 
         active_names = {p.name for p in mgr.active_plugins}
 
@@ -371,8 +413,6 @@ class ControlCenterViewController(NSViewController):
             self._plugins_section_stack.addArrangedSubview_(row)
             self._plugin_row_views.append(row)
 
-        self._plugins_section_stack.setHidden_(not bool(mgr.all_plugins))
-
     def _togglePlugin_(self, sender: Any) -> None:
         """Toggle a plugin on or off via the plugins management checkboxes."""
         plugin_name = str(sender.representedObject() or "")
@@ -381,8 +421,7 @@ class ControlCenterViewController(NSViewController):
         self._app.set_plugin_enabled(plugin_name, bool(sender.state()))
 
     @objc.python_method
-    def _make_settings_section(self) -> NSView:
-        """Collapsible settings section: Keep Alive + Launch at Login."""
+    def _make_service_row(self) -> NSView:
         outer = NSStackView.alloc().init()
         outer.setOrientation_(1)   # vertical
         outer.setAlignment_(5)     # NSLayoutAttributeLeading
@@ -450,66 +489,31 @@ class ControlCenterViewController(NSViewController):
         row.setTranslatesAutoresizingMaskIntoConstraints_(False)
         row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
-        # Left: refresh button + last refresh label
-        left = NSStackView.alloc().init()
-        left.setOrientation_(0)
-        left.setSpacing_(6.0)
-        left.setAlignment_(8)    # NSLayoutAttributeCenterY
+        report_btn = make_button("Report", self, "viewReport:")
 
-        refresh_btn = make_button("↻", self, "refreshNow:")
-        last_refresh_lbl = make_label("—", size=11.0, secondary=True)
-        self._last_refresh_lbl = last_refresh_lbl
-        self._refresh_btn = refresh_btn
-
-        left.addArrangedSubview_(refresh_btn)
-        left.addArrangedSubview_(last_refresh_lbl)
-
-        # Right: report, settings, quit
         right = NSStackView.alloc().init()
         right.setOrientation_(0)
         right.setSpacing_(8.0)
 
-        report_btn = make_button("Report", self, "viewReport:")
-        prefs_btn = make_button("Settings ⚙", self, "toggleSettings:")
+        prefs_btn = make_button("Settings ⚙", self, "openPrefs:")
         quit_btn = make_button("Quit", self, "quitApp:")
         quit_btn.setContentTintColor_(NSColor.systemRedColor())
-        self._prefs_btn = prefs_btn
 
-        right.addArrangedSubview_(report_btn)
         right.addArrangedSubview_(prefs_btn)
         right.addArrangedSubview_(quit_btn)
 
-        row.addArrangedSubview_(left)
+        row.addArrangedSubview_(report_btn)
         row.addArrangedSubview_(right)
 
         self._footer_btns = [report_btn, prefs_btn, quit_btn]
         return row
 
     def setRefreshing_(self, refreshing: bool) -> None:
-        """Start/stop the braille spinner animation on the refresh button."""
+        """Update refresh button to show/hide a loading indicator."""
         if self._refresh_btn is None:
             return
-        if refreshing:
-            self._refresh_btn.setEnabled_(False)
-            if self._spin_timer is None:
-                self._spin_frame = 0
-                self._refresh_btn.setTitle_(_SPIN_FRAMES[0])
-                self._spin_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    0.1, self, "_tickSpinner:", None, True
-                )
-        else:
-            if self._spin_timer is not None:
-                self._spin_timer.invalidate()
-                self._spin_timer = None
-            self._refresh_btn.setTitle_("↻")
-            self._refresh_btn.setEnabled_(True)
-
-    def _tickSpinner_(self, timer: Any) -> None:
-        """Advance the braille spinner by one frame."""
-        if self._refresh_btn is None:
-            return
-        self._spin_frame = (self._spin_frame + 1) % len(_SPIN_FRAMES)
-        self._refresh_btn.setTitle_(_SPIN_FRAMES[self._spin_frame])
+        self._refresh_btn.setTitle_("↻…" if refreshing else "↻")
+        self._refresh_btn.setEnabled_(not refreshing)
 
     @objc.python_method
     def _add_bar_row(self, stack: NSStackView, label: str,
@@ -522,8 +526,7 @@ class ControlCenterViewController(NSViewController):
         row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
         lbl = make_label(label, size=12.0)
-        lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        lbl.widthAnchor().constraintEqualToConstant_(90.0).setActive_(True)
+        lbl.setContentHuggingPriority_forOrientation_(251, 0)
 
         bar = ProgressBarView.alloc().initWithFrame_(((0, 0), (100.0, _BAR_HEIGHT)))
         bar.setPct(initial_pct)
@@ -533,8 +536,7 @@ class ControlCenterViewController(NSViewController):
 
         pct_lbl = make_label(f"{initial_pct:.0f}%", size=12.0)
         pct_lbl.setAlignment_(1)  # NSTextAlignmentRight
-        pct_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        pct_lbl.widthAnchor().constraintEqualToConstant_(36.0).setActive_(True)
+        pct_lbl.setContentHuggingPriority_forOrientation_(251, 0)
 
         row.addArrangedSubview_(lbl)
         row.addArrangedSubview_(bar)
@@ -542,7 +544,7 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(row)
         return bar, pct_lbl
 
-    # ── Footer helpers ─────────────────────────────────────────────────────
+    # ── Header helpers ─────────────────────────────────────────────────────
 
     @objc.python_method
     def _update_last_refresh_label(self) -> None:
@@ -590,31 +592,6 @@ class ControlCenterViewController(NSViewController):
         if self._app:
             self._app.viewReport_(sender)
 
-    def toggleSettings_(self, sender: Any) -> None:
-        if self._settings_animating:
-            return
-        self._settings_expanded = not self._settings_expanded
-        if self._prefs_btn is not None:
-            self._prefs_btn.setTitle_("Settings ▲" if self._settings_expanded else "Settings ⚙")
-        if self._settings_section_view is None:
-            self._relayout()
-            return
-        self._settings_animating = True
-        view = self._settings_section_view
-
-        def _animation_block(ctx):
-            ctx.setDuration_(0.2)
-            ctx.setAllowsImplicitAnimation_(True)
-            view.setHidden_(not self._settings_expanded)
-            self._relayout()
-
-        def _completion():
-            self._settings_animating = False
-
-        NSAnimationContext.runAnimationGroup_completionHandler_(
-            _animation_block, _completion
-        )
-
     def openPrefs_(self, sender: Any) -> None:
         if self._app:
             self._app.openPrefs_(sender)
@@ -622,12 +599,3 @@ class ControlCenterViewController(NSViewController):
     def quitApp_(self, sender: Any) -> None:
         if self._app:
             self._app.quitApp_(sender)
-
-    def updateNow_(self, sender: Any) -> None:
-        if self._app:
-            self._app.runUpdate_(sender)
-
-    def dismissUpdate_(self, sender: Any) -> None:
-        if self._app:
-            self._app.dismissUpdate_(sender)
-

@@ -201,7 +201,7 @@ def _post(port: int, path: str, body: dict | None = None) -> dict:
 
 class TestJourneyRefreshCycle:
     def test_initial_state_visible_via_api(self, e2e_app):
-        """GET /api/state returns prediction and empty agents."""
+        """GET /api/state returns prediction, tasks, and empty agents."""
         _, port, _ = e2e_app
         data = _get(port, "/api/state")
         assert data["prediction"]["pct_all"] == 42.0
@@ -226,32 +226,34 @@ class TestJourneyTaskLifecycle:
         """Spawn task → verify running → complete → verify completed → dismiss."""
         app, port, _ = e2e_app
 
-        # Step 1: Spawn the task (ready tasks are managed by the plugin, not core API)
+        # Step 2: Spawn the task
         result = _post(port, "/api/run", {"task_id": "task-1"})
         assert result["ok"] is True
 
-        # Step 2: Verify task moved to running
+        # Step 3: Verify task moved to running
         data = _get(port, "/api/state")
         running_ids = [a["task_id"] for a in data["state"]["agents_running"]]
         assert "task-1" in running_ids
 
-        # Step 3: Simulate agent completion
+        # Step 4: Simulate agent completion
         app.complete_agent("task-1")
 
-        # Step 4: Verify task moved from running to recently_completed
+        # Step 5: Verify task moved from running to completed
         data = _get(port, "/api/state")
         running_ids = [a["task_id"] for a in data["state"]["agents_running"]]
         recently_ids = [c["task_id"] for c in data["state"]["recently_completed"]]
         assert "task-1" not in running_ids
         assert "task-1" in recently_ids
 
-        # Step 5: Dismiss the completed task
+        # Step 6: Dismiss the completed task
         _post(port, "/api/dismiss", {"task_id": "task-1"})
 
-        # Step 6: Verify dismissed from recently_completed
+        # Step 7: Verify dismissed from recently_completed
         data = _get(port, "/api/state")
         recently_ids = [c["task_id"] for c in data["state"]["recently_completed"]]
         assert "task-1" not in recently_ids
+        # After dismissal the task is no longer tracked in core state;
+        # the plugin's plugin_state["beads"]["seen_closed_ids"] retains the ID.
 
     def test_spawn_unknown_task_is_noop(self, e2e_app):
         """Spawning a non-existent task doesn't crash or change state."""
@@ -483,7 +485,7 @@ class TestJourneyApiSnapshotShape:
     """Verify the /api/state JSON shape matches what the CLI scripts parse."""
 
     def test_snapshot_has_all_cli_required_fields(self, e2e_app):
-        """The CLI's `penny agents` parses state.agents_running."""
+        """The CLI's `penny agents` parses state.agents_running; dashboard reads prediction/history."""
         _, port, _ = e2e_app
         data = _get(port, "/api/state")
 
@@ -493,9 +495,9 @@ class TestJourneyApiSnapshotShape:
 
         # Dashboard reads:
         assert "prediction" in data
+        assert "plugin_cards" in data
         assert "session_history" in data
         assert "generated_at" in data
-        assert "plugin_cards" in data
 
     def test_snapshot_after_spawn_has_agent_fields(self, e2e_app):
         """After spawning, the agent record has fields the CLI expects."""

@@ -23,9 +23,21 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    """Persist state to disk atomically."""
+    """Persist state to disk atomically.
+
+    Uses os.fsync() before rename to guarantee data reaches the storage
+    device, preventing corruption if the system crashes between write and
+    rename.
+    """
+    import os
+
     tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2, default=str))
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    try:
+        os.write(fd, json.dumps(state, indent=2, default=str).encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     tmp.replace(STATE_PATH)
 
 
@@ -40,8 +52,6 @@ def _default_state() -> dict[str, Any]:
         "session_history": [],   # past completed sub-sessions for budget calibration
         "last_session_scan": None,
         "plugin_state": {},      # namespaced dict for plugin-owned state; never reset by core
-        "rich_metrics": {},
-        "intraday_samples": [],  # [{ts, pct_all, pct_sonnet}, …] last 48h of /status polls
     }
 
 
@@ -101,7 +111,7 @@ def detect_new_sessions(state: dict[str, Any], period_start: datetime) -> dict[s
             archive_completed_session(state, sess_start, sess_end, usage.output_all, usage.output_sonnet)
 
     state["last_session_scan"] = now.isoformat()
-    return state, all_boundaries
+    return state
 
 
 def reset_period_if_needed(state: dict[str, Any]) -> dict[str, Any]:

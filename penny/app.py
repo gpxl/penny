@@ -10,7 +10,6 @@ import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import objc
@@ -27,7 +26,9 @@ from Foundation import NSObject, NSTimer
 
 from .analysis import should_trigger, uses_24h_time
 from .bg_worker import BackgroundWorker
-from .dashboard import DashboardServer, bump_state_generation
+from .config_schema import validate_config
+from .dashboard import DashboardServer
+from .log import logger
 from .onboarding import check_full_permissions_consent, needs_onboarding, run_onboarding
 from .paths import data_dir
 from .plugin import PluginManager
@@ -59,26 +60,17 @@ def _safe_load_config() -> tuple[dict[str, Any], str | None]:
         return {}, None
     try:
         with CONFIG_PATH.open() as f:
-            cfg = yaml.safe_load(f) or {}
-            return _normalize_config(cfg), None
+            config = yaml.safe_load(f) or {}
     except yaml.YAMLError as exc:
         return {}, str(exc)
 
+    # Validate structure/types and log warnings (non-fatal)
+    schema_errors = validate_config(config)
+    if schema_errors:
+        for err in schema_errors:
+            logger.warning("config validation: %s", err)
 
-_LEGACY_BAR_MODES = {
-    "hbars": "bars", "bars+t": "bars", "hbars+t": "bars",
-    "compact": "bars", "minimal": "bars",
-}
-
-
-def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Migrate legacy menubar mode values to current names."""
-    mb = cfg.get("menubar", {})
-    if isinstance(mb, dict):
-        mode = mb.get("mode", "")
-        if mode in _LEGACY_BAR_MODES:
-            mb["mode"] = _LEGACY_BAR_MODES[mode]
-    return cfg
+    return config, None
 
 
 def _config_mtime() -> float | None:
@@ -87,47 +79,6 @@ def _config_mtime() -> float | None:
         return CONFIG_PATH.stat().st_mtime
     except (FileNotFoundError, OSError):
         return None
-
-
-# ── Easing helpers ──────────────────────────────────────────────────────
-# Cubic curves: standard for UI motion — perceptually smooth without
-# feeling sluggish.  Each function maps t ∈ [0,1] → [0,1].
-
-
-def _ease_out_cubic(t: float) -> float:
-    """Decelerates to zero velocity — use for elements arriving."""
-    return 1.0 - (1.0 - t) ** 3
-
-
-def _ease_in_cubic(t: float) -> float:
-    """Accelerates from zero velocity — use for elements departing."""
-    return t * t * t
-
-
-def _ease_in_out_cubic(t: float) -> float:
-    """Accelerates then decelerates — use for settling to a value."""
-    if t < 0.5:
-        return 4.0 * t * t * t
-    return 1.0 - (-2.0 * t + 2.0) ** 3 / 2.0
-
-
-def _AnimPred(session_pct_all, pct_all, pct_sonnet, session_hours_remaining, outage=False,
-              countdown_pct=None, countdown_emptying=False):
-    """Create a fake prediction namespace for passing animated values to _make_status_image.
-
-    countdown_pct: optional explicit arc fill (0-100).  When set, the countdown
-    arc renders at this exact percentage instead of deriving from session_pct_all.
-    Used by the loading animation to sweep the arc independently of bar values.
-    countdown_emptying: when True the filled wedge is anchored at the leading
-    edge and the trailing edge sweeps clockwise (i.e. "draining" clockwise).
-    """
-    return SimpleNamespace(
-        session_pct_all=session_pct_all, pct_all=pct_all,
-        pct_sonnet=pct_sonnet, session_hours_remaining=session_hours_remaining,
-        outage=outage, session_reset_label="",
-        _countdown_pct=countdown_pct,
-        _countdown_emptying=countdown_emptying,
-    )
 
 
 class PennyApp(NSObject):
@@ -147,16 +98,6 @@ class PennyApp(NSObject):
         self._last_fetch_at: datetime | None = None
         self._event_monitor: Any = None
         self._pending_spawns: dict = {}
-        self._loading_frame: int = 0
-        self._loading_anim_timer: Any = None
-        self._anim_bar_vals: list[float] = [0.0, 0.0, 0.0]
-        self._anim_bar_targets: list[float] = [0.0, 0.0, 0.0]
-        # Countdown arc animation state (0-100 percentage).
-        self._anim_arc_val: float = 0.0
-        self._anim_arc_target: float = 0.0
-        self._anim_arc_emptying: bool = False
-        self._loading_phase: str = "loading"
-        self._data_pending: bool = False
 
         # Plugin system
         self._plugin_mgr = PluginManager()
@@ -170,11 +111,6 @@ class PennyApp(NSObject):
             btn.setTitle_("Loading\u2026")
             btn.setTarget_(self)
             btn.setAction_("togglePopover:")
-
-        # Animate "Loading" spinner until the first prediction arrives
-        self._loading_anim_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.1, self, "_loadingAnimTick:", None, True
-        )
 
         # Build popover
         self._vc = ControlCenterViewController.alloc().init()
@@ -277,183 +213,6 @@ class PennyApp(NSObject):
     def _timerFired_(self, timer: Any) -> None:
         self._worker.fetch()
 
-    # Bar animation constants
-    _CAL_BAR_TICKS = 20            # Sequential bar calibration: 2.0s total
-    _CAL_CLOCK_TICKS = 20          # Clock 360° sweep: 2.0s
-    # Total cycle: 40 ticks = 4.0s
-
-    @objc.python_method
-    def _tick_loading_bars(self, btn: Any, mode: str) -> None:
-        """Meter-calibration loading: bars sweep sequentially, then arc sweeps 0→100→0."""
-        n_bars = len(self._anim_bar_vals)
-        total_ticks = self._CAL_BAR_TICKS + self._CAL_CLOCK_TICKS
-        frame = self._loading_frame % total_ticks
-
-        # Check if data arrived and we're at a cycle boundary
-        if self._data_pending and self._loading_frame > 0 and frame == 0:
-            self._start_final_cycle()
-            self._tick_final_bars(btn)
-            return
-
-        # Reset all bars to 0 each tick, then set the active one
-        for i in range(n_bars):
-            self._anim_bar_vals[i] = 0.0
-            self._anim_bar_targets[i] = 0.0
-
-        if frame < self._CAL_BAR_TICKS:
-            # Bar calibration phase: sequential, one bar at a time
-            ticks_per_bar = self._CAL_BAR_TICKS / n_bars
-            bar_idx = min(int(frame / ticks_per_bar), n_bars - 1)
-            local_t = (frame - bar_idx * ticks_per_bar) / ticks_per_bar
-            # Triangle wave: 0→100→0 over one bar period, with easing
-            if local_t < 0.5:
-                pct = _ease_out_cubic(local_t / 0.5) * 100.0
-            else:
-                pct = (1.0 - _ease_in_cubic((local_t - 0.5) / 0.5)) * 100.0
-            self._anim_bar_vals[bar_idx] = pct
-            self._anim_bar_targets[bar_idx] = pct
-            # Arc stays empty during bar phase
-            self._anim_arc_val = 0.0
-        else:
-            # Arc sweep phase: triangle wave 0→100→0, with easing
-            clk_frame = frame - self._CAL_BAR_TICKS
-            t = clk_frame / self._CAL_CLOCK_TICKS
-            if t < 0.5:
-                self._anim_arc_val = _ease_out_cubic(t / 0.5) * 100.0
-            else:
-                self._anim_arc_val = (1.0 - _ease_in_cubic((t - 0.5) / 0.5)) * 100.0
-            self._anim_arc_emptying = t >= 0.5
-
-        self._loading_frame += 1
-
-        self._render_anim_frame(btn)
-
-    @objc.python_method
-    def _render_anim_frame(self, btn: Any) -> None:
-        """Build an _AnimPred from current anim state and paint onto the button."""
-        n_bars = len(self._anim_bar_vals)
-        fake = _AnimPred(
-            session_pct_all=self._anim_bar_vals[0] if n_bars > 0 else 0.0,
-            pct_all=self._anim_bar_vals[1] if n_bars > 1 else 0.0,
-            pct_sonnet=self._anim_bar_vals[2] if n_bars > 2 else 0.0,
-            session_hours_remaining=0.0,
-            countdown_pct=self._anim_arc_val,
-            countdown_emptying=self._anim_arc_emptying,
-        )
-        img = self._make_status_image(fake)
-        btn.setImage_(img)
-        btn.setImagePosition_(1)  # NSImageOnly
-        btn.setTitle_("")
-
-    @objc.python_method
-    def _start_final_cycle(self) -> None:
-        """Compute targets from prediction and start the final animation cycle."""
-        pred = self._prediction
-        show_sonnet = bool(self.config.get("menubar", {}).get("show_sonnet", True))
-        targets = [pred.session_pct_all, pred.pct_all]
-        if show_sonnet:
-            targets.append(pred.pct_sonnet)
-        self._anim_bar_targets = targets
-        # Resize bar vals to match targets
-        self._anim_bar_vals = [0.0] * len(targets)
-
-        # Arc target: time-based fill (elapsed fraction of 5-hour session window)
-        hrs_rem = getattr(pred, "session_hours_remaining", 0.0)
-        self._anim_arc_target = max(0.0, min(100.0, (1.0 - hrs_rem / 5.0) * 100.0))
-        self._anim_arc_emptying = False
-
-        self._loading_phase = "final_bars"
-        self._loading_frame = 0
-        self._data_pending = False
-
-    @objc.python_method
-    def _tick_final_bars(self, btn: Any) -> None:
-        """Final cycle bar phase: bars sweep sequentially 0→100→target over _CAL_BAR_TICKS ticks."""
-        n_bars = len(self._anim_bar_targets)
-        frame = self._loading_frame
-        ticks_per_bar = self._CAL_BAR_TICKS / n_bars if n_bars > 0 else 1
-
-        for i in range(n_bars):
-            bar_start = i * ticks_per_bar
-            bar_end = (i + 1) * ticks_per_bar
-            if frame < bar_start:
-                self._anim_bar_vals[i] = 0.0
-            elif frame >= bar_end:
-                self._anim_bar_vals[i] = self._anim_bar_targets[i]
-            else:
-                local_t = (frame - bar_start) / ticks_per_bar
-                target = self._anim_bar_targets[i]
-                if local_t < 0.5:
-                    # Rise 0 → 100 (ease-out: decelerates into peak)
-                    self._anim_bar_vals[i] = _ease_out_cubic(local_t / 0.5) * 100.0
-                else:
-                    # Settle 100 → target (ease-in-out: smooth landing)
-                    eased = _ease_in_out_cubic((local_t - 0.5) / 0.5)
-                    self._anim_bar_vals[i] = 100.0 + eased * (target - 100.0)
-
-        # Arc stays empty during bar phase
-        self._anim_arc_val = 0.0
-
-        self._loading_frame += 1
-        if self._loading_frame >= self._CAL_BAR_TICKS:
-            # Snap bars to final targets, transition to arc phase
-            for i in range(n_bars):
-                self._anim_bar_vals[i] = self._anim_bar_targets[i]
-            self._loading_phase = "final_clock"
-            self._loading_frame = 0
-
-        self._render_anim_frame(btn)
-
-    @objc.python_method
-    def _tick_final_clock(self, btn: Any) -> None:
-        """Final cycle arc phase: arc sweeps to session time-elapsed target."""
-        frame = self._loading_frame
-        t = frame / self._CAL_CLOCK_TICKS if self._CAL_CLOCK_TICKS > 0 else 1.0
-        t = min(t, 1.0)
-
-        target = self._anim_arc_target
-        if t < 0.5:
-            # Rise 0 → 100 (ease-out: decelerates into peak)
-            self._anim_arc_val = _ease_out_cubic(t / 0.5) * 100.0
-        else:
-            # Settle 100 → target (ease-in-out: smooth landing)
-            eased = _ease_in_out_cubic((t - 0.5) / 0.5)
-            self._anim_arc_val = 100.0 + eased * (target - 100.0)
-        self._anim_arc_emptying = False
-
-        self._loading_frame += 1
-        if self._loading_frame >= self._CAL_CLOCK_TICKS:
-            self._loading_phase = "done"
-            if self._loading_anim_timer is not None:
-                self._loading_anim_timer.invalidate()
-                self._loading_anim_timer = None
-            self._update_status_title()
-
-        self._render_anim_frame(btn)
-
-    def _loadingAnimTick_(self, timer: Any) -> None:
-        """Loading animation: bars sweep sequentially, clock sweeps 360°, then final settle."""
-        btn = self._status_item.button()
-        if btn is None:
-            return
-
-        # ── PHASE: final_bars — bars rise to 100 then settle to real values ──
-        if self._loading_phase == "final_bars":
-            self._tick_final_bars(btn)
-            return
-
-        # ── PHASE: final_clock — clock hands sweep to actual positions ──
-        if self._loading_phase == "final_clock":
-            self._tick_final_clock(btn)
-            return
-
-        # ── PHASE: loading — data just arrived? mark pending ──
-        if self._prediction is not None and self._loading_phase == "loading":
-            self._data_pending = True
-
-        # ── PHASE: loading — still waiting / looping with data_pending ──
-        self._tick_loading_bars(btn, "bars")
-
     # ── Config hot-reload ──────────────────────────────────────────────────
 
     def _checkConfig_(self, timer: Any) -> None:
@@ -467,7 +226,7 @@ class PennyApp(NSObject):
         """Re-read config.yaml and apply changes without restarting."""
         config, yaml_err = _safe_load_config()
         if yaml_err:
-            print(f"[penny] config hot-reload skipped (YAML error): {yaml_err}", flush=True)
+            logger.warning("config hot-reload skipped (YAML error): %s", yaml_err)
             return
         self._config_mtime = _config_mtime()
         self.config = config
@@ -486,7 +245,7 @@ class PennyApp(NSObject):
             })
         # Trigger a fetch so newly-added project tasks appear immediately
         self._worker.fetch()
-        print("[penny] config.yaml reloaded", flush=True)
+        logger.info("config.yaml reloaded")
 
     @objc.python_method
     def set_plugin_enabled(self, plugin_name: str, enabled: bool) -> None:
@@ -524,7 +283,6 @@ class PennyApp(NSObject):
         self.state = state
         self._prediction = pred
         self._last_fetch_at = datetime.now(timezone.utc)
-        bump_state_generation()
 
         # Notify about available updates (at most once per new version)
         update_check = result.get("update_check", {})
@@ -595,10 +353,9 @@ class PennyApp(NSObject):
         if len(rc_after) != len(rc_before):
             state["recently_completed"] = rc_after
             save_state(state)
-            print(
-                f"[penny] reconciled recently_completed: removed "
-                f"{len(rc_before) - len(rc_after)} false-completed task(s)",
-                flush=True,
+            logger.info(
+                "reconciled recently_completed: removed %d false-completed task(s)",
+                len(rc_before) - len(rc_after),
             )
 
         # Exclude tasks already in recently_completed or running from the display list.
@@ -694,158 +451,32 @@ class PennyApp(NSObject):
         return label
 
     @objc.python_method
-    def _make_status_image(self, pred: Any) -> Any:
-        """Draw monochromatic bars + 5-hour session clock as a template NSImage.
-
-        The clock treats one full 360° sweep as 5 hours (one session window).
-        A filled wedge grows clockwise from 12 o'clock to show how much
-        session time has elapsed (time-based, not usage-based).  All elements are drawn in black; the image
-        is marked as a template so macOS renders it in the standard menu bar
-        label color, adapting automatically to light/dark mode.
-        """
-        from AppKit import NSBezierPath, NSColor, NSImage
-        mb = self.config.get("menubar", {})
-        show_sonnet = bool(mb.get("show_sonnet", True))
-
-        pcts = [pred.session_pct_all, pred.pct_all]
-        if show_sonnet:
-            pcts.append(pred.pct_sonnet)
-
-        n_bars = len(pcts)
-        bar_w = 5.0
-        bar_h_max = 16.0
-        gap_v = 3.0
-        bars_w = n_bars * bar_w + (n_bars - 1) * gap_v
-        img_h = bar_h_max
-
-        clk_gap = 4.0
-        clk_size = img_h   # square, same height as the bars
-        img_w = bars_w + clk_gap + clk_size
-
-        # Monochromatic: black fill, macOS templates handle the rest.
-        fill = NSColor.blackColor()
-        dim = NSColor.blackColor().colorWithAlphaComponent_(0.25)
-
-        img = NSImage.alloc().initWithSize_((img_w, img_h))
-        img.lockFocus()
-        NSColor.clearColor().setFill()
-        NSBezierPath.fillRect_(((0, 0), (img_w, img_h)))
-
-        # ── Vertical bars ─────────────────────────────────────────────────
-        for i, pct in enumerate(pcts):
-            x = i * (bar_w + gap_v)
-            bar_r = 2.0
-
-            # Track — full height, dim
-            dim.setFill()
-            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                ((x, 0), (bar_w, img_h)), bar_r, bar_r
-            ).fill()
-
-            # Fill — rises from bottom
-            fill_h = (pct / 100.0) * img_h
-            if fill_h > 0:
-                r = min(bar_r, fill_h / 2.0)
-                fill.setFill()
-                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    ((x, 0), (bar_w, fill_h)), r, r
-                ).fill()
-
-        # ── 5-hour session clock ──────────────────────────────────────────
-        cx = bars_w + clk_gap + clk_size / 2
-        cy = img_h / 2
-        r = clk_size / 2 - 1.0   # 1 pt margin
-
-        # Dim filled circle (track)
-        dim.setFill()
-        NSBezierPath.bezierPathWithOvalInRect_(
-            ((cx - r, cy - r), (r * 2, r * 2))
-        ).fill()
-
-        # Determine fill: _countdown_pct (animation) or time-based from hours_remaining.
-        _cd_pct = getattr(pred, "_countdown_pct", None)
-        if _cd_pct is not None:
-            used_pct = _cd_pct
-        else:
-            hrs_rem = getattr(pred, "session_hours_remaining", 0.0)
-            used_pct = max(0.0, min(100.0, (1.0 - hrs_rem / 5.0) * 100.0))
-        sweep_deg = min(used_pct, 100.0) / 100.0 * 360.0
-        emptying = getattr(pred, "_countdown_emptying", False)
-
-        if sweep_deg >= 1.0:
-            if emptying:
-                # Emptying: trailing edge sweeps clockwise from 12 o'clock,
-                # filled region stays anchored at the leading edge.
-                start = 90.0 - (360.0 - sweep_deg)
-                end = 90.0 - 360.0
-            else:
-                # Filling: wedge grows clockwise from 12 o'clock.
-                start = 90.0
-                end = 90.0 - sweep_deg
-            wedge = NSBezierPath.bezierPath()
-            wedge.moveToPoint_((cx, cy))
-            wedge.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
-                (cx, cy), r, start, end, True
-            )
-            wedge.closePath()
-            fill.setFill()
-            wedge.fill()
-
-        img.unlockFocus()
-        img.setTemplate_(True)
-        return img
-
-    @objc.python_method
-    def _format_menubar_title(self, pred: Any, n_running: int) -> str:
-        """Return title string for the menubar (bars mode only)."""
-        if pred is None:
-            return f"\u2728{n_running}" if n_running > 0 else "Loading\u2026"
-        return f" \u2728{n_running}" if n_running > 0 else ""
-
-    @objc.python_method
     def _update_status_title(self) -> None:
-        # Don't clobber a running animation — timer calls us back when done
-        if self._loading_phase in ("loading", "final_bars", "final_clock"):
-            return
-
         pred = self._prediction
-        n_running = len(self.state.get("agents_running", []))
+        agents_running = self.state.get("agents_running", [])
+        n_running = len(agents_running)
         btn = self._status_item.button()
         if btn is None:
             return
-
-        title = self._format_menubar_title(pred, n_running)
-
-        # Always render bars image when prediction exists
         if pred:
-            img = self._make_status_image(pred)
-            btn.setImage_(img)
-            show_title = n_running > 0
-            btn.setImagePosition_(2 if show_title else 1)   # NSImageLeft / NSImageOnly
-        else:
-            btn.setImage_(None)
-            btn.setImagePosition_(0)   # NSNoImage
-
-        btn.setTitle_(title or "")
-
-        # Tooltip — shown automatically after ~0.8s hover; no Accessibility permission needed
-        if pred:
-            pct_s = int(round(pred.session_pct_all))
-            pct_all = int(round(pred.pct_all))
-            pct_son = int(round(pred.pct_sonnet))
             reset_time = self._compact_reset_time(pred.session_reset_label)
-            reset_label = f"resets {reset_time}" if reset_time else "—"
-            btn.setToolTip_(
-                f"Session: {pct_s}%  ({reset_label})\n"
-                f"Weekly all models: {pct_all}%\n"
-                f"Weekly Sonnet: {pct_son}%"
-            )
+            session = f"{pred.session_pct_all:.0f}/{reset_time}" if reset_time else f"{pred.session_pct_all:.0f}"
+            stats = f"{session} {pred.pct_all:.0f}/{pred.pct_sonnet:.0f}"
+            prefix = "\u26a0\ufe0f " if pred.outage else ""
+            if n_running > 0:
+                btn.setTitle_(f"{prefix}{stats} \u2728{n_running}")
+            else:
+                btn.setTitle_(f"{prefix}{stats}")
+        elif n_running > 0:
+            btn.setTitle_(f"\u2728{n_running}")
+        else:
+            btn.setTitle_("Loading\u2026")
 
     # ── Task/agent actions ────────────────────────────────────────────────
 
     def spawnTask_(self, task: Any) -> None:
         if self.config.get("work", {}).get("agent_permissions") == "off":
-            print(f"[penny] agent_permissions=off — skipping spawn of {task.task_id}", flush=True)
+            logger.info("agent_permissions=off — skipping spawn of %s", task.task_id)
             return
 
         # Optimistic main-thread state update before background thread starts
@@ -873,7 +504,7 @@ class PennyApp(NSObject):
                 )
                 payload: dict = {"task_id": task_id, "record": record, "error": None}
             except Exception as exc:
-                print(f"[penny] spawn error for {task_id}: {exc}", flush=True)
+                logger.error("spawn error for %s: %s", task_id, exc)
                 payload = {"task_id": task_id, "record": None, "error": str(exc)}
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "_finishSpawn:", payload, False
@@ -887,7 +518,7 @@ class PennyApp(NSObject):
         task = self._pending_spawns.pop(task_id, None)
 
         if payload.get("error") or payload.get("record") is None:
-            print(f"[penny] spawn failed for {task_id}: {payload.get('error')}", flush=True)
+            logger.error("spawn failed for %s: %s", task_id, payload.get("error"))
             self._worker.fetch()
             return
 
@@ -1002,7 +633,7 @@ class PennyApp(NSObject):
             try:
                 self._plugin_mgr.dispatch_action(str(action), payload)
             except Exception as exc:
-                print(f"[penny] pluginAction_ error: {exc}", flush=True)
+                logger.error("pluginAction_ error: %s", exc)
             finally:
                 self._worker.fetch(force=True)
 
@@ -1010,12 +641,18 @@ class PennyApp(NSObject):
 
     @objc.python_method
     def _write_config(self) -> None:
-        """Persist self.config to config.yaml."""
+        """Persist self.config to config.yaml (atomic write via tmp + rename)."""
+        tmp_path = CONFIG_PATH.with_suffix(".yaml.tmp")
         try:
-            with CONFIG_PATH.open("w") as f:
+            with tmp_path.open("w") as f:
                 yaml.dump(self.config, f, default_flow_style=False, allow_unicode=True)
+            os.replace(tmp_path, CONFIG_PATH)
         except Exception as exc:
-            print(f"[penny] _write_config failed: {exc}", flush=True)
+            logger.error("_write_config failed: %s", exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     @objc.python_method
     def _sync_launchd_service(self) -> None:
@@ -1031,7 +668,7 @@ class PennyApp(NSObject):
             with PLIST_LAUNCHAGENTS.open("rb") as f:
                 pl = plistlib.load(f)
         except Exception as exc:
-            print(f"[penny] _sync_launchd_service read error: {exc}", flush=True)
+            logger.error("_sync_launchd_service read error: %s", exc)
             return
 
         if (pl.get("KeepAlive", True) == want_keep_alive
@@ -1045,7 +682,7 @@ class PennyApp(NSObject):
         try:
             PLIST_LAUNCHAGENTS.write_bytes(plist_bytes)
         except Exception as exc:
-            print(f"[penny] _sync_launchd_service write error: {exc}", flush=True)
+            logger.error("_sync_launchd_service write error: %s", exc)
             return
 
         # Update source copy in SCRIPT_DIR (for install.sh re-runs)
@@ -1070,13 +707,6 @@ class PennyApp(NSObject):
         self._write_config()
         self._sync_launchd_service()
 
-    @objc.python_method
-    def set_menubar_mode(self, mode: str) -> None:
-        """Set the menubar display mode, persist to config.yaml, and refresh."""
-        self.config.setdefault("menubar", {})["mode"] = mode
-        self._write_config()
-        self._update_status_title()
-
     def _newTaskSheet_(self, sender: Any) -> None:
         subprocess.run(["open", str(CONFIG_PATH)], check=False)
 
@@ -1099,31 +729,29 @@ class PennyApp(NSObject):
         subprocess.run(["open", str(CONFIG_PATH)], check=False)
 
     def quitApp_(self, sender: Any) -> None:
-        svc = (self.config or {}).get("service", {})
-        keep_alive = bool(svc.get("keep_alive", True))
-
-        if keep_alive:
-            # Keep Alive is on — "Quit" means reboot: kill this instance and
-            # have launchd start a fresh one so the menubar icon reappears.
-            # launchctl kickstart -k stops the running job then immediately
-            # restarts it, which is the equivalent of a controlled reboot.
-            #
-            # start_new_session detaches the child into its own process group
-            # so launchd does not kill it when it cleans up our service exit.
-            uid = os.getuid()
-            subprocess.Popen(
-                ["launchctl", "kickstart", "-k", f"gui/{uid}/{PLIST_LABEL}"],
-                close_fds=True,
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            # terminate_() cleans up AppKit state; kickstart -k will SIGKILL
-            # us momentarily if terminate_ hasn't exited by then — that's fine.
-            NSApplication.sharedApplication().terminate_(sender)
-        else:
-            # Keep Alive is off — plain quit, launchd will not restart.
-            NSApplication.sharedApplication().terminate_(sender)
+        # Shut down the dashboard HTTP server cleanly so the thread exits
+        # and the port file is removed before we terminate.
+        try:
+            self._dashboard.shutdown()
+        except Exception:
+            pass
+        # Patch KeepAlive=false so launchd does not restart us after we exit.
+        # _sync_launchd_service() restores the correct value from config.yaml on next start.
+        if PLIST_LAUNCHAGENTS.exists():
+            try:
+                with PLIST_LAUNCHAGENTS.open("rb") as f:
+                    pl = plistlib.load(f)
+                pl["KeepAlive"] = False
+                PLIST_LAUNCHAGENTS.write_bytes(plistlib.dumps(pl))
+            except Exception as exc:
+                logger.error("quitApp_ plist patch failed: %s", exc)
+        # Unregister from launchd (fire-and-forget; prevents restart on exit).
+        subprocess.Popen(
+            ["launchctl", "bootout", f"gui/{os.getuid()}/{PLIST_LABEL}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        NSApplication.sharedApplication().terminate_(sender)
 
     # ── Core load/refresh cycle ───────────────────────────────────────────
 
@@ -1170,7 +798,7 @@ class PennyApp(NSObject):
                 config.setdefault("work", {})["agent_permissions"] = "off"
                 self.config = config
                 self._write_config()
-                print("[penny] Full-permission consent declined — reverted to off", flush=True)
+                logger.info("Full-permission consent declined — reverted to off")
             else:
                 save_state(self.state)
 
@@ -1180,7 +808,7 @@ class PennyApp(NSObject):
             issues = run_preflight(config)
             issues.extend(self._plugin_mgr.get_all_preflight_checks(config))
         except Exception as exc:
-            print(f"[penny] preflight error: {exc}", flush=True)
+            logger.error("preflight error: %s", exc)
             issues = []
         tool_errors = [
             i for i in issues
@@ -1204,7 +832,7 @@ class PennyApp(NSObject):
         if not self._ready_tasks:
             return
         if self.config.get("work", {}).get("agent_permissions") == "off":
-            print("[penny] agent_permissions=off — automatic spawning disabled", flush=True)
+            logger.info("agent_permissions=off — automatic spawning disabled")
             return
         spawned = []
         for task in self._ready_tasks:
@@ -1251,7 +879,7 @@ def _acquire_pid_lock() -> None:
         try:
             old_pid = int(pid_file.read_text().strip())
             os.kill(old_pid, 0)
-            print(f"Penny already running (PID {old_pid}). Exiting.")
+            logger.warning("Penny already running (PID %d). Exiting.", old_pid)
             raise SystemExit(1)
         except (ProcessLookupError, ValueError):
             pass
@@ -1270,10 +898,71 @@ def _release_pid_lock() -> None:
         pass
 
 
+# ── Signal-driven agent cleanup ───────────────────────────────────────────────
+
+def _cleanup_orphan_sessions() -> None:
+    """Kill tmux/screen sessions owned by Penny so agents don't outlive the app.
+
+    Reads agents_running from state.json and sends kill to each session.
+    Called from signal handlers (SIGTERM/SIGINT) and from the finally block
+    of main() as a last resort.
+    """
+    try:
+        state = load_state()
+    except Exception:
+        return
+
+    import shutil
+
+    tmux_bin = shutil.which("tmux")
+    screen_bin = shutil.which("screen")
+
+    for agent in state.get("agents_running", []):
+        session = agent.get("session", "")
+        pid = agent.get("pid") or 0
+        if session:
+            agent_tmux = agent.get("tmux_bin") or tmux_bin
+            if agent_tmux:
+                subprocess.run(
+                    [agent_tmux, "kill-session", "-t", session],
+                    capture_output=True, check=False,
+                )
+            if screen_bin:
+                subprocess.run(
+                    [screen_bin, "-X", "-S", session, "quit"],
+                    capture_output=True, check=False,
+                )
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+    # Clear agents_running so a restarted Penny doesn't re-kill them.
+    state["agents_running"] = []
+    try:
+        save_state(state)
+    except Exception:
+        pass
+
+
+def _install_signal_handlers() -> None:
+    """Register SIGTERM and SIGINT handlers that clean up orphan agent sessions."""
+    def _handler(signum: int, _frame: Any) -> None:
+        logger.info("Received signal %d — cleaning up agent sessions", signum)
+        _cleanup_orphan_sessions()
+        _release_pid_lock()
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
     _acquire_pid_lock()
+    _install_signal_handlers()
     try:
         setproctitle.setproctitle("Penny")
 
@@ -1285,6 +974,7 @@ def main() -> None:
 
         app.run()
     finally:
+        _cleanup_orphan_sessions()
         _release_pid_lock()
 
 

@@ -7,49 +7,14 @@ and task/agent action methods — all without requiring a running AppKit event l
 from __future__ import annotations
 
 import os
+import signal
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from penny.analysis import Prediction
-from penny.app import _AnimPred
-
-# ── _AnimPred ─────────────────────────────────────────────────────────────────
-
-
-class TestAnimPred:
-    """Test the _AnimPred factory for loading-animation prediction namespaces."""
-
-    def test_basic_fields(self):
-        ns = _AnimPred(session_pct_all=10.0, pct_all=40.0, pct_sonnet=25.0,
-                       session_hours_remaining=3.5)
-        assert ns.session_pct_all == 10.0
-        assert ns.pct_all == 40.0
-        assert ns.pct_sonnet == 25.0
-        assert ns.session_hours_remaining == 3.5
-        assert ns.outage is False
-        assert ns.session_reset_label == ""
-
-    def test_outage_flag(self):
-        ns = _AnimPred(0, 0, 0, 0, outage=True)
-        assert ns.outage is True
-
-    def test_countdown_pct_default_none(self):
-        ns = _AnimPred(0, 0, 0, 0)
-        assert ns._countdown_pct is None
-
-    def test_explicit_countdown_pct(self):
-        ns = _AnimPred(0, 0, 0, 0, countdown_pct=75.0)
-        assert ns._countdown_pct == 75.0
-
-    def test_countdown_pct_zero(self):
-        """Zero is a valid countdown value (empty arc), distinct from None."""
-        ns = _AnimPred(0, 0, 0, 0, countdown_pct=0.0)
-        assert ns._countdown_pct == 0.0
-        # Explicitly check not None
-        assert ns._countdown_pct is not None
-
 
 # ── _compact_reset_time ──────────────────────────────────────────────────────
 #
@@ -241,28 +206,57 @@ class TestSafeLoadConfig:
 
 
 class TestStatusTitleFormatting:
-    """Test the title string construction — bars mode only (no text stats)."""
+    """Test the title string construction from _update_status_title."""
 
     def _format_title(self, pred: Prediction | None, agents_running: list) -> str:
-        """Simulate the bars-only title logic from PennyApp._format_menubar_title."""
+        """Simulate the title formatting logic from PennyApp._update_status_title."""
         n_running = len(agents_running)
-        if pred is None:
-            return f"\u2728{n_running}" if n_running > 0 else "Loading\u2026"
-        return f" \u2728{n_running}" if n_running > 0 else ""
+        if pred:
+            reset_time = _compact_reset_time(pred.session_reset_label)
+            session = f"{pred.session_pct_all:.0f}/{reset_time}" if reset_time else f"{pred.session_pct_all:.0f}"
+            stats = f"{session} {pred.pct_all:.0f}/{pred.pct_sonnet:.0f}"
+            prefix = "\u26a0\ufe0f " if pred.outage else ""
+            if n_running > 0:
+                return f"{prefix}{stats} \u2728{n_running}"
+            else:
+                return f"{prefix}{stats}"
+        elif n_running > 0:
+            return f"\u2728{n_running}"
+        else:
+            return "Loading\u2026"
 
     def test_loading_when_no_prediction_no_agents(self):
-        assert self._format_title(None, []) == "Loading\u2026"
+        with patch("penny.analysis.uses_24h_time", return_value=False):
+            assert self._format_title(None, []) == "Loading\u2026"
 
     def test_agents_only_when_no_prediction(self):
-        assert self._format_title(None, [{"pid": 1}]) == "\u27281"
+        with patch("penny.analysis.uses_24h_time", return_value=False):
+            assert self._format_title(None, [{"pid": 1}]) == "\u27281"
 
-    def test_empty_title_with_prediction_no_agents(self):
+    def test_stats_with_prediction_no_agents(self):
         pred = Prediction(session_pct_all=10.0, pct_all=42.0, pct_sonnet=30.0, session_reset_label="2pm")
-        assert self._format_title(pred, []) == ""
+        with patch("penny.analysis.uses_24h_time", return_value=False):
+            title = self._format_title(pred, [])
+        assert "10/2pm" in title
+        assert "42/30" in title
 
-    def test_sparkle_with_prediction_and_agents(self):
+    def test_stats_with_agents(self):
         pred = Prediction(session_pct_all=10.0, pct_all=42.0, pct_sonnet=30.0, session_reset_label="2pm")
-        assert self._format_title(pred, [{"pid": 1}]) == " \u27281"
+        with patch("penny.analysis.uses_24h_time", return_value=False):
+            title = self._format_title(pred, [{"pid": 1}])
+        assert "\u27281" in title
+
+    def test_outage_prefix(self):
+        pred = Prediction(session_pct_all=10.0, pct_all=42.0, pct_sonnet=30.0, session_reset_label="2pm", outage=True)
+        with patch("penny.analysis.uses_24h_time", return_value=False):
+            title = self._format_title(pred, [])
+        assert title.startswith("\u26a0\ufe0f ")
+
+    def test_24h_reset_time(self):
+        pred = Prediction(session_pct_all=10.0, pct_all=42.0, pct_sonnet=30.0, session_reset_label="2pm")
+        with patch("penny.analysis.uses_24h_time", return_value=True):
+            title = self._format_title(pred, [])
+        assert "10/14" in title
 
 
 # ── _didFetchData_ callback logic ────────────────────────────────────────────
@@ -1148,7 +1142,6 @@ def _make_fake_app(config=None, state=None, tmp_path=None):
     app._plugin_mgr.filter_all_tasks.return_value = []
     app._plugin_mgr.notify_agent_completed.return_value = None
     app._plugin_mgr.notify_agent_spawned.return_value = None
-    app._anim_arc_emptying = False
     app._config_mtime = None
     # Stub methods that may be called internally (override per-test as needed)
     app._hot_reload_config = MagicMock()
@@ -1156,6 +1149,9 @@ def _make_fake_app(config=None, state=None, tmp_path=None):
     app._update_status_title = MagicMock()
     app._spawn_agents = MagicMock()
     app._write_config = MagicMock()
+    # _compact_reset_time is called by _update_status_title; bind the real method
+    from penny.app import PennyApp
+    app._compact_reset_time = lambda label: PennyApp._compact_reset_time(app, label)
     if tmp_path:
         app._state_path = tmp_path / "state.json"
     return app
@@ -1217,7 +1213,7 @@ class TestSetPluginEnabled:
 
 
 class TestWriteConfigDirect:
-    """Call PennyApp._write_config directly to cover lines 534-538."""
+    """Call PennyApp._write_config directly — atomic write via tmp + os.replace."""
 
     def test_writes_config_to_disk(self, tmp_path):
         import yaml
@@ -1230,12 +1226,73 @@ class TestWriteConfigDirect:
         data = yaml.safe_load(cfg_file.read_text())
         assert data["projects"] == [{"path": "/tmp/p"}]
 
+    def test_atomic_write_uses_tmp_then_replace(self, tmp_path):
+        """Verify the write goes through .yaml.tmp and os.replace is called."""
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        app = _make_fake_app(config={"x": 1})
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("os.replace", wraps=os.replace) as mock_replace:
+            PennyApp._write_config(app)
+        # os.replace should have been called with tmp -> final path
+        mock_replace.assert_called_once()
+        src, dst = mock_replace.call_args[0]
+        assert str(src).endswith(".yaml.tmp")
+        assert dst == cfg_file
+
+    def test_tmp_file_cleaned_up_after_success(self, tmp_path):
+        """After successful write, no .yaml.tmp file should remain."""
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        app = _make_fake_app(config={"y": 2})
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            PennyApp._write_config(app)
+        tmp_file = cfg_file.with_suffix(".yaml.tmp")
+        assert not tmp_file.exists()
+
     def test_handles_write_error_gracefully(self, tmp_path):
         """If the file cannot be written, the method prints an error (no raise)."""
         from penny.app import PennyApp
         app = _make_fake_app(config={"k": "v"})
-        # Point CONFIG_PATH to a directory (write will fail)
-        with patch("penny.app.CONFIG_PATH", tmp_path):
+        # Point CONFIG_PATH to a nonexistent deep path so tmp open fails
+        bad_path = tmp_path / "nonexistent_dir" / "config.yaml"
+        with patch("penny.app.CONFIG_PATH", bad_path):
+            PennyApp._write_config(app)  # must not raise
+
+    def test_tmp_file_cleaned_up_on_replace_failure(self, tmp_path):
+        """If os.replace fails, the .yaml.tmp file is cleaned up."""
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        app = _make_fake_app(config={"z": 3})
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("os.replace", side_effect=OSError("disk full")):
+            PennyApp._write_config(app)  # must not raise
+        tmp_file = cfg_file.with_suffix(".yaml.tmp")
+        assert not tmp_file.exists()
+
+    def test_original_file_preserved_on_replace_failure(self, tmp_path):
+        """If os.replace fails, the original config.yaml remains unchanged."""
+        import yaml
+
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("original: true\n")
+        app = _make_fake_app(config={"new": "data"})
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("os.replace", side_effect=OSError("disk full")):
+            PennyApp._write_config(app)
+        data = yaml.safe_load(cfg_file.read_text())
+        assert data == {"original": True}
+
+    def test_cleanup_failure_is_silently_swallowed(self, tmp_path):
+        """If tmp cleanup also fails after a write error, no exception propagates."""
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        app = _make_fake_app(config={"a": 1})
+        # Make os.replace fail AND make unlink fail
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("os.replace", side_effect=OSError("disk full")), \
+             patch.object(Path, "unlink", side_effect=OSError("perm denied")):
             PennyApp._write_config(app)  # must not raise
 
 
@@ -1382,8 +1439,7 @@ class TestFinishSpawnDirect:
         app = _make_fake_app(state={"agents_running": []})
         app._pending_spawns = {"t-1": task}
         record = {"task_id": "t-1", "status": "running", "pid": 42}
-        with patch("penny.app.save_state"), patch("penny.app.send_notification"):
-            PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
+        PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
         assert len(app.state["agents_running"]) == 1
         assert app.state["agents_running"][0]["task_id"] == "t-1"
 
@@ -1393,8 +1449,7 @@ class TestFinishSpawnDirect:
         app = _make_fake_app(state={"agents_running": []})
         app._pending_spawns = {"t-1": task}
         record = {"task_id": "t-1", "status": "running", "pid": 42}
-        with patch("penny.app.save_state"), patch("penny.app.send_notification"):
-            PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
+        PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
         assert "t-1" not in app._pending_spawns
 
     def test_error_triggers_fetch_not_state(self):
@@ -1423,8 +1478,7 @@ class TestFinishSpawnDirect:
         )
         app._pending_spawns = {"t-1": task}
         record = {"task_id": "t-1", "status": "running", "pid": 42}
-        with patch("penny.app.send_notification") as mock_notify, \
-             patch("penny.app.save_state"):
+        with patch("penny.app.send_notification") as mock_notify:
             PennyApp._finishSpawn_(app, {"task_id": "t-1", "record": record, "error": None})
         mock_notify.assert_not_called()
 
@@ -1595,15 +1649,17 @@ class TestStopAgentDirect:
 class TestHotReloadConfigDirect:
     """Call PennyApp._hot_reload_config directly to cover lines 214-232."""
 
-    def test_skips_on_yaml_error(self, tmp_path, capsys):
+    def test_skips_on_yaml_error(self, tmp_path, caplog):
+        import logging
+
         from penny.app import PennyApp
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text("bad: [unclosed\n")
         app = _make_fake_app()
-        with patch("penny.app.CONFIG_PATH", cfg_file):
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             caplog.at_level(logging.WARNING, logger="penny"):
             PennyApp._hot_reload_config(app)
-        out = capsys.readouterr().out
-        assert "YAML error" in out
+        assert "YAML error" in caplog.text
 
     def test_applies_new_config(self, tmp_path):
         from penny.app import PennyApp
@@ -1696,185 +1752,26 @@ class TestCompactResetTimeDirect:
             assert self._call("some label") == "some label"
 
 
-# ── _normalize_config (legacy menubar mode migration) ─────────────────────
-
-
-class TestNormalizeConfig:
-    """Test _normalize_config migrates legacy menubar mode names."""
-
-    def test_migrates_hbars_to_bars(self):
-        from penny.app import _normalize_config
-        cfg = {"menubar": {"mode": "hbars"}}
-        result = _normalize_config(cfg)
-        assert result["menubar"]["mode"] == "bars"
-
-    def test_migrates_bars_plus_t_to_bars(self):
-        from penny.app import _normalize_config
-        cfg = {"menubar": {"mode": "bars+t"}}
-        result = _normalize_config(cfg)
-        assert result["menubar"]["mode"] == "bars"
-
-    def test_migrates_hbars_plus_t_to_bars(self):
-        from penny.app import _normalize_config
-        cfg = {"menubar": {"mode": "hbars+t"}}
-        result = _normalize_config(cfg)
-        assert result["menubar"]["mode"] == "bars"
-
-    def test_preserves_current_bars_mode(self):
-        from penny.app import _normalize_config
-        cfg = {"menubar": {"mode": "bars"}}
-        result = _normalize_config(cfg)
-        assert result["menubar"]["mode"] == "bars"
-
-    def test_migrates_compact_to_bars(self):
-        from penny.app import _normalize_config
-        cfg = {"menubar": {"mode": "compact"}}
-        result = _normalize_config(cfg)
-        assert result["menubar"]["mode"] == "bars"
-
-    def test_migrates_minimal_to_bars(self):
-        from penny.app import _normalize_config
-        cfg = {"menubar": {"mode": "minimal"}}
-        result = _normalize_config(cfg)
-        assert result["menubar"]["mode"] == "bars"
-
-    def test_no_menubar_section(self):
-        from penny.app import _normalize_config
-        cfg = {"projects": []}
-        result = _normalize_config(cfg)
-        assert result == {"projects": []}
-
-    def test_empty_config(self):
-        from penny.app import _normalize_config
-        cfg = {}
-        result = _normalize_config(cfg)
-        assert result == {}
-
-    def test_menubar_not_dict(self):
-        """If menubar is not a dict (e.g. None), config is returned unchanged."""
-        from penny.app import _normalize_config
-        cfg = {"menubar": None}
-        result = _normalize_config(cfg)
-        assert result == {"menubar": None}
-
-    def test_no_mode_key_in_menubar(self):
-        from penny.app import _normalize_config
-        cfg = {"menubar": {"show_sonnet": True}}
-        result = _normalize_config(cfg)
-        assert result["menubar"] == {"show_sonnet": True}
-
-
-# ── quitApp_ (direct call into penny/app.py) ─────────────────────────────────
-
-
-class TestQuitAppDirect:
-    """Call PennyApp.quitApp_ directly to cover lines 1091-1116."""
-
-    def test_keep_alive_true_spawns_kickstart_and_terminates(self):
-        """When keep_alive is on, quitApp_ spawns launchctl kickstart and terminates."""
-        import subprocess as sp
-
-        from penny.app import PennyApp
-        app = _make_fake_app(config={"service": {"keep_alive": True}})
-        mock_ns_app = MagicMock()
-        with (
-            patch("penny.app.NSApplication") as mock_ns_cls,
-            patch("subprocess.Popen") as mock_popen,
-            patch("os.getuid", return_value=501),
-        ):
-            mock_ns_cls.sharedApplication.return_value = mock_ns_app
-            PennyApp.quitApp_(app, None)
-        # Verify Popen was called with kickstart args and detach flags
-        mock_popen.assert_called_once()
-        call_args = mock_popen.call_args
-        cmd = call_args[0][0]
-        assert cmd[0] == "launchctl"
-        assert cmd[1] == "kickstart"
-        assert "-k" in cmd
-        assert "gui/501/com.gpxl.penny" in cmd[3]
-        assert call_args[1]["start_new_session"] is True
-        assert call_args[1]["stdout"] is sp.DEVNULL
-        assert call_args[1]["stderr"] is sp.DEVNULL
-        assert call_args[1]["close_fds"] is True
-        # NSApplication.terminate_ called
-        mock_ns_app.terminate_.assert_called_once_with(None)
-
-    def test_keep_alive_false_just_terminates(self):
-        """When keep_alive is off, quitApp_ just terminates (no launchctl)."""
-        from penny.app import PennyApp
-        app = _make_fake_app(config={"service": {"keep_alive": False}})
-        mock_ns_app = MagicMock()
-        with (
-            patch("penny.app.NSApplication") as mock_ns_cls,
-            patch("subprocess.Popen") as mock_popen,
-        ):
-            mock_ns_cls.sharedApplication.return_value = mock_ns_app
-            PennyApp.quitApp_(app, None)
-        mock_popen.assert_not_called()
-        mock_ns_app.terminate_.assert_called_once_with(None)
-
-    def test_keep_alive_default_true_when_service_empty(self):
-        """Default behavior: service: {} → keep_alive defaults to True."""
-        from penny.app import PennyApp
-        app = _make_fake_app(config={"service": {}})
-        mock_ns_app = MagicMock()
-        with (
-            patch("penny.app.NSApplication") as mock_ns_cls,
-            patch("subprocess.Popen") as mock_popen,
-            patch("os.getuid", return_value=501),
-        ):
-            mock_ns_cls.sharedApplication.return_value = mock_ns_app
-            PennyApp.quitApp_(app, None)
-        # keep_alive defaults to True, so kickstart is called
-        mock_popen.assert_called_once()
-
-    def test_keep_alive_default_true_when_no_config(self):
-        """No config at all → keep_alive defaults to True."""
-        from penny.app import PennyApp
-        app = _make_fake_app(config={})
-        mock_ns_app = MagicMock()
-        with (
-            patch("penny.app.NSApplication") as mock_ns_cls,
-            patch("subprocess.Popen") as mock_popen,
-            patch("os.getuid", return_value=501),
-        ):
-            mock_ns_cls.sharedApplication.return_value = mock_ns_app
-            PennyApp.quitApp_(app, None)
-        mock_popen.assert_called_once()
-
-    def test_keep_alive_none_config(self):
-        """When config is None, keep_alive defaults to True."""
-        from penny.app import PennyApp
-        app = _make_fake_app()
-        app.config = None  # edge case
-        mock_ns_app = MagicMock()
-        with (
-            patch("penny.app.NSApplication") as mock_ns_cls,
-            patch("subprocess.Popen") as mock_popen,
-            patch("os.getuid", return_value=501),
-        ):
-            mock_ns_cls.sharedApplication.return_value = mock_ns_app
-            PennyApp.quitApp_(app, None)
-        mock_popen.assert_called_once()
-
-
-# ── _checkConfig_ (direct call) ──────────────────────────────────────────────
+# ── _checkConfig_ (direct call into penny/app.py) ────────────────────────────
 
 
 class TestCheckConfigDirect:
-    """Call PennyApp._checkConfig_ to cover lines 436-440."""
+    """Call PennyApp._checkConfig_ to cover lines 206-210."""
 
-    def test_noop_when_mtime_is_none(self):
+    def test_triggers_hot_reload_when_mtime_changes(self, tmp_path):
         from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects: []\n")
         app = _make_fake_app()
-        app._config_mtime = None
+        app._config_mtime = 0.0  # stale mtime
         reload_called = []
         app._hot_reload_config = lambda: reload_called.append(True)
-        with patch("penny.app._config_mtime", return_value=None):
-            PennyApp._checkConfig_(app, None)
-        assert reload_called == []
+        with patch("penny.app.CONFIG_PATH", cfg_file):
+            with patch("penny.app._config_mtime", return_value=99999.0):
+                PennyApp._checkConfig_(app, None)
+        assert reload_called
 
-    def test_noop_when_mtime_unchanged(self):
+    def test_no_reload_when_mtime_same(self, tmp_path):
         from penny.app import PennyApp
         app = _make_fake_app()
         app._config_mtime = 12345.0
@@ -1884,22 +1781,104 @@ class TestCheckConfigDirect:
             PennyApp._checkConfig_(app, None)
         assert reload_called == []
 
-    def test_reloads_when_mtime_changes(self):
+    def test_no_reload_when_file_missing(self):
         from penny.app import PennyApp
         app = _make_fake_app()
-        app._config_mtime = 12345.0
         reload_called = []
         app._hot_reload_config = lambda: reload_called.append(True)
-        with patch("penny.app._config_mtime", return_value=99999.0):
+        with patch("penny.app._config_mtime", return_value=None):
             PennyApp._checkConfig_(app, None)
-        assert reload_called == [True]
+        assert reload_called == []
+
+
+# ── _update_status_title (direct call into penny/app.py) ─────────────────────
+
+
+class TestUpdateStatusTitleDirect:
+    """Call PennyApp._update_status_title directly to cover lines 400-420."""
+
+    def test_loading_when_no_pred_no_agents(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": []})
+        app._prediction = None
+        PennyApp._update_status_title(app)
+        btn = app._status_item.button()
+        btn.setTitle_.assert_called()
+        title = btn.setTitle_.call_args[0][0]
+        assert title == "Loading\u2026"
+
+    def test_sparkle_when_agents_running_no_pred(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": [{"pid": 1}]})
+        app._prediction = None
+        PennyApp._update_status_title(app)
+        btn = app._status_item.button()
+        title = btn.setTitle_.call_args[0][0]
+        assert "\u2728" in title
+        assert "1" in title
+
+    def test_stats_shown_with_prediction(self):
+        from penny.analysis import Prediction
+        from penny.app import PennyApp
+        pred = Prediction(session_pct_all=10.0, pct_all=42.0, pct_sonnet=30.0, session_reset_label="2pm")
+        app = _make_fake_app(state={"agents_running": []})
+        app._prediction = pred
+        with patch("penny.app.uses_24h_time", return_value=False):
+            PennyApp._update_status_title(app)
+        btn = app._status_item.button()
+        title = btn.setTitle_.call_args[0][0]
+        assert "42" in title
+        assert "30" in title
+
+    def test_outage_prefix_shown(self):
+        from penny.analysis import Prediction
+        from penny.app import PennyApp
+        pred = Prediction(pct_all=50.0, pct_sonnet=30.0, session_reset_label="", outage=True)
+        app = _make_fake_app(state={"agents_running": []})
+        app._prediction = pred
+        with patch("penny.app.uses_24h_time", return_value=False):
+            PennyApp._update_status_title(app)
+        btn = app._status_item.button()
+        title = btn.setTitle_.call_args[0][0]
+        assert title.startswith("\u26a0\ufe0f ")
+
+    def test_agents_count_with_prediction(self):
+        from penny.analysis import Prediction
+        from penny.app import PennyApp
+        pred = Prediction(pct_all=50.0, session_reset_label="3pm")
+        app = _make_fake_app(state={"agents_running": [{"pid": 1}, {"pid": 2}]})
+        app._prediction = pred
+        with patch("penny.app.uses_24h_time", return_value=False):
+            PennyApp._update_status_title(app)
+        btn = app._status_item.button()
+        title = btn.setTitle_.call_args[0][0]
+        assert "\u27282" in title
+
+    def test_noop_when_button_is_none(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={"agents_running": []})
+        app._status_item.button.return_value = None
+        PennyApp._update_status_title(app)  # must not raise
+
+
+# ── _timerFired_ (direct call) ───────────────────────────────────────────────
+
+
+class TestTimerFiredDirect:
+    """Call PennyApp._timerFired_ directly to cover line 202."""
+
+    def test_calls_worker_fetch(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        PennyApp._timerFired_(app, None)
+        app._worker.fetch.assert_called_once_with()
 
 
 # ── refreshNow_ (direct call) ────────────────────────────────────────────────
 
 
 class TestRefreshNowDirect:
-    """Call PennyApp.refreshNow_ to cover lines 480-483."""
+    """Call PennyApp.refreshNow_ directly to cover lines 252-253."""
 
     def test_sets_refreshing_and_fetches(self):
         from penny.app import PennyApp
@@ -1909,11 +1888,361 @@ class TestRefreshNowDirect:
         app._worker.fetch.assert_called_once_with(force=True)
 
 
+# ── _sync_launchd_service (direct call) ──────────────────────────────────────
+
+
+class TestSyncLaunchdServiceDirect:
+    """Call PennyApp._sync_launchd_service directly to cover lines 607-641."""
+
+    def _make_plist(self, path, keep_alive=True, run_at_load=True):
+        import plistlib
+        path.write_bytes(plistlib.dumps({
+            "Label": "com.gpxl.penny",
+            "KeepAlive": keep_alive,
+            "RunAtLoad": run_at_load,
+            "WorkingDirectory": "/tmp/penny",
+        }))
+
+    def test_noop_when_plist_missing(self, tmp_path):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={"service": {"keep_alive": False}})
+        with patch("penny.app.PLIST_LAUNCHAGENTS", tmp_path / "missing.plist"):
+            PennyApp._sync_launchd_service(app)  # must not raise
+
+    def test_noop_when_already_in_sync(self, tmp_path):
+
+        from penny.app import PennyApp
+        plist = tmp_path / "test.plist"
+        self._make_plist(plist, keep_alive=True, run_at_load=True)
+        app = _make_fake_app(config={"service": {"keep_alive": True, "launch_at_login": True}})
+        original_bytes = plist.read_bytes()
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist):
+            PennyApp._sync_launchd_service(app)
+        # Plist file not rewritten
+        assert plist.read_bytes() == original_bytes
+
+    def test_updates_plist_when_keep_alive_differs(self, tmp_path):
+        import plistlib
+
+        from penny.app import PennyApp
+        plist = tmp_path / "test.plist"
+        self._make_plist(plist, keep_alive=True, run_at_load=True)
+        app = _make_fake_app(config={"service": {"keep_alive": False, "launch_at_login": True}})
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist), \
+             patch("penny.app._script_dir_from_plist", return_value=None):
+            PennyApp._sync_launchd_service(app)
+        pl = plistlib.loads(plist.read_bytes())
+        assert pl["KeepAlive"] is False
+
+    def test_updates_source_copy_in_script_dir(self, tmp_path):
+        import plistlib
+
+        from penny.app import PennyApp
+        plist = tmp_path / "test.plist"
+        self._make_plist(plist, keep_alive=True, run_at_load=True)
+        script_dir = tmp_path / "scripts"
+        script_dir.mkdir()
+        app = _make_fake_app(config={"service": {"keep_alive": False, "launch_at_login": True}})
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist), \
+             patch("penny.app._script_dir_from_plist", return_value=script_dir), \
+             patch("penny.app.PLIST_LABEL", "com.gpxl.penny"):
+            PennyApp._sync_launchd_service(app)
+        source_plist = script_dir / "com.gpxl.penny.plist"
+        assert source_plist.exists()
+        pl = plistlib.loads(source_plist.read_bytes())
+        assert pl["KeepAlive"] is False
+
+    def test_handles_read_error_gracefully(self, tmp_path):
+        from penny.app import PennyApp
+        plist = tmp_path / "test.plist"
+        plist.write_bytes(b"not a valid plist")
+        app = _make_fake_app(config={"service": {"keep_alive": False}})
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist):
+            PennyApp._sync_launchd_service(app)  # must not raise
+
+    def test_handles_write_error_gracefully(self, tmp_path):
+        from penny.app import PennyApp
+        plist = tmp_path / "test.plist"
+        self._make_plist(plist, keep_alive=True, run_at_load=True)
+        app = _make_fake_app(config={"service": {"keep_alive": False}})
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist), \
+             patch.object(Path, "write_bytes", side_effect=OSError("read-only")):
+            PennyApp._sync_launchd_service(app)  # must not raise
+
+
+# ── toggleKeepAlive_ / toggleLaunchAtLogin_ (direct call) ────────────────────
+
+
+class TestToggleServiceDirect:
+    """Call PennyApp.toggleKeepAlive_ and toggleLaunchAtLogin_ directly."""
+
+    def test_toggle_keep_alive_true(self, tmp_path):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={})
+        write_called = []
+        sync_called = []
+        app._write_config = lambda: write_called.append(True)
+        app._sync_launchd_service = lambda: sync_called.append(True)
+        sender = MagicMock()
+        sender.state.return_value = True
+        PennyApp.toggleKeepAlive_(app, sender)
+        assert app.config["service"]["keep_alive"] is True
+        assert write_called
+        assert sync_called
+
+    def test_toggle_keep_alive_false(self, tmp_path):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={"service": {"keep_alive": True}})
+        app._write_config = MagicMock()
+        app._sync_launchd_service = MagicMock()
+        sender = MagicMock()
+        sender.state.return_value = False
+        PennyApp.toggleKeepAlive_(app, sender)
+        assert app.config["service"]["keep_alive"] is False
+
+    def test_toggle_launch_at_login_true(self, tmp_path):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={})
+        app._write_config = MagicMock()
+        app._sync_launchd_service = MagicMock()
+        sender = MagicMock()
+        sender.state.return_value = True
+        PennyApp.toggleLaunchAtLogin_(app, sender)
+        assert app.config["service"]["launch_at_login"] is True
+
+    def test_toggle_launch_at_login_false(self, tmp_path):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={"service": {"launch_at_login": True}})
+        app._write_config = MagicMock()
+        app._sync_launchd_service = MagicMock()
+        sender = MagicMock()
+        sender.state.return_value = False
+        PennyApp.toggleLaunchAtLogin_(app, sender)
+        assert app.config["service"]["launch_at_login"] is False
+
+
+# ── spawnTask_ agent_permissions guard (direct call) ─────────────────────────
+
+
+class TestSpawnTaskPermissionsGuard:
+    """Test the agent_permissions=off early return in spawnTask_ (line 425-427)."""
+
+    def _make_task(self, task_id="t-1"):
+        from penny.tasks import Task
+        return Task(task_id, "Fix bug", "P1", "/tmp/proj", "proj")
+
+    def test_noop_when_permissions_off(self, caplog):
+        import logging
+
+        from penny.app import PennyApp
+        task = self._make_task()
+        app = _make_fake_app(
+            config={"work": {"agent_permissions": "off"}},
+            state={"agents_running": []},
+        )
+        app._all_ready_tasks = [task]
+        app._pending_spawns = {}
+        with caplog.at_level(logging.INFO, logger="penny"):
+            PennyApp.spawnTask_(app, task)
+        assert "agent_permissions=off" in caplog.text
+        # Should NOT have modified all_ready_tasks (early return before mutation)
+        assert len(app._all_ready_tasks) == 1
+
+
+# ── _didFetchData_ reconciliation and external completion ─────────────────────
+
+
+class TestDidFetchDataReconciliation:
+    """Test the reconciliation and external completion paths in _didFetchData_."""
+
+    def _make_result(self, **kwargs):
+        base = {
+            "state": {"agents_running": [], "recently_completed": []},
+            "prediction": None,
+            "newly_done": [],
+        }
+        base.update(kwargs)
+        return base
+
+    def test_external_completion_detected_and_added(self):
+        from penny.app import PennyApp
+        from penny.tasks import Task
+        ext_task = Task("ext-1", "External done", "P2", "/tmp/p", "proj")
+        app = _make_fake_app()
+        app._plugin_mgr.get_all_tasks.return_value = []
+        app._plugin_mgr.get_all_completed_tasks.return_value = [ext_task]
+        app._plugin_mgr.filter_all_tasks.return_value = []
+        app.config = {"notifications": {"completion": False}}
+        state = {"agents_running": [], "recently_completed": []}
+        result = self._make_result(state=state)
+        with patch("penny.app.should_trigger", return_value=False), \
+             patch("penny.app.save_state"):
+            PennyApp._didFetchData_(app, result)
+        rc = app.state.get("recently_completed", [])
+        assert any(a["task_id"] == "ext-1" for a in rc)
+        assert any(a.get("completed_by") == "external" for a in rc)
+
+    def test_external_completion_notification_sent(self):
+        from penny.app import PennyApp
+        from penny.tasks import Task
+        ext_task = Task("ext-1", "External done", "P2", "/tmp/p", "proj")
+        app = _make_fake_app()
+        app._plugin_mgr.get_all_tasks.return_value = []
+        app._plugin_mgr.get_all_completed_tasks.return_value = [ext_task]
+        app._plugin_mgr.filter_all_tasks.return_value = []
+        app.config = {"notifications": {"completion": True}}
+        state = {"agents_running": [], "recently_completed": []}
+        result = self._make_result(state=state)
+        with patch("penny.app.should_trigger", return_value=False), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.send_notification") as mock_notify:
+            PennyApp._didFetchData_(app, result)
+        assert mock_notify.called
+        # Check the notification text mentions "externally"
+        msg = mock_notify.call_args[0][1]
+        assert "externally" in msg
+
+    def test_reconciliation_removes_false_completed(self, caplog):
+        import logging
+
+        from penny.app import PennyApp
+        from penny.tasks import Task
+        task = Task("t-1", "Reappearing task", "P2", "/tmp/p", "proj")
+        app = _make_fake_app()
+        app._plugin_mgr.get_all_tasks.return_value = [task]
+        app._plugin_mgr.get_all_completed_tasks.return_value = []
+        app._plugin_mgr.filter_all_tasks.return_value = []
+        state = {
+            "agents_running": [],
+            "recently_completed": [{"task_id": "t-1", "status": "completed"}],
+        }
+        result = self._make_result(state=state)
+        with patch("penny.app.should_trigger", return_value=False), \
+             patch("penny.app.save_state"), \
+             caplog.at_level(logging.INFO, logger="penny"):
+            PennyApp._didFetchData_(app, result)
+        # t-1 reappeared in bd ready, so it should be removed from recently_completed
+        rc = app.state.get("recently_completed", [])
+        assert not any(a["task_id"] == "t-1" for a in rc)
+        assert "reconciled" in caplog.text
+
+    def test_ready_tasks_exclude_running_and_completed(self):
+        """Tasks in agents_running or recently_completed are excluded from the
+        ready list. Note: t-2 is only in recently_completed, NOT in all_tasks
+        (completed tasks don't reappear in bd ready), and t-1 is in all_tasks
+        but also in agents_running so it gets filtered out."""
+        from penny.app import PennyApp
+        from penny.tasks import Task
+        t1 = Task("t-1", "Task 1", "P2", "/tmp/p", "proj")
+        t3 = Task("t-3", "Task 3", "P2", "/tmp/p", "proj")
+        app = _make_fake_app()
+        # t-1 and t-3 appear in bd ready; t-2 is only in recently_completed
+        app._plugin_mgr.get_all_tasks.return_value = [t1, t3]
+        app._plugin_mgr.get_all_completed_tasks.return_value = []
+        app._plugin_mgr.filter_all_tasks.return_value = []
+        state = {
+            "agents_running": [{"task_id": "t-1"}],
+            "recently_completed": [{"task_id": "t-2"}],
+        }
+        result = self._make_result(state=state)
+        with patch("penny.app.should_trigger", return_value=False), \
+             patch("penny.app.save_state"):
+            PennyApp._didFetchData_(app, result)
+        ready_ids = [t.task_id for t in app._all_ready_tasks]
+        assert "t-3" in ready_ids
+        assert "t-1" not in ready_ids
+
+
+# ── _newTaskSheet_ (direct call) ─────────────────────────────────────────────
+
+
+class TestNewTaskSheetDirect:
+    """Call PennyApp._newTaskSheet_ to cover line 658."""
+
+    def test_opens_config_file(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        with patch("subprocess.run") as mock_run:
+            PennyApp._newTaskSheet_(app, None)
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert args[0] == "open"
+
+
+# ── openPrefs_ (direct call) ─────────────────────────────────────────────────
+
+
+class TestOpenPrefsDirect:
+    """Call PennyApp.openPrefs_ to cover line 676."""
+
+    def test_opens_config_file(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        with patch("subprocess.run") as mock_run:
+            PennyApp.openPrefs_(app, None)
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert args[0] == "open"
+
+
+# ── stopAgentByTaskId_ with session (covers tmux/screen kill) ─────────────────
+
+
+class TestStopAgentWithSession:
+    """Test stopAgentByTaskId_ when agent has a non-empty session string."""
+
+    def test_kills_tmux_and_screen_session(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={
+            "agents_running": [
+                {"task_id": "t-1", "pid": 0, "session": "penny-t-1",
+                 "tmux_bin": "/usr/local/bin/tmux"},
+            ],
+            "recently_completed": [],
+        })
+        with patch("penny.app.save_state"), \
+             patch("subprocess.run") as mock_run:
+            PennyApp.stopAgentByTaskId_(app, "t-1")
+        # Should have called tmux kill-session and screen quit
+        calls = [c[0][0] for c in mock_run.call_args_list]
+        assert any("kill-session" in c for c in calls)
+        assert any("screen" in c for c in calls)
+
+    def test_uses_custom_tmux_bin_from_agent(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={
+            "agents_running": [
+                {"task_id": "t-1", "pid": 0, "session": "my-sess",
+                 "tmux_bin": "/custom/path/tmux"},
+            ],
+            "recently_completed": [],
+        })
+        with patch("penny.app.save_state"), \
+             patch("subprocess.run") as mock_run:
+            PennyApp.stopAgentByTaskId_(app, "t-1")
+        first_call = mock_run.call_args_list[0][0][0]
+        assert first_call[0] == "/custom/path/tmux"
+
+    def test_defaults_tmux_bin_when_not_in_agent(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(state={
+            "agents_running": [
+                {"task_id": "t-1", "pid": 0, "session": "my-sess"},
+            ],
+            "recently_completed": [],
+        })
+        with patch("penny.app.save_state"), \
+             patch("subprocess.run") as mock_run:
+            PennyApp.stopAgentByTaskId_(app, "t-1")
+        first_call = mock_run.call_args_list[0][0][0]
+        assert first_call[0] == "/opt/homebrew/bin/tmux"
+
+
 # ── viewReport_ (direct call) ────────────────────────────────────────────────
 
 
 class TestViewReportDirect:
-    """Call PennyApp.viewReport_ to cover lines 1075-1086."""
+    """Call PennyApp.viewReport_ directly to cover lines 663-673."""
 
     def test_opens_dashboard_url(self):
         from penny.app import PennyApp
@@ -1924,23 +2253,9 @@ class TestViewReportDirect:
         app._popover.isShown.return_value = False
         with patch("subprocess.run") as mock_run:
             PennyApp.viewReport_(app, None)
-        app._dashboard.ensure_started.assert_called_once()
-        mock_run.assert_called_once_with(["open", "http://127.0.0.1:7432/"], check=False)
-
-    def test_fallback_to_static_report(self):
-        from penny.app import PennyApp
-        app = _make_fake_app()
-        app._dashboard = MagicMock()
-        app._dashboard.ensure_started.side_effect = RuntimeError("fail")
-        app._popover = MagicMock()
-        app._popover.isShown.return_value = False
-        with (
-            patch("penny.app.generate_report", return_value="/tmp/report.html") as mock_gen,
-            patch("penny.app.open_report") as mock_open,
-        ):
-            PennyApp.viewReport_(app, None)
-        mock_gen.assert_called_once()
-        mock_open.assert_called_once_with("/tmp/report.html")
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert "http://127.0.0.1:7432/" in args
 
     def test_closes_popover_when_shown(self):
         from penny.app import PennyApp
@@ -1953,1310 +2268,362 @@ class TestViewReportDirect:
             PennyApp.viewReport_(app, None)
         app._popover.performClose_.assert_called_once()
 
-    def test_fallback_swallows_double_exception(self):
-        """If both dashboard and static report fail, no exception propagates."""
+    def test_fallback_to_static_report_on_dashboard_error(self):
         from penny.app import PennyApp
         app = _make_fake_app()
         app._dashboard = MagicMock()
-        app._dashboard.ensure_started.side_effect = RuntimeError("dashboard fail")
+        app._dashboard.ensure_started.side_effect = RuntimeError("fail")
         app._popover = MagicMock()
         app._popover.isShown.return_value = False
-        with (
-            patch("penny.app.generate_report", side_effect=RuntimeError("report fail")),
-            patch("penny.app.open_report"),
-        ):
+        with patch("penny.app.generate_report", return_value="/tmp/report.html") as mock_gen, \
+             patch("penny.app.open_report") as mock_open:
+            PennyApp.viewReport_(app, None)
+        mock_gen.assert_called_once()
+        mock_open.assert_called_once_with("/tmp/report.html")
+
+    def test_silent_when_both_dashboard_and_fallback_fail(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._dashboard = MagicMock()
+        app._dashboard.ensure_started.side_effect = RuntimeError("fail")
+        app._popover = MagicMock()
+        app._popover.isShown.return_value = False
+        with patch("penny.app.generate_report", side_effect=RuntimeError("also fail")):
             PennyApp.viewReport_(app, None)  # must not raise
 
 
-# ── openPrefs_ (direct call) ─────────────────────────────────────────────────
+# ── quitApp_ (direct call) ──────────────────────────────────────────────────
 
 
-class TestOpenPrefsDirect:
-    """Call PennyApp.openPrefs_ to cover line 1089."""
+class TestQuitAppDirect:
+    """Call PennyApp.quitApp_ directly to cover lines 681-701."""
 
-    def test_opens_config_file(self):
+    def test_patches_plist_and_bootout(self, tmp_path):
+        import plistlib
+
+        from penny.app import PennyApp
+        plist = tmp_path / "test.plist"
+        plist.write_bytes(plistlib.dumps({
+            "Label": "com.gpxl.penny",
+            "KeepAlive": True,
+            "RunAtLoad": True,
+        }))
+        app = _make_fake_app()
+        app._dashboard = MagicMock()
+        mock_ns_app = MagicMock()
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist), \
+             patch("subprocess.Popen") as mock_popen, \
+             patch("penny.app.NSApplication") as mock_ns:
+            mock_ns.sharedApplication.return_value = mock_ns_app
+            PennyApp.quitApp_(app, None)
+        # KeepAlive should be False in the patched plist
+        pl = plistlib.loads(plist.read_bytes())
+        assert pl["KeepAlive"] is False
+        mock_popen.assert_called_once()
+        mock_ns_app.terminate_.assert_called_once()
+
+    def test_handles_missing_plist_gracefully(self, tmp_path):
         from penny.app import PennyApp
         app = _make_fake_app()
-        with patch("subprocess.run") as mock_run:
-            PennyApp.openPrefs_(app, None)
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "open"
-        assert "config.yaml" in cmd[1]
+        app._dashboard = MagicMock()
+        with patch("penny.app.PLIST_LAUNCHAGENTS", tmp_path / "missing.plist"), \
+             patch("subprocess.Popen"), \
+             patch("penny.app.NSApplication") as mock_ns:
+            PennyApp.quitApp_(app, None)  # must not raise
+        mock_ns.sharedApplication().terminate_.assert_called()
 
+    def test_handles_plist_patch_error(self, tmp_path, caplog):
+        import logging
 
-# ── _sync_launchd_service (direct call) ──────────────────────────────────────
-
-
-class TestSyncLaunchdServiceDirect:
-    """Call PennyApp._sync_launchd_service to cover lines 1010-1056."""
-
-    def _make_plist(self, path, keep_alive=True, run_at_load=True):
-        import plistlib
-        path.write_bytes(plistlib.dumps({
-            "Label": "com.gpxl.penny",
-            "KeepAlive": keep_alive,
-            "RunAtLoad": run_at_load,
-            "WorkingDirectory": "/usr/local/penny",
-        }))
-
-    def test_noop_when_plist_missing(self, tmp_path):
-        from penny.app import PennyApp
-        app = _make_fake_app(config={"service": {"keep_alive": False}})
-        with patch("penny.app.PLIST_LAUNCHAGENTS", tmp_path / "missing.plist"):
-            PennyApp._sync_launchd_service(app)
-        # No error should occur
-
-    def test_noop_when_already_in_sync(self, tmp_path):
-        import plistlib
-
-        from penny.app import PennyApp
-        plist = tmp_path / "test.plist"
-        self._make_plist(plist, keep_alive=True, run_at_load=True)
-        app = _make_fake_app(config={"service": {"keep_alive": True, "launch_at_login": True}})
-        with patch("penny.app.PLIST_LAUNCHAGENTS", plist):
-            PennyApp._sync_launchd_service(app)
-        # Verify plist was NOT rewritten (file should be the same)
-        pl = plistlib.loads(plist.read_bytes())
-        assert pl["KeepAlive"] is True
-
-    def test_updates_plist_when_keep_alive_changes(self, tmp_path):
-        import plistlib
-
-        from penny.app import PennyApp
-        plist = tmp_path / "test.plist"
-        self._make_plist(plist, keep_alive=True, run_at_load=True)
-        app = _make_fake_app(config={"service": {"keep_alive": False, "launch_at_login": True}})
-        with (
-            patch("penny.app.PLIST_LAUNCHAGENTS", plist),
-            patch("penny.app._script_dir_from_plist", return_value=None),
-        ):
-            PennyApp._sync_launchd_service(app)
-        pl = plistlib.loads(plist.read_bytes())
-        assert pl["KeepAlive"] is False
-
-    def test_updates_source_copy_in_script_dir(self, tmp_path):
-        import plistlib
-
-        from penny.app import PennyApp
-        plist = tmp_path / "test.plist"
-        script_dir = tmp_path / "scripts"
-        script_dir.mkdir()
-        self._make_plist(plist, keep_alive=True, run_at_load=True)
-        app = _make_fake_app(config={"service": {"keep_alive": False, "launch_at_login": True}})
-        with (
-            patch("penny.app.PLIST_LAUNCHAGENTS", plist),
-            patch("penny.app._script_dir_from_plist", return_value=script_dir),
-        ):
-            PennyApp._sync_launchd_service(app)
-        source_copy = script_dir / "com.gpxl.penny.plist"
-        assert source_copy.exists()
-        pl = plistlib.loads(source_copy.read_bytes())
-        assert pl["KeepAlive"] is False
-
-    def test_handles_corrupt_plist_gracefully(self, tmp_path):
         from penny.app import PennyApp
         plist = tmp_path / "test.plist"
         plist.write_bytes(b"not a valid plist")
-        app = _make_fake_app(config={"service": {"keep_alive": False}})
-        with patch("penny.app.PLIST_LAUNCHAGENTS", plist):
-            PennyApp._sync_launchd_service(app)  # must not raise
+        app = _make_fake_app()
+        app._dashboard = MagicMock()
+        with patch("penny.app.PLIST_LAUNCHAGENTS", plist), \
+             patch("subprocess.Popen"), \
+             patch("penny.app.NSApplication"), \
+             caplog.at_level(logging.ERROR, logger="penny"):
+            PennyApp.quitApp_(app, None)  # must not raise
+        assert "quitApp_" in caplog.text
 
-
-# ── _update_status_title (direct call) ────────────────────────────────────────
-
-
-class TestUpdateStatusTitleDirect:
-    """Call PennyApp._update_status_title to cover lines 788-832."""
-
-    def test_returns_early_during_final_animation(self):
+    def test_shuts_down_dashboard(self):
         from penny.app import PennyApp
         app = _make_fake_app()
-        app._loading_phase = "final_bars"
-        btn = app._status_item.button.return_value
-        PennyApp._update_status_title(app)
-        btn.setTitle_.assert_not_called()
-
-    def test_returns_early_when_btn_none(self):
-        from penny.app import PennyApp
-        app = _make_fake_app()
-        app._loading_phase = "done"
-        app._status_item.button.return_value = None
-        PennyApp._update_status_title(app)
-        # Should not raise
-
-    def test_sets_image_and_empty_title_with_prediction(self):
-        from penny.analysis import Prediction
-        from penny.app import PennyApp
-        pred = Prediction(session_pct_all=10.0, pct_all=42.0, pct_sonnet=30.0,
-                          session_reset_label="2pm")
-        app = _make_fake_app(config={"menubar": {"mode": "bars", "show_sonnet": True}})
-        app._prediction = pred
-        app._loading_phase = "done"
-        app._loading_anim_timer = None
-        app._format_menubar_title = lambda p, n: PennyApp._format_menubar_title(app, p, n)
-        app._compact_reset_time = lambda lbl: PennyApp._compact_reset_time(app, lbl)
-        app._make_status_image = MagicMock(return_value=MagicMock())
-        PennyApp._update_status_title(app)
-        btn = app._status_item.button.return_value
-        # Bars mode: title is empty, image is set
-        btn.setTitle_.assert_called_once_with("")
-        app._make_status_image.assert_called_once()
-        btn.setImage_.assert_called_once()
-        btn.setToolTip_.assert_called_once()
-
-    def test_returns_early_during_loading_phase(self):
-        """_update_status_title returns early during 'loading' phase.
-
-        The loading animation timer is now invalidated at the end of the
-        final-clock animation cycle, not inside _update_status_title.
-        """
-        from penny.analysis import Prediction
-        from penny.app import PennyApp
-        pred = Prediction(session_pct_all=10.0, pct_all=42.0, pct_sonnet=30.0)
-        app = _make_fake_app(config={"menubar": {"mode": "bars"}})
-        app._prediction = pred
-        app._loading_phase = "loading"
-        mock_timer = MagicMock()
-        app._loading_anim_timer = mock_timer
-        PennyApp._update_status_title(app)
-        # Early return: nothing happens — timer stays, phase stays
-        btn = app._status_item.button.return_value
-        btn.setTitle_.assert_not_called()
-        mock_timer.invalidate.assert_not_called()
-        assert app._loading_phase == "loading"
-
-    def test_sets_title_loading_when_no_prediction(self):
-        from penny.app import PennyApp
-        app = _make_fake_app()
-        app._prediction = None
-        app._loading_phase = "done"
-        app._loading_anim_timer = None
-        app._format_menubar_title = lambda p, n: PennyApp._format_menubar_title(app, p, n)
-        PennyApp._update_status_title(app)
-        btn = app._status_item.button.return_value
-        title = btn.setTitle_.call_args[0][0]
-        assert title == "Loading\u2026"
-
-
-# ── set_menubar_mode (direct call) ───────────────────────────────────────────
-
-
-class TestSetMenubarModeDirect:
-    """Call PennyApp.set_menubar_mode to cover lines 1064-1068."""
-
-    def test_sets_mode_and_persists(self, tmp_path):
-        from penny.app import PennyApp
-        app = _make_fake_app(config={})
-        write_called = []
-        app._write_config = lambda: write_called.append(True)
-        PennyApp.set_menubar_mode(app, "bars")
-        assert app.config["menubar"]["mode"] == "bars"
-        assert write_called == [True]
-        app._update_status_title.assert_called_once()
-
-
-# ── toggleKeepAlive_ / toggleLaunchAtLogin_ (direct call) ────────────────────
-
-
-class TestToggleServiceDirect:
-    """Call PennyApp.toggleKeepAlive_ and toggleLaunchAtLogin_."""
-
-    def test_toggle_keep_alive(self):
-        from penny.app import PennyApp
-        app = _make_fake_app(config={})
-        write_called = []
-        sync_called = []
-        app._write_config = lambda: write_called.append(True)
-        app._sync_launchd_service = lambda: sync_called.append(True)
-        sender = MagicMock()
-        sender.state.return_value = 0  # False
-        PennyApp.toggleKeepAlive_(app, sender)
-        assert app.config["service"]["keep_alive"] is False
-        assert write_called == [True]
-        assert sync_called == [True]
-
-    def test_toggle_launch_at_login(self):
-        from penny.app import PennyApp
-        app = _make_fake_app(config={})
-        write_called = []
-        sync_called = []
-        app._write_config = lambda: write_called.append(True)
-        app._sync_launchd_service = lambda: sync_called.append(True)
-        sender = MagicMock()
-        sender.state.return_value = 1  # True
-        PennyApp.toggleLaunchAtLogin_(app, sender)
-        assert app.config["service"]["launch_at_login"] is True
-        assert write_called == [True]
-        assert sync_called == [True]
-
-
-# ── spawnTask_ agent_permissions=off (direct call) ───────────────────────────
-
-
-class TestSpawnTaskPermissionsOff:
-    """Call PennyApp.spawnTask_ with agent_permissions=off to cover lines 836-839."""
-
-    def test_skips_when_permissions_off(self):
-        from penny.app import PennyApp
-        from penny.tasks import Task
-        app = _make_fake_app(config={"work": {"agent_permissions": "off"}})
-        app._pending_spawns = {}
-        task = Task("t-1", "Fix bug", "P1", "/tmp/proj", "proj")
-        app._all_ready_tasks = [task]
-        PennyApp.spawnTask_(app, task)
-        # Should not have added to pending_spawns
-        assert "t-1" not in app._pending_spawns
-        # all_ready_tasks should remain unchanged
-        assert len(app._all_ready_tasks) == 1
-
-    def test_optimistic_update_when_permissions_allowed(self):
-        """spawnTask_ performs optimistic state update before background spawn."""
-        from penny.app import PennyApp
-        from penny.tasks import Task
-        app = _make_fake_app(config={})
-        app._pending_spawns = {}
-        t1 = Task("t-1", "Fix bug", "P1", "/tmp/proj", "proj")
-        t2 = Task("t-2", "Add feat", "P2", "/tmp/proj", "proj")
-        app._all_ready_tasks = [t1, t2]
-        with patch("threading.Thread") as mock_thread:
-            mock_thread.return_value.start = MagicMock()
-            PennyApp.spawnTask_(app, t1)
-        # Task removed from ready list optimistically
-        assert len(app._all_ready_tasks) == 1
-        assert app._all_ready_tasks[0].task_id == "t-2"
-        # Task added to pending_spawns
-        assert "t-1" in app._pending_spawns
-        # VC updated
-        app._vc.updateWithData_.assert_called_once()
-        # Thread started
-        mock_thread.return_value.start.assert_called_once()
-
-
-# ── _spawn_agents (direct call) ──────────────────────────────────────────────
-
-
-class TestSpawnAgentsDirect:
-    """Call PennyApp._spawn_agents to cover lines 1193-1218."""
-
-    def _make_task(self, task_id="t-1"):
-        from penny.tasks import Task
-        return Task(task_id, f"Task {task_id}", "P2", "/tmp/proj", "proj")
-
-    def test_noop_when_no_ready_tasks(self):
-        from penny.app import PennyApp
-        app = _make_fake_app()
-        app._ready_tasks = []
-        with patch("penny.app.spawn_claude_agent") as mock_spawn:
-            PennyApp._spawn_agents(app)
-        mock_spawn.assert_not_called()
-
-    def test_noop_when_permissions_off(self):
-        from penny.app import PennyApp
-        app = _make_fake_app(config={"work": {"agent_permissions": "off"}})
-        app._ready_tasks = [self._make_task()]
-        with patch("penny.app.spawn_claude_agent") as mock_spawn:
-            PennyApp._spawn_agents(app)
-        mock_spawn.assert_not_called()
-
-    def test_spawns_all_ready_tasks(self):
-        from penny.analysis import Prediction
-        from penny.app import PennyApp
-        t1 = self._make_task("t-1")
-        t2 = self._make_task("t-2")
-        pred = Prediction(pct_all=50.0, projected_pct_all=70.0, days_remaining=2.0)
-        app = _make_fake_app(state={"agents_running": []})
-        app._ready_tasks = [t1, t2]
-        app._prediction = pred
-        app.config = {"notifications": {"spawn": True}}
-        record = {"task_id": "t-1", "status": "running", "pid": 42}
-        with (
-            patch("penny.app.spawn_claude_agent", return_value=record) as mock_spawn,
-            patch("penny.app.save_state"),
-            patch("penny.app.send_notification") as mock_notify,
-        ):
-            PennyApp._spawn_agents(app)
-        assert mock_spawn.call_count == 2
-        assert len(app.state["agents_running"]) == 2
-        mock_notify.assert_called_once()
-        msg = mock_notify.call_args[0][1]
-        assert "2 agent(s)" in msg
-
-    def test_no_notification_when_disabled(self):
-        from penny.analysis import Prediction
-        from penny.app import PennyApp
-        t1 = self._make_task("t-1")
-        pred = Prediction(pct_all=50.0, projected_pct_all=70.0, days_remaining=2.0)
-        app = _make_fake_app(state={"agents_running": []})
-        app._ready_tasks = [t1]
-        app._prediction = pred
-        app.config = {"notifications": {"spawn": False}}
-        record = {"task_id": "t-1", "status": "running", "pid": 42}
-        with (
-            patch("penny.app.spawn_claude_agent", return_value=record),
-            patch("penny.app.save_state"),
-            patch("penny.app.send_notification") as mock_notify,
-        ):
-            PennyApp._spawn_agents(app)
-        mock_notify.assert_not_called()
-
-    def test_no_notification_when_no_prediction(self):
-        from penny.app import PennyApp
-        t1 = self._make_task("t-1")
-        app = _make_fake_app(state={"agents_running": []})
-        app._ready_tasks = [t1]
-        app._prediction = None
-        app.config = {"notifications": {"spawn": True}}
-        record = {"task_id": "t-1", "status": "running", "pid": 42}
-        with (
-            patch("penny.app.spawn_claude_agent", return_value=record),
-            patch("penny.app.save_state"),
-            patch("penny.app.send_notification") as mock_notify,
-        ):
-            PennyApp._spawn_agents(app)
-        mock_notify.assert_not_called()
-
-
-# ── _didFetchData_ external completion detection ─────────────────────────────
-
-
-class TestDidFetchDataExternalCompletion:
-    """Test external task completion detection and reconciliation in _didFetchData_."""
-
-    def _make_result(self, **kwargs):
-        base = {
-            "state": {"agents_running": [], "recently_completed": []},
-            "prediction": None,
-            "newly_done": [],
-        }
-        base.update(kwargs)
-        return base
-
-    def test_external_completed_tasks_added_to_recently_completed(self):
-        from penny.app import PennyApp
-        from penny.tasks import Task
-        ext_task = Task("ext-1", "External fix", "P1", "/tmp/proj", "proj")
-        app = _make_fake_app(config={"notifications": {"completion": False}})
-        app._plugin_mgr.get_all_completed_tasks.return_value = [ext_task]
-        app._plugin_mgr.get_all_tasks.return_value = []
-        app._plugin_mgr.filter_all_tasks.return_value = []
-        result = self._make_result(
-            state={"agents_running": [], "recently_completed": []},
-        )
-        with (
-            patch("penny.app.should_trigger", return_value=False),
-            patch("penny.app.save_state"),
-        ):
-            PennyApp._didFetchData_(app, result)
-        rc = app.state.get("recently_completed", [])
-        assert any(a["task_id"] == "ext-1" for a in rc)
-        assert rc[-1]["completed_by"] == "external"
-
-    def test_external_completion_notification_sent(self):
-        from penny.app import PennyApp
-        from penny.tasks import Task
-        ext_task = Task("ext-1", "External fix", "P1", "/tmp/proj", "proj")
-        app = _make_fake_app(config={"notifications": {"completion": True}})
-        app._plugin_mgr.get_all_completed_tasks.return_value = [ext_task]
-        app._plugin_mgr.get_all_tasks.return_value = []
-        app._plugin_mgr.filter_all_tasks.return_value = []
-        result = self._make_result(
-            state={"agents_running": [], "recently_completed": []},
-        )
-        with (
-            patch("penny.app.should_trigger", return_value=False),
-            patch("penny.app.save_state"),
-            patch("penny.app.send_notification") as mock_notify,
-        ):
-            PennyApp._didFetchData_(app, result)
-        assert mock_notify.call_count >= 1
-        # The notification about the external completion
-        calls = [c for c in mock_notify.call_args_list if "externally" in c[0][1]]
-        assert len(calls) == 1
-
-    def test_reconcile_removes_false_completed(self):
-        """Tasks that reappear in bd ready are removed from recently_completed."""
-        from penny.app import PennyApp
-        from penny.tasks import Task
-        reappeared_task = Task("t-1", "Fix", "P1", "/tmp/proj", "proj")
-        app = _make_fake_app(config={})
-        app._plugin_mgr.get_all_completed_tasks.return_value = []
-        app._plugin_mgr.get_all_tasks.return_value = [reappeared_task]
-        app._plugin_mgr.filter_all_tasks.return_value = []
-        result = self._make_result(
-            state={
-                "agents_running": [],
-                "recently_completed": [{"task_id": "t-1", "status": "completed"}],
-            },
-        )
-        with (
-            patch("penny.app.should_trigger", return_value=False),
-            patch("penny.app.save_state") as mock_save,
-        ):
-            PennyApp._didFetchData_(app, result)
-        rc = app.state.get("recently_completed", [])
-        assert not any(a.get("task_id") == "t-1" for a in rc)
-        mock_save.assert_called()
-
-
-# ── _newTaskSheet_ (direct call) ─────────────────────────────────────────────
-
-
-class TestNewTaskSheetDirect:
-    """Call PennyApp._newTaskSheet_ to cover line 1071."""
-
-    def test_opens_config_file(self):
-        from penny.app import PennyApp
-        app = _make_fake_app()
-        with patch("subprocess.run") as mock_run:
-            PennyApp._newTaskSheet_(app, None)
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "open"
+        app._dashboard = MagicMock()
+        with patch("penny.app.PLIST_LAUNCHAGENTS", MagicMock(exists=MagicMock(return_value=False))), \
+             patch("subprocess.Popen"), \
+             patch("penny.app.NSApplication"):
+            PennyApp.quitApp_(app, None)
+        app._dashboard.shutdown.assert_called_once()
 
 
 # ── _load_and_refresh (direct call) ──────────────────────────────────────────
 
 
 class TestLoadAndRefreshDirect:
-    """Call PennyApp._load_and_refresh to cover lines 1121-1190."""
+    """Call PennyApp._load_and_refresh directly to cover lines 707-775."""
 
-    def test_yaml_error_shows_alert_and_returns_early(self, tmp_path):
+    def test_yaml_error_shows_alert_and_returns(self, tmp_path):
         from penny.app import PennyApp
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text("bad: [unclosed\n")
         app = _make_fake_app()
-        show_alert_calls = []
-        app._show_alert = lambda title, msg: show_alert_calls.append((title, msg))
+        alert_calls = []
+        app._show_alert = lambda title, msg: alert_calls.append((title, msg))
         with patch("penny.app.CONFIG_PATH", cfg_file):
             PennyApp._load_and_refresh(app)
-        assert len(show_alert_calls) == 1
-        assert "Config Error" in show_alert_calls[0][0]
-        # Worker fetch should not be called
+        assert len(alert_calls) == 1
+        assert "Config Error" in alert_calls[0][0]
+        # Worker fetch should NOT have been called (early return)
         app._worker.fetch.assert_not_called()
 
-    def test_normal_config_loads_and_fetches(self, tmp_path):
+    def test_happy_path_loads_config_and_fetches(self, tmp_path):
         from penny.app import PennyApp
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text("projects:\n  - path: /tmp/proj\n")
         app = _make_fake_app()
         app._show_alert = MagicMock()
-        app._has_setup_issues = False
-        with (
-            patch("penny.app.CONFIG_PATH", cfg_file),
-            patch("penny.app.load_state", return_value={}),
-            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
-            patch("penny.app.needs_onboarding", return_value=False),
-            patch("penny.app.run_preflight", return_value=[]),
-            patch("penny.app.save_state"),
-            patch("penny.app._config_mtime", return_value=12345.0),
-            patch("penny.app.check_full_permissions_consent", return_value=True),
-        ):
+        app._plugin_mgr.get_all_preflight_checks.return_value = []
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("penny.app.load_state", return_value={"agents_running": []}), \
+             patch("penny.app.reset_period_if_needed", side_effect=lambda s: s), \
+             patch("penny.app.needs_onboarding", return_value=False), \
+             patch("penny.app.check_full_permissions_consent", return_value=True), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.run_preflight", return_value=[]):
             PennyApp._load_and_refresh(app)
         assert app.config["projects"] == [{"path": "/tmp/proj"}]
         app._worker.fetch.assert_called_once_with(force=True)
 
-    def test_onboarding_deferred_sets_flag_and_returns(self, tmp_path):
+    def test_onboarding_deferred_sets_flag(self, tmp_path):
         from penny.app import PennyApp
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text("{}\n")  # no projects → needs_onboarding=True
+        cfg_file.write_text("projects: []\n")
         app = _make_fake_app()
         app._show_alert = MagicMock()
-        with (
-            patch("penny.app.CONFIG_PATH", cfg_file),
-            patch("penny.app.load_state", return_value={}),
-            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
-            patch("penny.app.needs_onboarding", return_value=True),
-            patch("penny.app.run_onboarding", return_value=None),  # deferred
-            patch("penny.app.save_state"),
-            patch("penny.app.NSTimer"),
-        ):
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("penny.app.load_state", return_value={}), \
+             patch("penny.app.reset_period_if_needed", side_effect=lambda s: s), \
+             patch("penny.app.needs_onboarding", return_value=True), \
+             patch("penny.app.run_onboarding", return_value=None), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.NSTimer"):
             PennyApp._load_and_refresh(app)
         assert app.state.get("onboarding_deferred") is True
-        app._worker.fetch.assert_not_called()
 
-    def test_onboarding_completed_updates_config(self, tmp_path):
+    def test_onboarding_completed_uses_updated_config(self, tmp_path):
+        """When run_onboarding returns a valid config, the updated config is used."""
         from penny.app import PennyApp
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text("{}\n")
+        cfg_file.write_text("projects: []\n")
+        app = _make_fake_app()
+        app._show_alert = MagicMock()
+        app._plugin_mgr.get_all_preflight_checks.return_value = []
         updated_config = {"projects": [{"path": "/tmp/proj"}]}
-        app = _make_fake_app()
-        app._show_alert = MagicMock()
-        app._has_setup_issues = False
-        # state must NOT have onboarding_deferred=True, otherwise the
-        # `not self.state.get("onboarding_deferred")` check skips onboarding.
-        with (
-            patch("penny.app.CONFIG_PATH", cfg_file),
-            patch("penny.app.load_state", return_value={}),
-            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
-            patch("penny.app.needs_onboarding", return_value=True),
-            patch("penny.app.run_onboarding", return_value=updated_config),
-            patch("penny.app.run_preflight", return_value=[]),
-            patch("penny.app.save_state"),
-            patch("penny.app._config_mtime", return_value=12345.0),
-            patch("penny.app.check_full_permissions_consent", return_value=True),
-        ):
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("penny.app.load_state", return_value={}), \
+             patch("penny.app.reset_period_if_needed", side_effect=lambda s: s), \
+             patch("penny.app.needs_onboarding", return_value=True), \
+             patch("penny.app.run_onboarding", return_value=updated_config), \
+             patch("penny.app.check_full_permissions_consent", return_value=True), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.run_preflight", return_value=[]):
             PennyApp._load_and_refresh(app)
+        # The config returned by run_onboarding should be applied
         assert app.config["projects"] == [{"path": "/tmp/proj"}]
-        assert "onboarding_deferred" not in app.state
 
-    def test_full_permissions_granted_saves_state(self, tmp_path):
-        """When consent is granted for full permissions, state is saved."""
+    def test_full_permissions_declined_reverts_to_off(self, tmp_path, caplog):
+        import logging
+
         from penny.app import PennyApp
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text("work:\n  agent_permissions: full\nprojects:\n  - path: /tmp/p\n")
         app = _make_fake_app()
         app._show_alert = MagicMock()
-        app._has_setup_issues = False
-        with (
-            patch("penny.app.CONFIG_PATH", cfg_file),
-            patch("penny.app.load_state", return_value={}),
-            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
-            patch("penny.app.needs_onboarding", return_value=False),
-            patch("penny.app.check_full_permissions_consent", return_value=True),
-            patch("penny.app.run_preflight", return_value=[]),
-            patch("penny.app.save_state") as mock_save,
-            patch("penny.app._config_mtime", return_value=12345.0),
-        ):
-            PennyApp._load_and_refresh(app)
-        # Consent granted: agent_permissions remains "full"
-        assert app.config["work"]["agent_permissions"] == "full"
-        # save_state should be called (covers line 1101)
-        assert mock_save.call_count >= 1
-
-    def test_full_permissions_declined_reverts_to_off(self, tmp_path):
-        from penny.app import PennyApp
-        cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text("work:\n  agent_permissions: full\nprojects:\n  - path: /tmp/p\n")
-        app = _make_fake_app()
-        app._show_alert = MagicMock()
-        app._has_setup_issues = False
-        write_called = []
-        app._write_config = lambda: write_called.append(True)
-        with (
-            patch("penny.app.CONFIG_PATH", cfg_file),
-            patch("penny.app.load_state", return_value={}),
-            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
-            patch("penny.app.needs_onboarding", return_value=False),
-            patch("penny.app.check_full_permissions_consent", return_value=False),
-            patch("penny.app.run_preflight", return_value=[]),
-            patch("penny.app.save_state"),
-            patch("penny.app._config_mtime", return_value=12345.0),
-        ):
+        write_calls = []
+        app._write_config = lambda: write_calls.append(True)
+        app._plugin_mgr.get_all_preflight_checks.return_value = []
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("penny.app.load_state", return_value={}), \
+             patch("penny.app.reset_period_if_needed", side_effect=lambda s: s), \
+             patch("penny.app.needs_onboarding", return_value=False), \
+             patch("penny.app.check_full_permissions_consent", return_value=False), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.run_preflight", return_value=[]), \
+             caplog.at_level(logging.INFO, logger="penny"):
             PennyApp._load_and_refresh(app)
         assert app.config["work"]["agent_permissions"] == "off"
-        assert write_called == [True]
+        assert write_calls
+        assert "declined" in caplog.text
+
+    def test_preflight_error_handled_gracefully(self, tmp_path):
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects:\n  - path: /tmp/proj\n")
+        app = _make_fake_app()
+        app._show_alert = MagicMock()
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("penny.app.load_state", return_value={}), \
+             patch("penny.app.reset_period_if_needed", side_effect=lambda s: s), \
+             patch("penny.app.needs_onboarding", return_value=False), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.run_preflight", side_effect=RuntimeError("boom")):
+            PennyApp._load_and_refresh(app)  # must not raise
+        app._worker.fetch.assert_called_once_with(force=True)
 
     def test_preflight_tool_errors_show_alert(self, tmp_path):
         from penny.app import PennyApp
         from penny.preflight import PreflightIssue
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text("projects:\n  - path: /tmp/p\n")
+        cfg_file.write_text("projects:\n  - path: /tmp/proj\n")
         app = _make_fake_app()
         alert_calls = []
-        app._show_alert = lambda t, m: alert_calls.append((t, m))
-        app._has_setup_issues = False
-        issues = [PreflightIssue("error", "`claude` CLI not found", "Install it")]
-        with (
-            patch("penny.app.CONFIG_PATH", cfg_file),
-            patch("penny.app.load_state", return_value={}),
-            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
-            patch("penny.app.needs_onboarding", return_value=False),
-            patch("penny.app.check_full_permissions_consent", return_value=True),
-            patch("penny.app.run_preflight", return_value=issues),
-            patch("penny.app.save_state"),
-            patch("penny.app._config_mtime", return_value=12345.0),
-        ):
+        app._show_alert = lambda title, msg: alert_calls.append((title, msg))
+        app._plugin_mgr.get_all_preflight_checks.return_value = []
+        tool_issue = PreflightIssue("error", "`claude` CLI not found", "Install it")
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("penny.app.load_state", return_value={}), \
+             patch("penny.app.reset_period_if_needed", side_effect=lambda s: s), \
+             patch("penny.app.needs_onboarding", return_value=False), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.run_preflight", return_value=[tool_issue]):
             PennyApp._load_and_refresh(app)
         assert len(alert_calls) == 1
         assert "Setup Required" in alert_calls[0][0]
-        assert app._has_setup_issues is True
 
-    def test_preflight_exception_handled(self, tmp_path):
+
+# ── _spawn_agents (direct call) ──────────────────────────────────────────────
+
+
+class TestSpawnAgentsDirect:
+    """Call PennyApp._spawn_agents directly to cover lines 779-803."""
+
+    def _make_task(self, task_id="t-1"):
+        from penny.tasks import Task
+        return Task(task_id, "Fix bug", "P1", "/tmp/proj", "proj")
+
+    def test_noop_when_no_ready_tasks(self):
         from penny.app import PennyApp
-        cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text("projects:\n  - path: /tmp/p\n")
-        app = _make_fake_app()
-        app._show_alert = MagicMock()
-        app._has_setup_issues = False
-        with (
-            patch("penny.app.CONFIG_PATH", cfg_file),
-            patch("penny.app.load_state", return_value={}),
-            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
-            patch("penny.app.needs_onboarding", return_value=False),
-            patch("penny.app.check_full_permissions_consent", return_value=True),
-            patch("penny.app.run_preflight", side_effect=RuntimeError("boom")),
-            patch("penny.app.save_state"),
-            patch("penny.app._config_mtime", return_value=12345.0),
-        ):
-            PennyApp._load_and_refresh(app)  # must not raise
-        assert app._has_setup_issues is False
+        app = _make_fake_app(state={"agents_running": []})
+        app._ready_tasks = []
+        PennyApp._spawn_agents(app)
+        # No spawn, no state change
+        assert app.state["agents_running"] == []
 
-
-# ── stopAgentByTaskId_ tmux/session lines (direct call) ──────────────────────
-
-
-class TestStopAgentByTaskIdWithSession:
-    """Test stopAgentByTaskId_ covers tmux/screen kill lines 921-924."""
-
-    def test_kills_tmux_and_screen_session(self):
-        from penny.app import PennyApp
-        app = _make_fake_app(state={
-            "agents_running": [
-                {"task_id": "t-1", "pid": 100, "session": "penny-t-1",
-                 "tmux_bin": "/usr/local/bin/tmux"},
-            ],
-            "recently_completed": [],
-        })
-        with (
-            patch("penny.app.save_state"),
-            patch("subprocess.run") as mock_run,
-            patch("os.killpg"),
-        ):
-            PennyApp.stopAgentByTaskId_(app, "t-1")
-        # Should have called tmux kill-session and screen quit
-        calls = [c[0][0] for c in mock_run.call_args_list]
-        tmux_call = [c for c in calls if c[0] == "/usr/local/bin/tmux"]
-        screen_call = [c for c in calls if c[0] == "screen"]
-        assert len(tmux_call) == 1
-        assert len(screen_call) == 1
-
-    def test_default_tmux_bin_when_not_in_record(self):
-        from penny.app import PennyApp
-        app = _make_fake_app(state={
-            "agents_running": [
-                {"task_id": "t-1", "pid": 100, "session": "penny-t-1"},
-            ],
-            "recently_completed": [],
-        })
-        with (
-            patch("penny.app.save_state"),
-            patch("subprocess.run") as mock_run,
-            patch("os.killpg"),
-        ):
-            PennyApp.stopAgentByTaskId_(app, "t-1")
-        tmux_call = [c for c in mock_run.call_args_list
-                     if "tmux" in c[0][0][0]]
-        assert len(tmux_call) == 1
-
-
-# ── pluginAction_ / runBdAction_ (direct call) ───────────────────────────────
-
-
-class TestPluginActionDirect:
-    """Call PennyApp.pluginAction_ and runBdAction_ to cover lines 985-999."""
-
-    def test_plugin_action_dispatches_and_refreshes(self):
-        import threading
+    def test_noop_when_permissions_off(self, caplog):
+        import logging
 
         from penny.app import PennyApp
-        app = _make_fake_app()
-        dispatch_calls = []
-        app._plugin_mgr.dispatch_action = lambda a, p: dispatch_calls.append((a, p))
-
-        # Use an event to wait for background thread
-        done = threading.Event()
-        original_fetch = app._worker.fetch
-
-        def fetch_with_signal(*args, **kwargs):
-            original_fetch(*args, **kwargs)
-            done.set()
-
-        app._worker.fetch = fetch_with_signal
-        PennyApp.pluginAction_(app, ("test_action", {"key": "val"}))
-        done.wait(timeout=2.0)
-        assert dispatch_calls == [("test_action", {"key": "val"})]
-
-    def test_run_bd_action_wraps_as_bd_command(self):
-
-        from penny.app import PennyApp
-        app = _make_fake_app()
-        plugin_action_calls = []
-
-        def fake_plugin_action(payload):
-            plugin_action_calls.append(payload)
-
-        app.pluginAction_ = fake_plugin_action
-        PennyApp.runBdAction_(app, (["ready"], "/tmp"))
-        assert plugin_action_calls == [("bd_command", (["ready"], "/tmp"))]
-
-
-# ── _sync_launchd_service write error paths ──────────────────────────────────
-
-
-class TestSyncLaunchdServiceErrorPaths:
-    """Test _sync_launchd_service handles write errors."""
-
-    def test_write_error_handled_gracefully(self, tmp_path):
-        import plistlib
-
-        from penny.app import PennyApp
-        plist = tmp_path / "test.plist"
-        plist.write_bytes(plistlib.dumps({
-            "Label": "com.gpxl.penny",
-            "KeepAlive": True,
-            "RunAtLoad": True,
-        }))
-        app = _make_fake_app(config={"service": {"keep_alive": False}})
-        with (
-            patch("penny.app.PLIST_LAUNCHAGENTS", plist),
-            # Make write fail by patching write_bytes
-            patch.object(type(plist), "write_bytes", side_effect=PermissionError("no write")),
-        ):
-            PennyApp._sync_launchd_service(app)  # must not raise
-
-    def test_source_copy_error_suppressed(self, tmp_path):
-        import plistlib
-
-        from penny.app import PennyApp
-        plist = tmp_path / "test.plist"
-        plist.write_bytes(plistlib.dumps({
-            "Label": "com.gpxl.penny",
-            "KeepAlive": True,
-            "RunAtLoad": True,
-        }))
-        app = _make_fake_app(config={"service": {"keep_alive": False}})
-        # script_dir returns a path where we can't write
-        fake_sd = tmp_path / "nonexistent_dir" / "scripts"
-        with (
-            patch("penny.app.PLIST_LAUNCHAGENTS", plist),
-            patch("penny.app._script_dir_from_plist", return_value=fake_sd),
-        ):
-            PennyApp._sync_launchd_service(app)  # must not raise
-
-
-# ── _safe_load_config with _normalize_config integration ──────────────────
-
-
-class TestSafeLoadConfigNormalization:
-    """Verify _safe_load_config applies _normalize_config to loaded config."""
-
-    def test_legacy_mode_migrated_on_load(self, tmp_path):
-        from penny.app import _safe_load_config
-        cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text("menubar:\n  mode: hbars\n")
-        with patch("penny.app.CONFIG_PATH", cfg_file):
-            config, err = _safe_load_config()
-        assert err is None
-        assert config["menubar"]["mode"] == "bars"
-
-    def test_bars_plus_t_migrated_on_load(self, tmp_path):
-        from penny.app import _safe_load_config
-        cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text("menubar:\n  mode: bars+t\n")
-        with patch("penny.app.CONFIG_PATH", cfg_file):
-            config, err = _safe_load_config()
-        assert err is None
-        assert config["menubar"]["mode"] == "bars"
-
-
-# ── _format_menubar_title (direct call) ───────────────────────────────────
-
-
-class TestFormatMenubarTitleDirect:
-    """Call PennyApp._format_menubar_title directly — bars mode only."""
-
-    def _call(self, pred, n_running, config=None):
-        from penny.app import PennyApp
-        app = _make_fake_app(config=config or {})
-        return PennyApp._format_menubar_title(app, pred, n_running)
-
-    def test_loading_when_no_prediction_no_agents(self):
-        assert self._call(None, 0) == "Loading\u2026"
-
-    def test_sparkle_count_when_no_prediction_with_agents(self):
-        assert self._call(None, 2) == "\u27282"
-
-    def test_returns_empty_no_agents(self):
-        pred = Prediction(
-            session_pct_all=25.0, pct_all=40.0, pct_sonnet=30.0,
-            session_reset_label="3pm",
+        app = _make_fake_app(
+            config={"work": {"agent_permissions": "off"}},
+            state={"agents_running": []},
         )
-        assert self._call(pred, 0) == ""
+        app._ready_tasks = [self._make_task()]
+        with caplog.at_level(logging.INFO, logger="penny"):
+            PennyApp._spawn_agents(app)
+        assert "agent_permissions=off" in caplog.text
+        assert app.state["agents_running"] == []
 
-    def test_returns_sparkle_with_agents(self):
-        pred = Prediction(
-            session_pct_all=25.0, pct_all=40.0, pct_sonnet=30.0,
-            session_reset_label="3pm",
+    def test_spawns_all_ready_tasks(self):
+        from penny.app import PennyApp
+        t1 = self._make_task("t-1")
+        t2 = self._make_task("t-2")
+        app = _make_fake_app(state={"agents_running": []})
+        app._ready_tasks = [t1, t2]
+        app._plugin_mgr.get_task_description.return_value = "desc"
+        app._plugin_mgr.get_agent_prompt_template.return_value = None
+        fake_record = {"task_id": "x", "status": "running"}
+        with patch("penny.app.spawn_claude_agent", return_value=fake_record), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.send_notification"):
+            PennyApp._spawn_agents(app)
+        assert len(app.state["agents_running"]) == 2
+
+    def test_sends_notification_with_prediction(self):
+        from penny.analysis import Prediction
+        from penny.app import PennyApp
+        task = self._make_task()
+        pred = Prediction(pct_all=50.0, projected_pct_all=70.0, days_remaining=2.0)
+        app = _make_fake_app(
+            config={"notifications": {"spawn": True}},
+            state={"agents_running": []},
         )
-        assert self._call(pred, 3) == " \u27283"
+        app._ready_tasks = [task]
+        app._prediction = pred
+        app._plugin_mgr.get_task_description.return_value = ""
+        app._plugin_mgr.get_agent_prompt_template.return_value = None
+        fake_record = {"task_id": "t-1", "status": "running"}
+        with patch("penny.app.spawn_claude_agent", return_value=fake_record), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.send_notification") as mock_notify:
+            PennyApp._spawn_agents(app)
+        mock_notify.assert_called_once()
+        msg = mock_notify.call_args[0][1]
+        assert "1 agent(s)" in msg
 
-
-# ── _tick_loading_bars (meter calibration sweep) ──────────────────────────
-
-
-class TestTickLoadingBars:
-    """Test PennyApp._tick_loading_bars calibration sweep animation."""
-
-    def _make_app_for_anim(self, config=None):
+    def test_no_notification_when_disabled(self):
         from penny.app import PennyApp
-        app = _make_fake_app(config=config or {"menubar": {"mode": "bars"}})
-        app._anim_bar_vals = [0.0, 0.0, 0.0]
-        app._anim_bar_targets = [0.0, 0.0, 0.0]
-        app._anim_arc_val = 0.0
-        app._anim_arc_target = 0.0
-        app._loading_frame = 0
-        app._loading_phase = "loading"
-        app._data_pending = False
-        # Copy class constants that _tick_loading_bars reads from self
-        app._CAL_BAR_TICKS = PennyApp._CAL_BAR_TICKS
-        app._CAL_CLOCK_TICKS = PennyApp._CAL_CLOCK_TICKS
-        # Stub _make_status_image and _render_anim_frame
-        app._make_status_image = lambda pred: MagicMock()
-        app._render_anim_frame = lambda btn: PennyApp._render_anim_frame(app, btn)
-        return app
+        task = self._make_task()
+        app = _make_fake_app(
+            config={"notifications": {"spawn": False}},
+            state={"agents_running": []},
+        )
+        app._ready_tasks = [task]
+        app._plugin_mgr.get_task_description.return_value = ""
+        app._plugin_mgr.get_agent_prompt_template.return_value = None
+        fake_record = {"task_id": "t-1", "status": "running"}
+        with patch("penny.app.spawn_claude_agent", return_value=fake_record), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.send_notification") as mock_notify:
+            PennyApp._spawn_agents(app)
+        mock_notify.assert_not_called()
 
-    def test_first_bar_sweeps_on_first_frame(self):
+    def test_no_notification_without_prediction(self):
         from penny.app import PennyApp
-        app = self._make_app_for_anim()
-        btn = MagicMock()
-        # Frame 0: first bar should have some value (triangle wave starts at 0)
-        app._loading_frame = 0
-        PennyApp._tick_loading_bars(app, btn, "bars")
-        # After tick, frame should increment
-        assert app._loading_frame == 1
-
-    def test_second_bar_sweeps_after_first(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_anim()
-        btn = MagicMock()
-        # With 3 bars and _CAL_BAR_TICKS=10, ticks_per_bar ≈ 3.33
-        # Second bar starts at frame ~3.33, so frame 4 is mid-second-bar
-        n_bars = len(app._anim_bar_vals)
-        ticks_per_bar = PennyApp._CAL_BAR_TICKS / n_bars
-        second_bar_mid = int(ticks_per_bar * 1.5)  # midpoint of second bar
-        app._loading_frame = second_bar_mid
-        PennyApp._tick_loading_bars(app, btn, "bars")
-        # Second bar should be active (nonzero), first bar should be 0
-        assert app._anim_bar_vals[1] > 0.0
-        assert app._anim_bar_vals[0] == 0.0
-
-    def test_arc_sweep_phase(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_anim()
-        btn = MagicMock()
-        # Place frame in the arc sweep phase (after bar ticks)
-        app._loading_frame = PennyApp._CAL_BAR_TICKS + 5  # mid-arc sweep
-        PennyApp._tick_loading_bars(app, btn, "bars")
-        # All bars should be 0 during arc phase
-        for v in app._anim_bar_vals:
-            assert v == 0.0
-        # Arc should have a non-zero value (triangle wave in progress)
-        assert app._anim_arc_val > 0.0
-        assert app._loading_frame == PennyApp._CAL_BAR_TICKS + 6
-
-    def test_bar_triangle_wave_rises(self):
-        """During a bar's sweep, its value should rise above 0."""
-        from penny.app import PennyApp
-        app = self._make_app_for_anim()
-        btn = MagicMock()
-        # Frame 1: first bar should have a positive triangle wave value
-        app._loading_frame = 1
-        PennyApp._tick_loading_bars(app, btn, "bars")
-        assert app._anim_bar_vals[0] > 0.0
-
-    def test_sets_image_on_button(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_anim()
-        btn = MagicMock()
-        mock_img = MagicMock()
-        app._make_status_image = lambda pred: mock_img
-        PennyApp._tick_loading_bars(app, btn, "bars")
-        btn.setImage_.assert_called_with(mock_img)
-        btn.setImagePosition_.assert_called_with(1)  # NSImageOnly
-        btn.setTitle_.assert_called_with("")
-
-    def test_frame_wraps_around(self):
-        """Frames cycle: after total_ticks the counter wraps via modulo."""
-        from penny.app import PennyApp
-        app = self._make_app_for_anim()
-        btn = MagicMock()
-        total_ticks = PennyApp._CAL_BAR_TICKS + PennyApp._CAL_CLOCK_TICKS
-        app._loading_frame = total_ticks  # exactly at wrap point
-        PennyApp._tick_loading_bars(app, btn, "bars")
-        # frame % total_ticks == 0, so we are back at start of first bar
-        assert app._loading_frame == total_ticks + 1
-
-
-# ── _render_anim_frame (animation frame rendering) ────────────────────────
-
-
-class TestRenderAnimFrame:
-    """Test PennyApp._render_anim_frame builds correct _AnimPred and paints button."""
-
-    def _make_app_for_anim(self):
-        app = _make_fake_app(config={"menubar": {"mode": "bars"}})
-        app._anim_bar_vals = [10.0, 20.0, 30.0]
-        app._anim_arc_val = 45.0
-        # Stub _make_status_image — returns a mock image
-        app._make_status_image = lambda pred: MagicMock()
-        return app
-
-    def test_passes_bar_vals_and_arc_to_pred(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_anim()
-        btn = MagicMock()
-        captured_preds = []
-
-        def mock_make_image(pred):
-            captured_preds.append(pred)
-            return MagicMock()
-
-        app._make_status_image = mock_make_image
-        PennyApp._render_anim_frame(app, btn)
-        assert len(captured_preds) == 1
-        assert captured_preds[0].session_pct_all == 10.0
-        assert captured_preds[0].pct_all == 20.0
-        assert captured_preds[0].pct_sonnet == 30.0
-        assert captured_preds[0]._countdown_pct == 45.0
-
-    def test_sets_image_only_on_button(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_anim()
-        btn = MagicMock()
-        PennyApp._render_anim_frame(app, btn)
-        btn.setImage_.assert_called_once()
-        btn.setImagePosition_.assert_called_with(1)  # NSImageOnly
-        btn.setTitle_.assert_called_with("")
-
-
-# ── _loadingAnimTick_ phases ──────────────────────────────────────────────
-
-
-class TestLoadingAnimTickPhases:
-    """Test PennyApp._loadingAnimTick_ phase transitions."""
-
-    def _make_app_for_tick(self, phase="loading", config=None):
-        from penny.app import PennyApp
-        app = _make_fake_app(config=config or {})
-        app._loading_phase = phase
-        app._loading_frame = 0
-        app._anim_bar_vals = [0.0, 0.0, 0.0]
-        app._anim_bar_targets = [50.0, 60.0, 70.0]
-        app._anim_arc_val = 0.0
-        app._anim_arc_target = 0.0
-        app._data_pending = False
+        task = self._make_task()
+        app = _make_fake_app(
+            config={"notifications": {"spawn": True}},
+            state={"agents_running": []},
+        )
+        app._ready_tasks = [task]
         app._prediction = None
-        timer = MagicMock()
-        timer.invalidate = MagicMock()
-        app._loading_anim_timer = timer
-        # Copy class constants and bind methods
-        app._CAL_BAR_TICKS = PennyApp._CAL_BAR_TICKS
-        app._CAL_CLOCK_TICKS = PennyApp._CAL_CLOCK_TICKS
-        app._make_status_image = lambda pred: MagicMock()
-        app._tick_loading_bars = lambda btn, mode: PennyApp._tick_loading_bars(app, btn, mode)
-        app._tick_final_bars = lambda btn: PennyApp._tick_final_bars(app, btn)
-        app._tick_final_clock = lambda btn: PennyApp._tick_final_clock(app, btn)
-        app._render_anim_frame = lambda btn: PennyApp._render_anim_frame(app, btn)
-        app._start_final_cycle = lambda: PennyApp._start_final_cycle(app)
-        app._update_status_title = lambda: None
-        return app
-
-    def test_loading_phase_bars_mode_calls_tick_loading_bars(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_tick(phase="loading", config={"menubar": {"mode": "bars"}})
-        btn = MagicMock()
-        app._status_item.button.return_value = btn
-        tick_calls = []
-        app._tick_loading_bars = lambda b, m: tick_calls.append((b, m))
-        PennyApp._loadingAnimTick_(app, None)
-        assert len(tick_calls) == 1
-        assert tick_calls[0] == (btn, "bars")
-
-    def test_final_bars_phase_dispatches(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_tick(phase="final_bars", config={"menubar": {"mode": "bars"}})
-        btn = MagicMock()
-        app._status_item.button.return_value = btn
-        calls = []
-        app._tick_final_bars = lambda b: calls.append(b)
-        PennyApp._loadingAnimTick_(app, None)
-        assert len(calls) == 1
-
-    def test_final_clock_phase_dispatches(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_tick(phase="final_clock", config={"menubar": {"mode": "bars"}})
-        btn = MagicMock()
-        app._status_item.button.return_value = btn
-        calls = []
-        app._tick_final_clock = lambda b: calls.append(b)
-        PennyApp._loadingAnimTick_(app, None)
-        assert len(calls) == 1
-
-    def test_returns_early_when_btn_is_none(self):
-        from penny.app import PennyApp
-        app = self._make_app_for_tick(phase="loading")
-        app._status_item.button.return_value = None
-        # Should not raise
-        PennyApp._loadingAnimTick_(app, None)
-
-    def test_data_pending_triggers_final_cycle_at_boundary(self):
-        """When data arrives and frame loops back to 0, transition to final_bars."""
-        from penny.app import PennyApp
-        app = self._make_app_for_tick(phase="loading", config={"menubar": {"mode": "bars", "show_sonnet": True}})
-        pred = Prediction(
-            session_pct_all=25.0, pct_all=40.0, pct_sonnet=30.0,
-            session_reset_label="", session_hours_remaining=3.0,
-        )
-        app._prediction = pred
-        app._data_pending = True
-        # Set frame to total_ticks so frame % total == 0 (cycle boundary)
-        total = PennyApp._CAL_BAR_TICKS + PennyApp._CAL_CLOCK_TICKS
-        app._loading_frame = total
-        btn = MagicMock()
-        app._status_item.button.return_value = btn
-        PennyApp._loadingAnimTick_(app, None)
-        assert app._loading_phase in ("final_bars", "final_clock")
-
-    def test_prediction_arrival_sets_data_pending(self):
-        """When prediction appears during loading phase, _data_pending is set."""
-        from penny.app import PennyApp
-        app = self._make_app_for_tick(phase="loading")
-        pred = Prediction(session_pct_all=25.0, pct_all=40.0, pct_sonnet=30.0)
-        app._prediction = pred
-        app._data_pending = False
-        app._loading_frame = 5  # mid-cycle, not at boundary
-        btn = MagicMock()
-        app._status_item.button.return_value = btn
-        PennyApp._loadingAnimTick_(app, None)
-        assert app._data_pending is True
+        app._plugin_mgr.get_task_description.return_value = ""
+        app._plugin_mgr.get_agent_prompt_template.return_value = None
+        fake_record = {"task_id": "t-1", "status": "running"}
+        with patch("penny.app.spawn_claude_agent", return_value=fake_record), \
+             patch("penny.app.save_state"), \
+             patch("penny.app.send_notification") as mock_notify:
+            PennyApp._spawn_agents(app)
+        mock_notify.assert_not_called()
 
 
-# ── _tick_final_bars (direct call for branch coverage) ─────────────────────
+# ── _showSetupHint_ / _show_alert (direct call) ─────────────────────────────
 
 
-class TestTickFinalBarsDirect:
-    """Direct calls to PennyApp._tick_final_bars for branch coverage."""
+class TestShowAlertDirect:
+    """Call PennyApp._show_alert and _showSetupHint_ directly."""
 
-    def _make_app(self, targets=None, frame=0):
-        from penny.app import PennyApp
-        app = _make_fake_app(config={"menubar": {"mode": "bars"}})
-        targets = targets or [50.0, 60.0, 70.0]
-        app._anim_bar_targets = list(targets)
-        app._anim_bar_vals = [0.0] * len(targets)
-        app._anim_arc_val = 0.0
-        app._loading_frame = frame
-        app._loading_phase = "final_bars"
-        app._CAL_BAR_TICKS = PennyApp._CAL_BAR_TICKS
-        app._CAL_CLOCK_TICKS = PennyApp._CAL_CLOCK_TICKS
-        app._make_status_image = lambda pred: MagicMock()
-        app._render_anim_frame = lambda btn: PennyApp._render_anim_frame(app, btn)
-        return app
+    def test_show_alert_calls_nsalert(self):
+        import sys
 
-    def test_frame_past_all_bars_snaps_to_targets(self):
-        """When frame >= bar_end for all bars, vals snap to targets (line 344)."""
-        from penny.app import PennyApp
-        # With 3 bars and 20 ticks, each bar gets ~6.67 ticks
-        # Frame 19 is past all bars; 19+1=20 triggers the snap + phase transition
-        app = self._make_app(targets=[50.0, 60.0, 70.0], frame=19)
-        btn = MagicMock()
-        PennyApp._tick_final_bars(app, btn)
-        assert app._loading_phase == "final_clock"
-        assert app._loading_frame == 0
-        # Bars should be snapped to targets
-        assert app._anim_bar_vals == [50.0, 60.0, 70.0]
-
-    def test_frame_before_bar_start_is_zero(self):
-        """When frame < bar_start for a bar, its value is 0.0 (line 342)."""
-        from penny.app import PennyApp
-        # Frame 0: only first bar should be active; second and third should be 0
-        app = self._make_app(targets=[50.0, 60.0, 70.0], frame=0)
-        btn = MagicMock()
-        PennyApp._tick_final_bars(app, btn)
-        # Bar 2 and 3 start later, so they should be 0
-        assert app._anim_bar_vals[2] == 0.0
-
-    def test_descend_branch_past_midpoint(self):
-        """When local_t >= 0.5, bar descends from 100 toward target (line 353)."""
-        from penny.app import PennyApp
-        # With 3 bars and 10 ticks, ticks_per_bar ≈ 3.33
-        # For bar 0: bar_start=0, bar_end≈3.33
-        # Frame 2: local_t = 2/3.33 ≈ 0.6 which is >= 0.5 (descend branch)
-        app = self._make_app(targets=[50.0, 60.0, 70.0], frame=2)
-        btn = MagicMock()
-        PennyApp._tick_final_bars(app, btn)
-        # Bar 0 should be between target (50) and 100
-        val = app._anim_bar_vals[0]
-        assert 50.0 <= val <= 100.0
-
-    def test_rise_branch_before_midpoint(self):
-        """When local_t < 0.5, bar rises from 0 toward 100 (line 350)."""
-        from penny.app import PennyApp
-        # Frame 0 for bar 0: local_t = 0 / 3.33 = 0.0 which is < 0.5
-        app = self._make_app(targets=[50.0, 60.0, 70.0], frame=0)
-        btn = MagicMock()
-        PennyApp._tick_final_bars(app, btn)
-        # Bar 0 value should be >= 0 (rising phase)
-        assert app._anim_bar_vals[0] >= 0.0
-
-    def test_mid_animation_second_bar_past_end(self):
-        """Frame where first bar is finished but second might still be in progress."""
-        from penny.app import PennyApp
-        # With 3 bars and 20 ticks: bar0 ends at ~6.67, bar1 ends at ~13.33
-        # Frame 10 = bar0 is done (frame >= bar_end=6.67), bar1 is active
-        app = self._make_app(targets=[50.0, 60.0, 70.0], frame=10)
-        btn = MagicMock()
-        PennyApp._tick_final_bars(app, btn)
-        # Bar 0 should be at target (past its end)
-        assert app._anim_bar_vals[0] == 50.0
-
-    def test_arc_stays_zero_during_bar_phase(self):
-        from penny.app import PennyApp
-        app = self._make_app(targets=[50.0, 60.0, 70.0], frame=3)
-        app._anim_arc_val = 99.0  # set nonzero, should be reset to 0
-        btn = MagicMock()
-        PennyApp._tick_final_bars(app, btn)
-        assert app._anim_arc_val == 0.0
-
-
-# ── _tick_final_clock (direct call for branch coverage) ────────────────────
-
-
-class TestTickFinalClockDirect:
-    """Direct calls to PennyApp._tick_final_clock for full coverage of lines 371-385."""
-
-    def _make_app(self, frame=0, arc_target=50.0):
-        from penny.app import PennyApp
-        app = _make_fake_app(config={})
-        app._loading_frame = frame
-        app._loading_phase = "final_clock"
-        app._anim_arc_val = 0.0
-        app._anim_arc_target = arc_target
-        app._anim_bar_vals = [50.0, 60.0, 70.0]
-        app._CAL_BAR_TICKS = PennyApp._CAL_BAR_TICKS
-        app._CAL_CLOCK_TICKS = PennyApp._CAL_CLOCK_TICKS
-        app._make_status_image = lambda pred: MagicMock()
-        app._render_anim_frame = lambda btn: PennyApp._render_anim_frame(app, btn)
-        timer = MagicMock()
-        timer.invalidate = MagicMock()
-        app._loading_anim_timer = timer
-        app._update_status_title = MagicMock()
-        return app
-
-    def test_arc_sweeps_proportionally(self):
-        from penny.app import PennyApp
-        app = self._make_app(frame=10, arc_target=80.0)
-        btn = MagicMock()
-        PennyApp._tick_final_clock(app, btn)
-        # t = 10/20 = 0.5, descend branch starts: 100 + 0 * (80-100) = 100.0
-        assert abs(app._anim_arc_val - 100.0) < 0.01
-        assert app._loading_frame == 11
-
-    def test_arc_reaches_target_at_end(self):
-        """At frame == _CAL_CLOCK_TICKS - 1, arc should be close to target."""
-        from penny.app import PennyApp
-        app = self._make_app(frame=19, arc_target=80.0)
-        btn = MagicMock()
-        PennyApp._tick_final_clock(app, btn)
-        # frame was 19, now 20 which is >= _CAL_CLOCK_TICKS
-        assert app._loading_phase == "done"
-        assert app._loading_anim_timer is None
-
-    def test_invalidates_timer_at_completion(self):
-        from penny.app import PennyApp
-        app = self._make_app(frame=19, arc_target=50.0)
-        timer = app._loading_anim_timer
-        btn = MagicMock()
-        PennyApp._tick_final_clock(app, btn)
-        timer.invalidate.assert_called_once()
-        assert app._loading_anim_timer is None
-
-    def test_calls_update_status_title_at_completion(self):
-        from penny.app import PennyApp
-        app = self._make_app(frame=19, arc_target=50.0)
-        btn = MagicMock()
-        PennyApp._tick_final_clock(app, btn)
-        app._update_status_title.assert_called_once()
-
-    def test_no_timer_invalidation_when_timer_none(self):
-        from penny.app import PennyApp
-        app = self._make_app(frame=19, arc_target=50.0)
-        app._loading_anim_timer = None
-        btn = MagicMock()
-        PennyApp._tick_final_clock(app, btn)
-        assert app._loading_phase == "done"
-
-    def test_mid_animation_does_not_finish(self):
-        from penny.app import PennyApp, _ease_out_cubic
-        app = self._make_app(frame=5, arc_target=60.0)
-        btn = MagicMock()
-        PennyApp._tick_final_clock(app, btn)
-        assert app._loading_phase == "final_clock"
-        assert app._loading_frame == 6
-        # t = 5/20 = 0.25, rise branch: _ease_out_cubic(0.25/0.5) * 100
-        expected = _ease_out_cubic(0.5) * 100.0  # 87.5
-        assert abs(app._anim_arc_val - expected) < 0.01
-
-    def test_renders_frame(self):
-        from penny.app import PennyApp
-        app = self._make_app(frame=5, arc_target=60.0)
-        btn = MagicMock()
-        PennyApp._tick_final_clock(app, btn)
-        btn.setImage_.assert_called_once()
-
-
-# ── _start_final_cycle (direct call) ──────────────────────────────────────
-
-
-class TestStartFinalCycleDirect:
-    """Direct calls to PennyApp._start_final_cycle for line coverage."""
-
-    def test_sets_targets_from_prediction(self):
-        from penny.app import PennyApp
-        # session_hours_remaining=2.5 → arc = (1.0 - 2.5/5.0) * 100 = 50.0
-        pred = Prediction(session_pct_all=25.0, pct_all=40.0, pct_sonnet=30.0,
-                          session_hours_remaining=2.5)
-        app = _make_fake_app(config={"menubar": {"show_sonnet": True}})
-        app._prediction = pred
-        app._anim_bar_vals = [0.0, 0.0, 0.0]
-        app._anim_bar_targets = [0.0, 0.0, 0.0]
-        app._data_pending = True
-        app._loading_phase = "loading"
-        app._loading_frame = 99
-        PennyApp._start_final_cycle(app)
-        assert app._anim_bar_targets == [25.0, 40.0, 30.0]
-        assert app._anim_bar_vals == [0.0, 0.0, 0.0]
-        assert abs(app._anim_arc_target - 50.0) < 0.01
-        assert app._anim_arc_emptying is False
-        assert app._loading_phase == "final_bars"
-        assert app._loading_frame == 0
-        assert app._data_pending is False
-
-    def test_omits_sonnet_when_disabled(self):
-        from penny.app import PennyApp
-        pred = Prediction(session_pct_all=25.0, pct_all=40.0, pct_sonnet=30.0)
-        app = _make_fake_app(config={"menubar": {"show_sonnet": False}})
-        app._prediction = pred
-        app._anim_bar_vals = [0.0, 0.0, 0.0]
-        app._anim_bar_targets = [0.0, 0.0, 0.0]
-        app._data_pending = True
-        app._loading_phase = "loading"
-        app._loading_frame = 99
-        PennyApp._start_final_cycle(app)
-        assert app._anim_bar_targets == [25.0, 40.0]
-        assert len(app._anim_bar_vals) == 2
-
-
-# ── _timerFired_ (direct call) ────────────────────────────────────────────
-
-
-class TestTimerFiredDirect:
-    """Call PennyApp._timerFired_ directly to cover line 250."""
-
-    def test_calls_worker_fetch(self):
         from penny.app import PennyApp
         app = _make_fake_app()
-        PennyApp._timerFired_(app, None)
-        app._worker.fetch.assert_called_once_with()
+        mock_alert = MagicMock()
+        mock_ns_alert = MagicMock()
+        mock_ns_alert.alloc.return_value.init.return_value = mock_alert
+        # NSAlert is imported inside the method via "from AppKit import NSAlert"
+        # Patch it on the AppKit stub module
+        sys.modules["AppKit"].NSAlert = mock_ns_alert
+        try:
+            PennyApp._show_alert(app, "Title", "Message")
+        finally:
+            del sys.modules["AppKit"].NSAlert
+        mock_alert.setMessageText_.assert_called_once_with("Title")
+        mock_alert.setInformativeText_.assert_called_once_with("Message")
+        mock_alert.runModal.assert_called_once()
 
-
-# ── _showSetupHint_ (direct call) ─────────────────────────────────────────
-
-
-class TestShowSetupHintDirect:
-    """Call PennyApp._showSetupHint_ to cover line 1138."""
-
-    def test_shows_alert(self):
+    def test_show_setup_hint_calls_show_alert(self):
         from penny.app import PennyApp
         app = _make_fake_app()
         alert_calls = []
@@ -3266,46 +2633,271 @@ class TestShowSetupHintDirect:
         assert "Setup Deferred" in alert_calls[0][0]
 
 
-# ── main() entry point ───────────────────────────────────────────────────
+# ── pluginAction_ thread logic (covers lines 573, 577-587) ──────────────────
+
+
+class TestPluginActionDirect:
+    """Call PennyApp.pluginAction_ directly to verify thread scheduling."""
+
+    def test_dispatches_action_in_background(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+
+        def mock_thread_start(self_t):
+            self_t.run()  # run synchronously for testing
+
+        with patch.object(threading.Thread, "start", mock_thread_start):
+            PennyApp.pluginAction_(app, ("test_action", {"key": "val"}))
+        app._plugin_mgr.dispatch_action.assert_called_once_with("test_action", {"key": "val"})
+        app._worker.fetch.assert_called_with(force=True)
+
+    def test_fetch_called_after_dispatch_error(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._plugin_mgr.dispatch_action.side_effect = RuntimeError("boom")
+
+        def mock_thread_start(self_t):
+            self_t.run()
+
+        with patch.object(threading.Thread, "start", mock_thread_start):
+            PennyApp.pluginAction_(app, ("test_action", None))
+        # fetch should still be called (in the finally block)
+        app._worker.fetch.assert_called_with(force=True)
+
+
+# ── runBdAction_ (direct call, covers line 573) ─────────────────────────────
+
+
+class TestRunBdActionDirect:
+    """Call PennyApp.runBdAction_ to verify it wraps as pluginAction_."""
+
+    def test_wraps_as_bd_command(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        plugin_calls = []
+        app.pluginAction_ = lambda payload: plugin_calls.append(payload)
+        args_cwd = (["ready"], "/tmp")
+        PennyApp.runBdAction_(app, args_cwd)
+        assert len(plugin_calls) == 1
+        assert plugin_calls[0] == ("bd_command", args_cwd)
+
+
+# ── spawnTask_ optimistic state update (covers lines 430-460) ────────────────
+
+
+class TestSpawnTaskOptimisticUpdate:
+    """Test spawnTask_ when agent_permissions is not off — the optimistic update path."""
+
+    def _make_task(self, task_id="t-1"):
+        from penny.tasks import Task
+        return Task(task_id, "Fix bug", "P1", "/tmp/proj", "proj")
+
+    def test_optimistic_update_removes_from_ready(self):
+        from penny.app import PennyApp
+        t1 = self._make_task("t-1")
+        t2 = self._make_task("t-2")
+        app = _make_fake_app(
+            config={"work": {"agent_permissions": "full"}},
+            state={"agents_running": []},
+        )
+        app._all_ready_tasks = [t1, t2]
+        app._pending_spawns = {}
+        # Patch threading so the bg thread runs synchronously
+        with patch.object(threading.Thread, "start", lambda self_t: None):
+            PennyApp.spawnTask_(app, t1)
+        # t1 should be removed from ready list
+        assert len(app._all_ready_tasks) == 1
+        assert app._all_ready_tasks[0].task_id == "t-2"
+        # t1 should be in pending spawns
+        assert "t-1" in app._pending_spawns
+
+    def test_vc_updated_after_optimistic_removal(self):
+        from penny.app import PennyApp
+        task = self._make_task()
+        app = _make_fake_app(state={"agents_running": []})
+        app._all_ready_tasks = [task]
+        app._pending_spawns = {}
+        with patch.object(threading.Thread, "start", lambda self_t: None):
+            PennyApp.spawnTask_(app, task)
+        app._vc.updateWithData_.assert_called_once()
+
+
+# ── main() entry point ──────────────────────────────────────────────────────
 
 
 class TestMainEntryPoint:
-    """Test the main() function entry point to cover lines 1182-1194."""
+    """Test the main() function to cover lines 919-934."""
 
     def test_main_acquires_lock_and_runs_app(self):
-        from penny.app import main
-        with (
-            patch("penny.app._acquire_pid_lock") as mock_acquire,
-            patch("penny.app._release_pid_lock") as mock_release,
-            patch("penny.app.setproctitle") as mock_spt,
-            patch("penny.app.NSApplication") as mock_ns,
-            patch("penny.app.PennyApp") as mock_penny,
-        ):
+        from penny.app import PennyApp, main
+        mock_delegate = MagicMock()
+        with patch("penny.app._acquire_pid_lock"), \
+             patch("penny.app._release_pid_lock"), \
+             patch("penny.app._install_signal_handlers"), \
+             patch("penny.app._cleanup_orphan_sessions"), \
+             patch("penny.app.setproctitle"), \
+             patch.object(PennyApp, "alloc", create=True, return_value=MagicMock(init=MagicMock(return_value=mock_delegate))), \
+             patch("penny.app.NSApplication") as mock_ns:
             mock_app = MagicMock()
             mock_ns.sharedApplication.return_value = mock_app
-            mock_delegate = MagicMock()
-            mock_penny.alloc.return_value.init.return_value = mock_delegate
             main()
-        mock_acquire.assert_called_once()
-        mock_release.assert_called_once()
-        mock_spt.setproctitle.assert_called_once_with("Penny")
         mock_app.setActivationPolicy_.assert_called_once_with(1)
         mock_app.setDelegate_.assert_called_once_with(mock_delegate)
         mock_app.run.assert_called_once()
 
     def test_main_releases_lock_on_exception(self):
-        from penny.app import main
-        with (
-            patch("penny.app._acquire_pid_lock"),
-            patch("penny.app._release_pid_lock") as mock_release,
-            patch("penny.app.setproctitle"),
-            patch("penny.app.NSApplication") as mock_ns,
-            patch("penny.app.PennyApp"),
-        ):
+        from penny.app import PennyApp, main
+        released = []
+        with patch("penny.app._acquire_pid_lock"), \
+             patch("penny.app._release_pid_lock", side_effect=lambda: released.append(True)), \
+             patch("penny.app._install_signal_handlers"), \
+             patch("penny.app._cleanup_orphan_sessions"), \
+             patch("penny.app.setproctitle"), \
+             patch.object(PennyApp, "alloc", create=True, return_value=MagicMock(init=MagicMock(return_value=MagicMock()))), \
+             patch("penny.app.NSApplication") as mock_ns:
             mock_app = MagicMock()
+            mock_app.run.side_effect = RuntimeError("crash")
             mock_ns.sharedApplication.return_value = mock_app
-            mock_app.run.side_effect = RuntimeError("app crash")
             with pytest.raises(RuntimeError):
                 main()
-        # Lock should still be released even on exception
+        assert released
+
+
+# ── _cleanup_orphan_sessions ──────────────────────────────────────────────────
+
+
+class TestCleanupOrphanSessions:
+    """Test the signal-driven agent session cleanup."""
+
+    def test_no_agents_clears_list(self):
+        from penny.app import _cleanup_orphan_sessions
+        state = {"agents_running": []}
+        with patch("penny.app.load_state", return_value=state), \
+             patch("penny.app.save_state") as mock_save:
+            _cleanup_orphan_sessions()
+        mock_save.assert_called_once()
+        assert state["agents_running"] == []
+
+    def test_kills_tmux_and_screen_sessions(self):
+        from penny.app import _cleanup_orphan_sessions
+        state = {"agents_running": [
+            {"session": "penny-1", "pid": 0, "tmux_bin": "/usr/bin/tmux"},
+        ]}
+        with patch("penny.app.load_state", return_value=state), \
+             patch("penny.app.save_state"), \
+             patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
+             patch("subprocess.run") as mock_run:
+            _cleanup_orphan_sessions()
+        # Each call_args[0][0] is the command list (e.g. ["/usr/bin/tmux", "kill-session", ...])
+        cmd_lists = [c[0][0] for c in mock_run.call_args_list]
+        assert any("kill-session" in cmd for cmd in cmd_lists)
+        assert any("screen" in cmd[0] for cmd in cmd_lists)
+
+    def test_kills_process_by_pid(self):
+        from penny.app import _cleanup_orphan_sessions
+        state = {"agents_running": [
+            {"session": "", "pid": 99999},
+        ]}
+        with patch("penny.app.load_state", return_value=state), \
+             patch("penny.app.save_state"), \
+             patch("shutil.which", return_value=None), \
+             patch("os.killpg") as mock_kill:
+            _cleanup_orphan_sessions()
+        mock_kill.assert_called_once()
+
+    def test_handles_process_lookup_error(self):
+        from penny.app import _cleanup_orphan_sessions
+        state = {"agents_running": [
+            {"session": "", "pid": 99999},
+        ]}
+        with patch("penny.app.load_state", return_value=state), \
+             patch("penny.app.save_state"), \
+             patch("shutil.which", return_value=None), \
+             patch("os.killpg", side_effect=ProcessLookupError):
+            _cleanup_orphan_sessions()  # must not raise
+
+    def test_handles_load_state_error(self):
+        from penny.app import _cleanup_orphan_sessions
+        with patch("penny.app.load_state", side_effect=RuntimeError("corrupt")):
+            _cleanup_orphan_sessions()  # must not raise (returns early)
+
+    def test_handles_save_state_error(self):
+        from penny.app import _cleanup_orphan_sessions
+        state = {"agents_running": []}
+        with patch("penny.app.load_state", return_value=state), \
+             patch("penny.app.save_state", side_effect=RuntimeError("disk full")):
+            _cleanup_orphan_sessions()  # must not raise
+
+    def test_uses_agent_tmux_bin_over_system(self):
+        from penny.app import _cleanup_orphan_sessions
+        state = {"agents_running": [
+            {"session": "s1", "pid": 0, "tmux_bin": "/custom/tmux"},
+        ]}
+        with patch("penny.app.load_state", return_value=state), \
+             patch("penny.app.save_state"), \
+             patch("shutil.which", return_value="/system/tmux"), \
+             patch("subprocess.run") as mock_run:
+            _cleanup_orphan_sessions()
+        first_call = mock_run.call_args_list[0][0][0]
+        assert first_call[0] == "/custom/tmux"
+
+
+# ── _install_signal_handlers ──────────────────────────────────────────────────
+
+
+class TestInstallSignalHandlers:
+    """Test signal handler installation."""
+
+    def test_registers_sigterm_and_sigint(self):
+        from penny.app import _install_signal_handlers
+        handlers_set = {}
+        with patch("signal.signal", side_effect=lambda sig, handler: handlers_set.update({sig: handler})):
+            _install_signal_handlers()
+        assert signal.SIGTERM in handlers_set
+        assert signal.SIGINT in handlers_set
+
+    def test_handler_cleans_up_and_exits(self):
+        from penny.app import _install_signal_handlers
+        handlers_set = {}
+        with patch("signal.signal", side_effect=lambda sig, handler: handlers_set.update({sig: handler})):
+            _install_signal_handlers()
+        handler = handlers_set[signal.SIGTERM]
+        with patch("penny.app._cleanup_orphan_sessions") as mock_cleanup, \
+             patch("penny.app._release_pid_lock") as mock_release:
+            with pytest.raises(SystemExit) as exc_info:
+                handler(signal.SIGTERM, None)
+        assert exc_info.value.code == 128 + signal.SIGTERM
+        mock_cleanup.assert_called_once()
         mock_release.assert_called_once()
+
+
+# ── _safe_load_config with validation ─────────────────────────────────────────
+
+
+class TestSafeLoadConfigWithValidation:
+    """Test that _safe_load_config now runs validate_config."""
+
+    def test_valid_config_returns_no_error(self, tmp_path):
+        from penny.app import _safe_load_config
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects:\n  - path: /tmp/proj\n")
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("penny.app.validate_config", return_value=[]):
+            config, err = _safe_load_config()
+        assert config["projects"] == [{"path": "/tmp/proj"}]
+        assert err is None
+
+    def test_validation_warnings_logged(self, tmp_path, caplog):
+        import logging
+
+        from penny.app import _safe_load_config
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("projects:\n  - path: /tmp/proj\n")
+        with patch("penny.app.CONFIG_PATH", cfg_file), \
+             patch("penny.app.validate_config", return_value=["bad field 'x'"]), \
+             caplog.at_level(logging.WARNING, logger="penny"):
+            config, err = _safe_load_config()
+        # Config still returned (validation is non-fatal)
+        assert config["projects"] == [{"path": "/tmp/proj"}]
+        assert err is None
+        assert "bad field" in caplog.text
