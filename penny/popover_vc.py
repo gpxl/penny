@@ -23,10 +23,10 @@ from AppKit import (
 )
 from Foundation import NSEdgeInsets, NSTimer
 
-_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
 from .analysis import format_reset_label
 from .ui_components import ProgressBarView, make_button, make_label
+
+_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # Popover width (fixed). Height is dynamic.
 _WIDTH: float = 380.0
