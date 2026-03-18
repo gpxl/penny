@@ -28,6 +28,7 @@ from Foundation import NSObject, NSTimer
 from .analysis import should_trigger, uses_24h_time
 from .bg_worker import BackgroundWorker
 from .dashboard import DashboardServer, bump_state_generation
+from .deps import ensure_deps
 from .onboarding import check_full_permissions_consent, needs_onboarding, run_onboarding
 from .paths import data_dir
 from .plugin import PluginManager
@@ -36,6 +37,8 @@ from .preflight import format_issues_for_alert, run_preflight
 from .report import generate_report, open_report
 from .spawner import send_notification, spawn_claude_agent
 from .state import load_state, reset_period_if_needed, save_state
+
+ensure_deps()
 
 CONFIG_PATH = data_dir() / "config.yaml"
 
