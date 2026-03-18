@@ -630,9 +630,10 @@ class PennyApp(NSObject):
 
     def runUpdate_(self, sender: Any) -> None:
         """Open a Terminal window to run `penny update`."""
-        subprocess.Popen(
-            ["open", "-a", "Terminal", "penny update"],
-        )
+        subprocess.Popen([
+            "osascript", "-e",
+            'tell application "Terminal" to do script "penny update"',
+        ])
         self._popover.performClose_(sender)
 
     @objc.python_method
