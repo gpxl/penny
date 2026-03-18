@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.3.0b1] - 2026-03-18
+
+### Added
+
+- Release agent auto-evaluates whether a release is needed before cutting one
+
+### Fixed
+
+- Update button now opens Terminal with the `penny update` command
+- Squash-merge release PRs to avoid duplicate release commits on main
+
 ## [0.2.0b1] - 2026-03-18
 
 ### Added
