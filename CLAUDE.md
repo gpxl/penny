@@ -74,6 +74,31 @@ The agent ends its response with a `CODE QUALITY RESULT: PASS` or
 On FAIL, read the details — if pre-existing tests broke, investigate before
 closing; if coverage is the issue, the agent will have added tests already.
 
+## Commit Agent
+
+Stages, commits, and pushes changes to GitHub using Conventional Commits format.
+Runs tests and lint before pushing. Groups related changes into logical commits.
+
+### When to invoke
+
+| Trigger | Example |
+|---------|---------|
+| User says "commit", "commit and push", "push" | `"commit and push"`, `"push these changes"` |
+
+### How to invoke
+
+Use the Claude Code `Agent` tool with `subagent_type="commit"`:
+
+```
+Commit and push the current changes.
+```
+
+### Interpreting the result
+
+The agent ends with `COMMIT RESULT: PASS` or `COMMIT RESULT: FAIL`.
+On PASS, the commits are pushed to origin/main.
+On FAIL, no push was made — read the details to fix the issue.
+
 ## Release Agent
 
 Automates cutting a new Penny release (changelog, version sync, tag, push,
