@@ -151,16 +151,6 @@ class ControlCenterViewController(NSViewController):
                         "\u26a0\ufe0f Claude API outage \u2014 usage data may be stale"
                     )
                     self._lbl_outage_warning.setHidden_(False)
-                elif pred.live_unavailable and not pred.outage and pred.budget_all is None:
-                    self._lbl_outage_warning.setStringValue_(
-                        "Calibrating \u2014 need 1\u20132 weeks of usage history for budget estimates"
-                    )
-                    self._lbl_outage_warning.setHidden_(False)
-                elif pred.live_unavailable and not pred.outage:
-                    self._lbl_outage_warning.setStringValue_(
-                        "Live stats unavailable \u2014 showing JSONL estimates"
-                    )
-                    self._lbl_outage_warning.setHidden_(False)
                 else:
                     self._lbl_outage_warning.setHidden_(True)
 

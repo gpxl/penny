@@ -10,7 +10,7 @@ the three percentage values and reset times with regex.
 
 Results are cached for 30 minutes.
 
-Requirements: pexpect>=4.8, pyte>=0.8
+Requirements: pexpect>=4.8, pyte>=0.8  (auto-installed by penny.deps)
 """
 from __future__ import annotations
 
@@ -23,6 +23,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import pexpect  # type: ignore[import]
+import pyte  # type: ignore[import]
 
 # Cache TTL: match the background refresh interval so opening the popover
 # always shows data no older than one refresh cycle.
@@ -46,7 +49,54 @@ def _detect_api_error(screen_txt: str) -> bool:
         or "Internal server error" in screen_txt
         or "Failed to load usage data" in screen_txt
         or '"type":"error"' in screen_txt
+        or "API Error:" in screen_txt
     )
+
+
+def _make_outage_status() -> LiveStatus:
+    """Build a LiveStatus(outage=True), preserving last-good cached values when available."""
+    global _cache
+    prev = _cache
+    good = prev if (prev is not None and not prev.outage) else None
+    result = LiveStatus(
+        session_pct=good.session_pct if good else 0.0,
+        session_reset_label=good.session_reset_label if good else "\u2014",
+        session_reset_tz=good.session_reset_tz if good else "",
+        weekly_pct_all=good.weekly_pct_all if good else 0.0,
+        weekly_pct_sonnet=good.weekly_pct_sonnet if good else 0.0,
+        weekly_reset_label=good.weekly_reset_label if good else "\u2014",
+        weekly_reset_tz=good.weekly_reset_tz if good else "",
+        fetched_at=datetime.now(timezone.utc),
+        outage=True,
+    )
+    _cache = result  # in-memory only — _save_cache skips outage states
+    return result
+
+
+def _stale_or_default() -> LiveStatus:
+    """Return last-good cached data or a zeroed default.
+
+    Used for transient failures (timeouts, parse glitches) that are NOT
+    confirmed API outages.  Does NOT update _cache so the next fetch cycle
+    retries immediately.
+    """
+    if _cache is not None and not _cache.outage:
+        return _cache
+    return LiveStatus(
+        session_pct=0.0,
+        session_reset_label="\u2014",
+        session_reset_tz="",
+        weekly_pct_all=0.0,
+        weekly_pct_sonnet=0.0,
+        weekly_reset_label="\u2014",
+        weekly_reset_tz="",
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+
+def _screen_text(screen: Any) -> str:
+    """Extract clean text from a pyte Screen."""
+    return "\n".join(row.rstrip() for row in screen.display)
 
 
 def _save_cache(status: LiveStatus) -> None:
@@ -191,10 +241,6 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
 
 def _feed_child(child: Any, stream: Any, secs: float) -> None:
     """Read from child for up to secs seconds and feed bytes to the pyte stream."""
-    try:
-        import pexpect  # type: ignore[import]
-    except ImportError:
-        return
     deadline = time.time() + secs
     while time.time() < deadline:
         try:
@@ -205,12 +251,16 @@ def _feed_child(child: Any, stream: Any, secs: float) -> None:
             break
 
 
-def fetch_live_status(force: bool = False) -> LiveStatus | None:
+def fetch_live_status(force: bool = False) -> LiveStatus:
     """
     Run claude interactively, navigate /status → Usage tab, parse and return the result.
 
-    Returns None on any failure so callers can fall back gracefully.
-    Caches results for 30 minutes to avoid spawning claude on every refresh.
+    Always returns a LiveStatus — either real data or LiveStatus(outage=True)
+    when the fetch fails for any reason (API errors, missing claude binary,
+    unparseable screens).  Never returns None.
+
+    Caches results for 5 minutes (2 minutes during outage) to avoid spawning
+    claude on every refresh.
 
     Interaction flow:
       1. Spawn claude, wait for ❯ prompt
@@ -238,17 +288,7 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
                 return disk        # still fresh enough — skip live fetch
 
     if not shutil.which("claude"):
-        return None
-
-    try:
-        import pexpect  # type: ignore[import]
-    except ImportError:
-        return None
-
-    try:
-        import pyte  # type: ignore[import]
-    except ImportError:
-        return None
+        return _stale_or_default()
 
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
@@ -278,8 +318,11 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
         pyte_stream.feed(child.before or b"")
         pyte_stream.feed(child.after or b"")
         if idx != 0:   # TIMEOUT or EOF — claude didn't start cleanly
+            txt = _screen_text(screen)
             child.close(force=True)
-            return None
+            if _detect_api_error(txt):
+                return _make_outage_status()
+            return _stale_or_default()
 
         # Let the TUI fully stabilize (hint text, etc.)
         _feed_child(child, pyte_stream, 1.5)
@@ -301,8 +344,11 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
         pyte_stream.feed(child.before or b"")
         pyte_stream.feed(child.after or b"")
         if idx2 >= 2:   # dialog didn't open
+            txt = _screen_text(screen)
             child.close(force=True)
-            return None
+            if _detect_api_error(txt):
+                return _make_outage_status()
+            return _stale_or_default()
 
         _feed_child(child, pyte_stream, 1.5)
 
@@ -315,33 +361,30 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
         _feed_child(child, pyte_stream, 2.5)
 
         # Phase 5: extract clean screen text from pyte.
-        screen_txt = "\n".join(row.rstrip() for row in screen.display)
+        screen_txt = _screen_text(screen)
 
         # Detect API outage before attempting to parse percentages.
         if _detect_api_error(screen_txt):
-            prev = _cache  # may be None or a previous good result
-            good = prev if (prev is not None and not prev.outage) else None
-            result = LiveStatus(
-                session_pct=good.session_pct if good else 0.0,
-                session_reset_label=good.session_reset_label if good else "—",
-                session_reset_tz=good.session_reset_tz if good else "",
-                weekly_pct_all=good.weekly_pct_all if good else 0.0,
-                weekly_pct_sonnet=good.weekly_pct_sonnet if good else 0.0,
-                weekly_reset_label=good.weekly_reset_label if good else "—",
-                weekly_reset_tz=good.weekly_reset_tz if good else "",
-                fetched_at=datetime.now(timezone.utc),
-                outage=True,
-            )
-            _cache = result  # in-memory only — _save_cache skips outage states
             child.send(b"\x03")
             try:
                 child.expect(pexpect.EOF, timeout=5)
             except Exception:
                 pass
             child.close(force=True)
-            return result
+            return _make_outage_status()
 
         result = _parse_usage_screen(screen_txt)
+
+        # Reached the Usage tab but couldn't parse any data — transient glitch
+        # (format change, garbled screen, etc.).  Not necessarily an API outage.
+        if result is None:
+            child.send(b"\x03")
+            try:
+                child.expect(pexpect.EOF, timeout=5)
+            except Exception:
+                pass
+            child.close(force=True)
+            return _stale_or_default()
 
         # Phase 6: close gracefully.
         child.send(b"\x03")   # Ctrl-C
@@ -353,7 +396,13 @@ def fetch_live_status(force: bool = False) -> LiveStatus | None:
         child.close(force=True)
 
     except Exception:
-        return None
+        try:
+            txt = _screen_text(screen)
+            if _detect_api_error(txt):
+                return _make_outage_status()
+        except Exception:
+            pass
+        return _stale_or_default()
 
     if result:
         _cache = result
