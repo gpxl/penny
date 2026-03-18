@@ -599,36 +599,6 @@ def load_stats_cache(path: str | None = None) -> dict[str, Any]:
         return json.load(f)
 
 
-def estimate_budget_from_history(state: dict[str, Any]) -> dict[str, int | None]:
-    """
-    Estimate weekly output token budgets from stored period history in state.json.
-    Returns {'all': N | None, 'sonnet': N | None}.
-    Returns None values when there is insufficient history to estimate.
-    """
-    history = state.get("period_history", [])
-    defaults: dict[str, int | None] = {"all": None, "sonnet": None}
-
-    if len(history) < 2:
-        return defaults
-
-    all_totals = [p["output_all"] for p in history if p.get("output_all", 0) > 0]
-    sonnet_totals = [p["output_sonnet"] for p in history if p.get("output_sonnet", 0) > 0]
-
-    if not all_totals:
-        return defaults
-
-    # 90th percentile (or max if < 4 samples) as the "likely limit-hit week"
-    def percentile90(vals: list[int]) -> int:
-        s = sorted(vals)
-        if len(s) < 4:
-            return max(s)
-        return s[min(int(len(s) * 0.9), len(s) - 1)]
-
-    return {
-        "all": percentile90(all_totals),
-        "sonnet": percentile90(sonnet_totals) if sonnet_totals else None,
-    }
-
 
 # ---------------------------------------------------------------------------
 # Sub-session tracking
@@ -896,8 +866,6 @@ class Prediction:
 
     # True when the last /status fetch returned an API error
     outage: bool = False
-    # True when live /status data is unavailable (pexpect/pyte missing or claude unreachable)
-    live_unavailable: bool = False
 
 
 def _hours_until_reset_label(label: str, tz_name: str) -> float:
@@ -908,9 +876,11 @@ def _hours_until_reset_label(label: str, tz_name: str) -> float:
     """
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+    if not tz_name:
+        return 0.0
     try:
         tz = ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, KeyError):
+    except (ZoneInfoNotFoundError, KeyError, ValueError):
         return 0.0
 
     now_tz = datetime.now(tz)
@@ -941,67 +911,40 @@ def build_prediction(
     force: bool = False,
     precomputed_boundaries: list[datetime] | None = None,
 ) -> Prediction:
-    """Compute the full prediction from current token usage + budget estimate.
+    """Compute the full prediction from current token usage + live /status data.
 
-    Percentages and reset labels are overridden with ground-truth values from
-    claude /status when available (via status_fetcher). Token counts and budget
-    absolutes still come from JSONL parsing — /status doesn't expose those.
-    Budget is back-calculated from live percentage + token count when possible.
+    Percentages and reset labels come from claude /status (ground-truth).
+    Token counts come from JSONL parsing (/status doesn't expose those).
+    Budget is back-calculated from live percentage + token count.
     """
     from .status_fetcher import fetch_live_status  # local import to keep startup fast
 
     start, end = current_billing_period()
     usage = count_tokens_since(start)
-    hist_budget = estimate_budget_from_history(state)
 
     days_rem = days_until_reset()
     elapsed_days = max((_WEEK_SECONDS / 86400) - days_rem, 1 / 24)
 
     session = build_session_info(state, precomputed_boundaries=precomputed_boundaries)
 
-    # --- Override with live /status data when available ---
     live = fetch_live_status(force=force)
-    outage = live.outage if live is not None else False
-    live_unavailable = live is None
+    pct_all = live.weekly_pct_all
+    pct_sonnet = live.weekly_pct_sonnet
+    session_pct_all = live.session_pct
+    session_reset_label = live.session_reset_label
+    live_weekly_reset = live.weekly_reset_label
+    session_hours_remaining = _hours_until_reset_label(
+        live.session_reset_label, live.session_reset_tz
+    )
 
-    # If the live fetch failed entirely (None), check whether the cached status
-    # indicates an ongoing outage.  Without this, a sustained outage where the
-    # pexpect scrape crashes instead of detecting the API-error banner would
-    # show the misleading "need 1-2 weeks" calibration message.
-    if live is None:
-        from .status_fetcher import get_cached_status
-        cached = get_cached_status()
-        if cached is not None and cached.outage:
-            outage = True
-    if live is not None:
-        pct_all = live.weekly_pct_all
-        pct_sonnet = live.weekly_pct_sonnet
-        session_pct_all = live.session_pct
-        session_reset_label = live.session_reset_label
-        live_weekly_reset = live.weekly_reset_label
-        session_hours_remaining = _hours_until_reset_label(live.session_reset_label, live.session_reset_tz)
-
-        # Back-calculate budget from live percentage + observed token count
-        # pct = tokens / budget * 100  →  budget = tokens / (pct / 100)
-        if live.weekly_pct_all > 0 and usage.output_all > 0:
-            budget_all: int | None = int(usage.output_all / (live.weekly_pct_all / 100))
-        else:
-            budget_all = hist_budget.get("all")
-
-        if live.weekly_pct_sonnet > 0 and usage.output_sonnet > 0:
-            budget_sonnet: int | None = int(usage.output_sonnet / (live.weekly_pct_sonnet / 100))
-        else:
-            budget_sonnet = hist_budget.get("sonnet")
-    else:
-        # No live data — use JSONL-estimated percentages (less accurate)
-        budget_all = hist_budget.get("all")
-        budget_sonnet = hist_budget.get("sonnet")
-        pct_all = (usage.output_all / max(budget_all, 1)) * 100 if budget_all else 0.0
-        pct_sonnet = (usage.output_sonnet / max(budget_sonnet, 1)) * 100 if budget_sonnet else 0.0
-        session_pct_all = session.pct_all
-        session_reset_label = session.session_reset_label
-        session_hours_remaining = session.hours_remaining
-        live_weekly_reset = reset_label()
+    # Back-calculate budget from live percentage + observed token count
+    # pct = tokens / budget * 100  →  budget = tokens / (pct / 100)
+    budget_all: int | None = None
+    budget_sonnet: int | None = None
+    if live.weekly_pct_all > 0 and usage.output_all > 0:
+        budget_all = int(usage.output_all / (live.weekly_pct_all / 100))
+    if live.weekly_pct_sonnet > 0 and usage.output_sonnet > 0:
+        budget_sonnet = int(usage.output_sonnet / (live.weekly_pct_sonnet / 100))
 
     # Projection: if current rate continues (only meaningful when budget is known)
     if budget_all:
@@ -1031,8 +974,7 @@ def build_prediction(
         session_pct_sonnet=session.pct_sonnet,
         session_hours_remaining=round(session_hours_remaining, 1),
         session_reset_label=session_reset_label,
-        outage=outage,
-        live_unavailable=live_unavailable,
+        outage=live.outage,
     )
 
 

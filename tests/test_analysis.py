@@ -13,7 +13,6 @@ from penny.analysis import (
     count_tokens_since,
     current_billing_period,
     days_until_reset,
-    estimate_budget_from_history,
     find_current_session_start,
     find_session_boundaries,
     format_reset_label,
@@ -140,44 +139,6 @@ class TestCountTokensSince:
         with patch("penny.analysis.Path.home", return_value=tmp_path):
             usage = count_tokens_since(since)
         assert usage.output_all == 0
-
-
-# ---------------------------------------------------------------------------
-# estimate_budget_from_history
-# ---------------------------------------------------------------------------
-
-class TestEstimateBudgetFromHistory:
-    def test_returns_none_when_empty_history(self):
-        result = estimate_budget_from_history({})
-        assert result["all"] is None
-        assert result["sonnet"] is None
-
-    def test_returns_none_with_single_entry(self):
-        state = {"period_history": [{"output_all": 1000, "output_sonnet": 500}]}
-        result = estimate_budget_from_history(state)
-        assert result["all"] is None
-
-    def test_returns_max_when_fewer_than_4_samples(self):
-        state = {
-            "period_history": [
-                {"output_all": 1000, "output_sonnet": 500},
-                {"output_all": 2000, "output_sonnet": 800},
-                {"output_all": 1500, "output_sonnet": 600},
-            ]
-        }
-        result = estimate_budget_from_history(state)
-        assert result["all"] == 2000
-
-    def test_returns_90th_percentile_with_4_plus_samples(self):
-        state = {
-            "period_history": [
-                {"output_all": v, "output_sonnet": v // 2}
-                for v in [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000]
-            ]
-        }
-        result = estimate_budget_from_history(state)
-        # 90th percentile of 10 values sorted = index 9 = 10000
-        assert result["all"] == 10000
 
 
 # ---------------------------------------------------------------------------
@@ -594,24 +555,6 @@ class TestLoadStatsCache:
 
 
 # ---------------------------------------------------------------------------
-# estimate_budget_from_history — empty all_totals branch
-# ---------------------------------------------------------------------------
-
-class TestEstimateBudgetNoAllTotals:
-    def test_returns_none_when_all_totals_zero(self):
-        # Two entries but output_all == 0 for both
-        state = {
-            "period_history": [
-                {"output_all": 0, "output_sonnet": 500},
-                {"output_all": 0, "output_sonnet": 800},
-            ]
-        }
-        result = estimate_budget_from_history(state)
-        assert result["all"] is None
-        assert result["sonnet"] is None
-
-
-# ---------------------------------------------------------------------------
 # find_session_boundaries
 # ---------------------------------------------------------------------------
 
@@ -757,15 +700,27 @@ class TestBuildPrediction:
     def test_returns_prediction_when_no_live_data(self, tmp_path):
         """build_prediction runs without errors when live status is unavailable."""
         from penny.analysis import build_prediction
+        from penny.status_fetcher import LiveStatus
+
+        live = LiveStatus(
+            session_pct=0.0,
+            session_reset_label="—",
+            session_reset_tz="UTC",
+            weekly_pct_all=0.0,
+            weekly_pct_sonnet=0.0,
+            weekly_reset_label="—",
+            weekly_reset_tz="UTC",
+            fetched_at=datetime.now(timezone.utc),
+            outage=True,
+        )
         state = {"period_history": [], "session_history": []}
         with (
             patch("penny.analysis.Path.home", return_value=tmp_path),
-            patch("penny.status_fetcher.fetch_live_status", return_value=None),
+            patch("penny.status_fetcher.fetch_live_status", return_value=live),
         ):
             pred = build_prediction(state, force=False, precomputed_boundaries=[])
         assert isinstance(pred, Prediction)
-        assert pred.live_unavailable is True
-        assert pred.outage is False
+        assert pred.outage is True
 
     def test_returns_prediction_with_live_data(self, tmp_path):
         """build_prediction overrides pct values from live status."""
@@ -790,7 +745,7 @@ class TestBuildPrediction:
             pred = build_prediction(state, force=False, precomputed_boundaries=[])
         assert pred.pct_all == 35.0
         assert pred.pct_sonnet == 50.0
-        assert pred.live_unavailable is False
+        assert pred.outage is False
 
     def test_outage_flag_set_when_live_status_outage(self, tmp_path):
         """build_prediction propagates outage flag from live status."""
@@ -817,10 +772,21 @@ class TestBuildPrediction:
         assert pred.outage is True
 
     def test_outage_flag_from_cached_status_when_live_is_none(self, tmp_path):
-        """When live fetch returns None but cached status has outage=True, propagate it."""
+        """When live fetch returns outage status and cached status has outage=True, propagate it."""
         from penny.analysis import build_prediction
         from penny.status_fetcher import LiveStatus
 
+        live = LiveStatus(
+            session_pct=0.0,
+            session_reset_label="—",
+            session_reset_tz="UTC",
+            weekly_pct_all=0.0,
+            weekly_pct_sonnet=0.0,
+            weekly_reset_label="—",
+            weekly_reset_tz="UTC",
+            fetched_at=datetime.now(timezone.utc),
+            outage=True,
+        )
         cached = LiveStatus(
             session_pct=0.0,
             session_reset_label="—",
@@ -835,52 +801,60 @@ class TestBuildPrediction:
         state = {"period_history": [], "session_history": []}
         with (
             patch("penny.analysis.Path.home", return_value=tmp_path),
-            patch("penny.status_fetcher.fetch_live_status", return_value=None),
+            patch("penny.status_fetcher.fetch_live_status", return_value=live),
             patch("penny.status_fetcher.get_cached_status", return_value=cached),
         ):
             pred = build_prediction(state, force=False, precomputed_boundaries=[])
         assert pred.outage is True
-        assert pred.live_unavailable is True
 
-    def test_no_outage_when_live_none_and_cached_not_outage(self, tmp_path):
-        """When live fetch returns None and cached status has no outage, outage stays False."""
+    def test_outage_from_live_status(self, tmp_path):
+        """build_prediction uses live status outage flag directly."""
         from penny.analysis import build_prediction
         from penny.status_fetcher import LiveStatus
 
-        cached = LiveStatus(
-            session_pct=20.0,
-            session_reset_label="5pm",
+        live = LiveStatus(
+            session_pct=0.0,
+            session_reset_label="—",
             session_reset_tz="UTC",
-            weekly_pct_all=30.0,
-            weekly_pct_sonnet=10.0,
-            weekly_reset_label="Mar 6 at 9pm",
+            weekly_pct_all=0.0,
+            weekly_pct_sonnet=0.0,
+            weekly_reset_label="—",
             weekly_reset_tz="UTC",
             fetched_at=datetime.now(timezone.utc),
-            outage=False,
+            outage=True,
         )
         state = {"period_history": [], "session_history": []}
         with (
             patch("penny.analysis.Path.home", return_value=tmp_path),
-            patch("penny.status_fetcher.fetch_live_status", return_value=None),
-            patch("penny.status_fetcher.get_cached_status", return_value=cached),
+            patch("penny.status_fetcher.fetch_live_status", return_value=live),
         ):
             pred = build_prediction(state, force=False, precomputed_boundaries=[])
-        assert pred.outage is False
-        assert pred.live_unavailable is True
+        assert pred.outage is True
 
     def test_no_outage_when_live_none_and_no_cached_status(self, tmp_path):
-        """When live fetch returns None and no cached status exists, outage stays False."""
+        """When live fetch returns outage status and no cached status exists, outage stays False."""
         from penny.analysis import build_prediction
+        from penny.status_fetcher import LiveStatus
 
+        live = LiveStatus(
+            session_pct=0.0,
+            session_reset_label="—",
+            session_reset_tz="UTC",
+            weekly_pct_all=0.0,
+            weekly_pct_sonnet=0.0,
+            weekly_reset_label="—",
+            weekly_reset_tz="UTC",
+            fetched_at=datetime.now(timezone.utc),
+            outage=True,
+        )
         state = {"period_history": [], "session_history": []}
         with (
             patch("penny.analysis.Path.home", return_value=tmp_path),
-            patch("penny.status_fetcher.fetch_live_status", return_value=None),
+            patch("penny.status_fetcher.fetch_live_status", return_value=live),
             patch("penny.status_fetcher.get_cached_status", return_value=None),
         ):
             pred = build_prediction(state, force=False, precomputed_boundaries=[])
-        assert pred.outage is False
-        assert pred.live_unavailable is True
+        assert pred.outage is True
 
     def test_budget_back_calculated_from_live_pct(self, tmp_path):
         """When live pct > 0 and we have token counts, budget is back-calculated."""

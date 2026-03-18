@@ -116,7 +116,7 @@ def reset_period_if_needed(state: dict[str, Any]) -> dict[str, Any]:
     if state.get("current_period_start") == period_start_str:
         return state  # Same period, nothing to do
 
-    # Archive the completed period if we have data
+    # Archive the completed period for dashboard/report history
     old_pred = state.get("predictions", {})
     if old_pred.get("output_all", 0) > 0 and state.get("current_period_start"):
         history = state.get("period_history", [])
@@ -125,7 +125,6 @@ def reset_period_if_needed(state: dict[str, Any]) -> dict[str, Any]:
             "output_all": old_pred.get("output_all", 0),
             "output_sonnet": old_pred.get("output_sonnet", 0),
         })
-        # Keep last 12 weeks
         state["period_history"] = history[-12:]
 
     # Reset for new period
