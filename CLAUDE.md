@@ -76,14 +76,14 @@ closing; if coverage is the issue, the agent will have added tests already.
 
 ## Commit Agent
 
-Stages, commits, and pushes changes to GitHub using Conventional Commits format.
-Runs tests and lint before pushing. Groups related changes into logical commits.
+Stages, commits, pushes branch, and opens a PR on GitHub using Conventional
+Commits format. Runs tests and lint before pushing.
 
 ### When to invoke
 
 | Trigger | Example |
 |---------|---------|
-| User says "commit", "commit and push", "push" | `"commit and push"`, `"push these changes"` |
+| User says "commit", "push", "open a PR" | `"commit and push"`, `"open a PR"` |
 
 ### How to invoke
 
@@ -96,19 +96,19 @@ Commit and push the current changes.
 ### Interpreting the result
 
 The agent ends with `COMMIT RESULT: PASS` or `COMMIT RESULT: FAIL`.
-On PASS, the commits are pushed to origin/main.
+On PASS, the branch is pushed and a PR is open. Run the release agent next.
 On FAIL, no push was made — read the details to fix the issue.
 
 ## Release Agent
 
-Automates cutting a new Penny release (changelog, version sync, tag, push,
-GitHub Release).
+Merges a ready PR to main, then cuts a release (changelog, version sync,
+tag, push, GitHub Release). Checks CI status before merging.
 
 ### When to invoke
 
 | Trigger | Example |
 |---------|---------|
-| User says "cut a release" | `"cut a release"`, `"release a new version"` |
+| User says "cut a release" | `"cut a release"`, `"release"`, `"merge and release"` |
 
 ### How to invoke
 
@@ -121,5 +121,5 @@ Cut a new release for Penny.
 ### Interpreting the result
 
 The agent ends with `RELEASE RESULT: PASS` or `RELEASE RESULT: FAIL`.
-On PASS, the tag is pushed and the GitHub Release is live.
-On FAIL, no tag or push was made — read the details to fix the issue.
+On PASS, the PR is merged, tag is pushed, and the GitHub Release is live.
+On FAIL, read the details — the PR may have failing checks or need attention.
