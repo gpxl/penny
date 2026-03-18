@@ -145,11 +145,36 @@ If lint fails, output `RELEASE RESULT: FAIL` and stop. Do not push.
 
 ### Step 11 — Commit, tag, push
 
+Try pushing the release commit directly to main first:
+
 ```bash
 git add penny/__init__.py pyproject.toml Penny.app/Contents/Info.plist CHANGELOG.md
 git commit -m "release: vX.Y.Z"
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
 git push origin main --follow-tags
+```
+
+If the direct push is rejected (e.g., branch protection), push via a PR
+using **squash merge** to keep the history clean (one release commit, no
+merge commit):
+
+```bash
+git checkout -b release/vX.Y.Z
+git push -u origin release/vX.Y.Z
+gh pr create --title "release: vX.Y.Z" --body "Release vX.Y.Z"
+gh pr merge --squash --delete-branch --admin
+git checkout main
+git pull origin main
+```
+
+After the squash merge, the original tag points at the pre-merge commit.
+Delete it and re-tag on the squash commit so the tag is on main:
+
+```bash
+git tag -d vX.Y.Z
+git push origin :refs/tags/vX.Y.Z
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin --tags
 ```
 
 ### Step 12 — Create GitHub Release
@@ -164,7 +189,8 @@ gh release create vX.Y.Z --title "vX.Y.Z" --notes "<changelog section for this v
 - Do **not** push if tests or lint fail — report FAIL and stop.
 - Do **not** merge a PR with failing checks.
 - Always use annotated tags (`-a`), not lightweight.
-- Always use `--merge` strategy (not squash/rebase) to preserve commit history.
+- Use `--merge` for feature PRs (Step 3) to preserve commit history.
+- Use `--squash` for release PRs (Step 11) to avoid duplicate release commits.
 - Do **not** force-push.
 - Do **not** amend previous commits.
 - Do **not** close any beads issues — that is the delegating agent's job.
