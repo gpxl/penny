@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.0b1] - 2026-03-18
+
+### Added
+
+- Auto-install missing `pexpect`/`pyte` dependencies at startup via `penny/deps.py`
+- Commit agent for automated conventional commits that push branches and open PRs
+
+### Fixed
+
+- Outage warning now only shown for confirmed API errors — previously Penny showed "Calibrating" during Claude API outages
+- Removed JSONL budget estimation fallback; `build_prediction()` always uses live `/status` data
+
+### Changed
+
+- Updated commit and release agents for PR-based workflow
+
 ## [0.1.0] - 2026-03-12
 
 Initial public release.
