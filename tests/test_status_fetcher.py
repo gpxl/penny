@@ -118,6 +118,33 @@ Resets Jan 1 at 3am (US/Pacific)
         assert result.weekly_pct_all == 20.0
         assert result.weekly_pct_sonnet == 30.0
 
+    def test_multiline_label_and_percentage(self):
+        # Real Claude Code format: label on one line, progress bar + pct on next
+        screen = """\
+  Status   Config   Usage
+
+  Current session
+  ████████                                    11% used
+  Resets 3pm (Europe/Amsterdam)
+
+  Current week (all models)
+  ██████████████████                          37% used
+  Resets Mar 21 at 9am (Europe/Amsterdam)
+
+  Current week (Sonnet only)
+  █                                           0% used
+  Resets Mar 24 at 8pm (Europe/Amsterdam)
+
+  Esc to cancel
+"""
+        result = _parse_usage_screen(screen)
+        assert result is not None
+        assert result.session_pct == 11.0
+        assert result.weekly_pct_all == 37.0
+        assert result.weekly_pct_sonnet == 0.0
+        assert result.session_reset_label == "3pm"
+        assert result.weekly_reset_label == "Mar 24 at 8pm"
+
 
 # ── _screen_text ───────────────────────────────────────────────────────────────
 

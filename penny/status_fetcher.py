@@ -167,9 +167,10 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
       "Current week (all models)"    → N% used  →  Resets DATE at TIME (timezone)
       "Current week (Sonnet only)"   → N% used  (same reset as all models)
 
-    With _COLS=200 each row fits on one line, so label and "N% used" appear together.
     We extract percentages by anchoring to label text to avoid misassignment when the
     pyte screen contains residual content from a prior tab or partial render.
+    The label and "N% used" may be on the same line or on adjacent lines (the
+    progress bar + percentage often render on the line below the section header).
 
     The pyte screen may contain remnants of the previous tab above the tab bar.
     We locate the tab bar line ("Usage" with "Config" also visible) and parse
@@ -195,11 +196,20 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     _pct_re = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*used")
 
     def _extract_labeled_pct(label_pattern: str) -> float | None:
-        for line in section_lines:
+        for i, line in enumerate(section_lines):
             if re.search(label_pattern, line, re.IGNORECASE):
+                # Check same line first
                 m = _pct_re.search(line)
                 if m:
                     return float(m.group(1))
+                # Label and percentage may be on separate lines (label on one
+                # line, progress bar + "N% used" on the next).  Check the next
+                # few lines.
+                for j in range(1, 4):
+                    if i + j < len(section_lines):
+                        m = _pct_re.search(section_lines[i + j])
+                        if m:
+                            return float(m.group(1))
         return None
 
     session_pct = _extract_labeled_pct(r"current session")
