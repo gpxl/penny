@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pexpect
+
 from penny.status_fetcher import (
     LiveStatus,
     _cache_file,
@@ -15,6 +17,7 @@ from penny.status_fetcher import (
     _feed_child,
     _load_cache,
     _parse_usage_screen,
+    _safe_feed,
     _save_cache,
     _screen_text,
     fetch_live_status,
@@ -289,6 +292,108 @@ class TestCache:
         bad.write_text("not json")
         with patch("penny.status_fetcher._cache_file", return_value=bad):
             assert _load_cache() is None
+
+
+# ── _safe_feed ────────────────────────────────────────────────────────────────
+
+
+class TestSafeFeed:
+    """Prevent the crash that silently killed all live fetches."""
+
+    def test_feeds_bytes(self):
+        from penny.status_fetcher import _safe_feed
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, b"hello")
+        mock_stream.feed.assert_called_once_with(b"hello")
+
+    def test_ignores_pexpect_timeout_class(self):
+        from penny.status_fetcher import _safe_feed
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, pexpect.TIMEOUT)
+        mock_stream.feed.assert_not_called()
+
+    def test_ignores_pexpect_eof_class(self):
+        from penny.status_fetcher import _safe_feed
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, pexpect.EOF)
+        mock_stream.feed.assert_not_called()
+
+    def test_ignores_none(self):
+        from penny.status_fetcher import _safe_feed
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, None)
+        mock_stream.feed.assert_not_called()
+
+    def test_ignores_empty_bytes(self):
+        from penny.status_fetcher import _safe_feed
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, b"")
+        mock_stream.feed.assert_not_called()
+
+
+# ── End-to-end: stale cache → prediction ──────────────────────────────────────
+
+
+class TestStaleCachePredictionIntegration:
+    """Integration test that catches the bug where stale cache data
+    (missing Sonnet fields) flows through to prediction as if both
+    budgets share the same reset — which is misleading."""
+
+    def test_old_cache_prediction_does_not_fabricate_independent_sonnet_reset(self, tmp_path):
+        """When cache has no Sonnet reset field, prediction.reset_label_sonnet
+        should equal the all-models value (fallback), NOT appear as an
+        independently determined value."""
+        from penny.analysis import Prediction
+
+        old_cache_data = {
+            "session_pct": 10.0,
+            "session_reset_label": "3pm",
+            "session_reset_tz": "UTC",
+            "weekly_pct_all": 20.0,
+            "weekly_pct_sonnet": 30.0,
+            "weekly_reset_label": "Mar 28 at 10am",
+            "weekly_reset_tz": "UTC",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        cache_file = tmp_path / "cache.json"
+        cache_file.write_text(json.dumps(old_cache_data))
+
+        with patch("penny.status_fetcher._cache_file", return_value=cache_file):
+            loaded = _load_cache()
+
+        # The fallback copies all-models reset to Sonnet
+        assert loaded.weekly_reset_label_sonnet == loaded.weekly_reset_label
+
+        # This is the critical assertion: when both are identical from fallback,
+        # the UI should NOT display them as if they were independently determined.
+        # A prediction built from this data will show identical resets.
+        overrides = status_as_prediction_overrides(loaded)
+        assert overrides["reset_label"] == overrides["reset_label_sonnet"], (
+            "Stale cache without Sonnet fields should produce identical reset labels, "
+            "not fabricate an independent Sonnet reset"
+        )
+
+    def test_fresh_data_with_independent_resets_differs(self):
+        """When /status reports different resets, the prediction must carry
+        them independently — this is the case the old code missed."""
+        status = LiveStatus(
+            session_pct=44.0,
+            session_reset_label="5pm",
+            session_reset_tz="Europe/Amsterdam",
+            weekly_pct_all=15.0,
+            weekly_pct_sonnet=0.0,
+            weekly_reset_label="Mar 28 at 10am",
+            weekly_reset_tz="Europe/Amsterdam",
+            weekly_reset_label_sonnet="Mar 24 at 8pm",
+            weekly_reset_tz_sonnet="Europe/Amsterdam",
+            fetched_at=datetime.now(timezone.utc),
+        )
+        overrides = status_as_prediction_overrides(status)
+        assert overrides["reset_label"] != overrides["reset_label_sonnet"], (
+            "Independent Sonnet reset must differ from all-models reset"
+        )
+        assert overrides["reset_label"] == "Mar 28 at 10am"
+        assert overrides["reset_label_sonnet"] == "Mar 24 at 8pm"
 
 
 # ── _cache_file ───────────────────────────────────────────────────────────────
