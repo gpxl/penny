@@ -504,6 +504,20 @@ class PennyApp(NSObject):
         self._write_config()
         self._hot_reload_config()
 
+    def _pluginInstallDone_(self, info: Any) -> None:
+        """Callback from background plugin install (runs on main thread)."""
+        name = info.get("name", "")
+        success = info.get("success", False)
+        vc = self._vc
+        if vc is None:
+            return
+        vc._installing_plugins.discard(name)
+        if success:
+            self.set_plugin_enabled(name, True)
+        else:
+            vc._rebuild_plugins_section()
+            vc._relayout()
+
     def refreshNow_(self, sender: Any) -> None:
         """Refresh button: force-bypass cache and fetch live /status data."""
         self._vc.setRefreshing_(True)

@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from penny.plugins.loadout_plugin import (
     Plugin,
+    _format_scan_date,
     _needs_scan,
     _query_loadout_status,
 )
@@ -100,6 +102,82 @@ class TestPreflightChecks:
         assert len(issues) == 0
 
 
+# ── Install Command ──────────────────────────────────────────────────────────
+
+
+class TestInstallCommand:
+    def test_returns_install_command(self):
+        p = Plugin()
+        cmd = p.install_command()
+        assert cmd is not None
+        assert "curl" in cmd
+        assert "loadout" in cmd
+
+    @patch("penny.plugins.loadout_plugin._find_node_dirs")
+    def test_install_command_includes_path_augmentation(self, mock_node_dirs):
+        """Install command prepends node/pnpm dirs to PATH for launchd compat."""
+        # Use /tmp as a stand-in since install_command filters by is_dir()
+        mock_node_dirs.return_value = [Path("/tmp")]
+        with patch("penny.plugins.loadout_plugin._EXTRA_BIN_DIRS", [Path("/usr/local/bin")]):
+            p = Plugin()
+            cmd = p.install_command()
+            assert cmd is not None
+            assert "export PATH=" in cmd
+            assert "/tmp" in cmd
+            assert "curl" in cmd
+
+    def test_base_plugin_returns_none(self):
+        from penny.plugin import PennyPlugin
+
+        class MinimalPlugin(PennyPlugin):
+            @property
+            def name(self):
+                return "test"
+
+            @property
+            def description(self):
+                return "test"
+
+            def on_activate(self, app):
+                pass
+
+            def on_deactivate(self):
+                pass
+
+            def on_agent_spawned(self, task, record, plugin_state):
+                pass
+
+            def on_agent_completed(self, record, plugin_state):
+                pass
+
+        p = MinimalPlugin()
+        assert p.install_command() is None
+
+
+# ── _format_scan_date ─────────────────────────────────────────────────────────
+
+
+class TestFormatScanDate:
+    def test_today(self):
+        now = datetime.now(timezone.utc).isoformat()
+        assert _format_scan_date(now) == "today"
+
+    def test_yesterday(self):
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        assert _format_scan_date(yesterday) == "yesterday"
+
+    def test_days_ago(self):
+        five_days = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+        assert _format_scan_date(five_days) == "5 days ago"
+
+    def test_older_shows_date(self):
+        old = "2026-01-15T10:00:00Z"
+        assert _format_scan_date(old) == "Jan 15"
+
+    def test_invalid_returns_raw(self):
+        assert _format_scan_date("garbage") == "garbage"
+
+
 # ── _needs_scan ───────────────────────────────────────────────────────────────
 
 
@@ -133,6 +211,24 @@ class TestNeedsScan:
         assert _needs_scan(cached, {"scan_interval_days": 3}) is True
         # 7-day interval → should not trigger
         assert _needs_scan(cached, {"scan_interval_days": 7}) is False
+
+    def test_uses_penny_last_scanned_at_over_loadout(self):
+        """Penny's own last_scanned_at is used when loadout's lastScanAt is None."""
+        now = datetime.now(timezone.utc).isoformat()
+        cached = {
+            "status": _make_loadout_status(stale=False, last_scan_at=None),
+            "last_scanned_at": now,
+        }
+        assert _needs_scan(cached, {}) is False
+
+    def test_penny_timestamp_also_checked_for_staleness(self):
+        """Penny's timestamp is subject to the same interval check."""
+        old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+        cached = {
+            "status": _make_loadout_status(stale=False, last_scan_at=None),
+            "last_scanned_at": old,
+        }
+        assert _needs_scan(cached, {"scan_interval_days": 14}) is True
 
 
 # ── _query_loadout_status ────────────────────────────────────────────────────
@@ -365,6 +461,21 @@ class TestAgentCallbacks:
         assert proj["status"]["scan"]["stale"] is False
         mock_query.assert_called_once_with("/tmp/proj")
 
+    @patch("penny.plugins.loadout_plugin._query_loadout_status")
+    def test_on_agent_completed_records_penny_timestamp(self, mock_query):
+        """on_agent_completed sets last_scanned_at in penny's own state."""
+        p = Plugin()
+        mock_query.return_value = _make_loadout_status()
+        plugin_state: dict[str, Any] = {
+            "projects": {"/tmp/proj": {"status": {}, "scan_in_progress": True}}
+        }
+        p.on_agent_completed({}, plugin_state)
+        proj = plugin_state["projects"]["/tmp/proj"]
+        assert "last_scanned_at" in proj
+        # Should be a valid ISO timestamp
+        ts = datetime.fromisoformat(proj["last_scanned_at"].replace("Z", "+00:00"))
+        assert (datetime.now(timezone.utc) - ts).total_seconds() < 5
+
     @patch("penny.plugins.loadout_plugin._query_loadout_status", return_value=None)
     def test_on_agent_completed_handles_query_failure(self, mock_query):
         p = Plugin()
@@ -374,6 +485,8 @@ class TestAgentCallbacks:
         p.on_agent_completed({}, plugin_state)
         proj = plugin_state["projects"]["/tmp/proj"]
         assert proj["scan_in_progress"] is False
+        # Timestamp still recorded even on query failure
+        assert "last_scanned_at" in proj
         # Old status preserved on failure
         assert proj["status"] == {"old": True}
 
@@ -388,14 +501,17 @@ class TestDashboardCard:
         assert html is not None
         assert "No projects" in html
 
-    def test_renders_project_table(self):
+    def test_renders_global_section_and_project_table(self):
         state = {
             "plugin_state": {
                 "loadout": {
                     "projects": {
                         "/tmp/proj": {
                             "status": _make_loadout_status(
-                                skills=[{"name": "react", "scope": "project", "description": ""}],
+                                skills=[
+                                    {"name": "react", "scope": "project", "description": "React patterns"},
+                                    {"name": "accessibility", "scope": "global", "description": "A11y"},
+                                ],
                                 stale=False,
                                 last_scan_at="2026-03-20T10:00:00Z",
                             ),
@@ -408,11 +524,20 @@ class TestDashboardCard:
         p = Plugin()
         html = p.dashboard_card_html(state, {})
         assert html is not None
-        assert "proj" in html
-        assert "fresh" in html
         assert "Skill Coverage" in html
+        # Global section shown separately with expandable skill list
+        assert "1 global skill" in html
+        assert "accessibility" in html
+        assert "shared across all projects" in html
+        # Per-project table shows only project-specific count
+        assert "Project Skills" in html
+        assert "react" in html
+        # Column headers
+        assert "Last Analyzed" in html
+        assert "Scan Status" in html
+        assert "Current" in html
 
-    def test_stale_badge(self):
+    def test_stale_shows_needs_rescan(self):
         state = {
             "plugin_state": {
                 "loadout": {
@@ -427,9 +552,9 @@ class TestDashboardCard:
         }
         p = Plugin()
         html = p.dashboard_card_html(state, {})
-        assert "stale" in html
+        assert "Needs rescan" in html
 
-    def test_never_scanned_badge(self):
+    def test_never_scanned_shows_not_analyzed(self):
         state = {
             "plugin_state": {
                 "loadout": {
@@ -444,7 +569,126 @@ class TestDashboardCard:
         }
         p = Plugin()
         html = p.dashboard_card_html(state, {})
-        assert "never" in html
+        assert "Not analyzed" in html
+
+    def test_global_only_project_shows_zero_project_skills(self):
+        """Projects with only global skills show '0' in the project skills column."""
+        state = {
+            "plugin_state": {
+                "loadout": {
+                    "projects": {
+                        "/tmp/proj": {
+                            "status": _make_loadout_status(
+                                skills=[
+                                    {"name": "accessibility", "scope": "global", "description": "A11y"},
+                                    {"name": "best-practices", "scope": "global", "description": "BP"},
+                                ],
+                                stale=False,
+                                last_scan_at="2026-03-22T10:00:00Z",
+                            ),
+                            "scan_in_progress": False,
+                        }
+                    }
+                }
+            }
+        }
+        p = Plugin()
+        html = p.dashboard_card_html(state, {})
+        # Global section shows combined count
+        assert "2 global skill" in html
+        # Per-project row shows 0 project skills (plain text, no expandable)
+        assert "<td>0</td>" in html
+
+    def test_scan_button_present(self):
+        """Dashboard card includes a Scan All button."""
+        state = {
+            "plugin_state": {
+                "loadout": {
+                    "projects": {
+                        "/tmp/proj": {
+                            "status": _make_loadout_status(stale=None, last_scan_at=None),
+                            "scan_in_progress": False,
+                        }
+                    }
+                }
+            }
+        }
+        p = Plugin()
+        html = p.dashboard_card_html(state, {})
+        assert "Scan All" in html
+
+    def test_scan_in_progress_shows_scanning_status(self):
+        """Project with scan_in_progress shows Scanning indicator."""
+        state = {
+            "plugin_state": {
+                "loadout": {
+                    "projects": {
+                        "/tmp/proj": {
+                            "status": _make_loadout_status(stale=None, last_scan_at=None),
+                            "scan_in_progress": True,
+                        }
+                    }
+                }
+            }
+        }
+        p = Plugin()
+        html = p.dashboard_card_html(state, {})
+        assert "Scanning" in html
+        # Scan All button should be disabled while scanning
+        assert "disabled" in html
+
+    def test_penny_timestamp_used_for_last_analyzed(self):
+        """Dashboard uses penny's last_scanned_at instead of loadout's broken lastScanAt."""
+        now = datetime.now(timezone.utc).isoformat()
+        state = {
+            "plugin_state": {
+                "loadout": {
+                    "projects": {
+                        "/tmp/proj": {
+                            "status": _make_loadout_status(stale=False, last_scan_at=None),
+                            "last_scanned_at": now,
+                            "scan_in_progress": False,
+                        }
+                    }
+                }
+            }
+        }
+        p = Plugin()
+        html = p.dashboard_card_html(state, {})
+        assert "today" in html
+        assert "Current" in html
+
+    def test_global_skills_deduplicated_across_projects(self):
+        """Global skills shown once even when multiple projects report them."""
+        state = {
+            "plugin_state": {
+                "loadout": {
+                    "projects": {
+                        "/tmp/proj-a": {
+                            "status": _make_loadout_status(
+                                skills=[
+                                    {"name": "accessibility", "scope": "global", "description": ""},
+                                    {"name": "react-a", "scope": "project", "description": ""},
+                                ],
+                            ),
+                            "scan_in_progress": False,
+                        },
+                        "/tmp/proj-b": {
+                            "status": _make_loadout_status(
+                                skills=[
+                                    {"name": "accessibility", "scope": "global", "description": ""},
+                                ],
+                            ),
+                            "scan_in_progress": False,
+                        },
+                    }
+                }
+            }
+        }
+        p = Plugin()
+        html = p.dashboard_card_html(state, {})
+        # "accessibility" appears in global section, counted once
+        assert "1 global skill" in html
 
 
 # ── Dashboard API ────────────────────────────────────────────────────────────
@@ -466,8 +710,83 @@ class TestDashboardApi:
         p = Plugin()
         assert p.dashboard_api_handler("GET", "unknown", {}) is None
 
+    def test_scan_endpoint_starts_background_scan(self):
+        p = Plugin()
+        app = _make_app()
+        p.on_activate(app)
+        cache = app.state["plugin_state"].setdefault("loadout", {}).setdefault("projects", {})
+        cache["/tmp/proj"] = {"status": _make_loadout_status(), "scan_in_progress": False}
+
+        with patch.object(p, "_run_scan_background"):
+            result = p.dashboard_api_handler("POST", "scan", {"path": "/tmp/proj"})
+            assert result is not None
+            assert result["ok"] is True
+            assert "/tmp/proj" in result["scanning"]
+            assert cache["/tmp/proj"]["scan_in_progress"] is True
+
+    def test_scan_endpoint_skips_already_scanning(self):
+        p = Plugin()
+        app = _make_app()
+        p.on_activate(app)
+        cache = app.state["plugin_state"].setdefault("loadout", {}).setdefault("projects", {})
+        cache["/tmp/proj"] = {"status": _make_loadout_status(), "scan_in_progress": True}
+
+        with patch.object(p, "_run_scan_background"):
+            result = p.dashboard_api_handler("POST", "scan", {"path": "/tmp/proj"})
+            assert result["ok"] is True
+            assert result["scanning"] == []
+
+    def test_scan_endpoint_unknown_path_returns_error(self):
+        p = Plugin()
+        app = _make_app()
+        p.on_activate(app)
+
+        result = p.dashboard_api_handler("POST", "scan", {"path": "/tmp/nonexistent"})
+        assert result is not None
+        assert result["ok"] is False
+
 
 # ── CLI Commands ─────────────────────────────────────────────────────────────
+
+
+# ── Background Scan ──────────────────────────────────────────────────────────
+
+
+class TestFinishScan:
+    @patch("penny.plugins.loadout_plugin._query_loadout_status")
+    def test_finish_scan_success_updates_cache(self, mock_query):
+        new_status = _make_loadout_status(
+            skills=[{"name": "react", "scope": "project", "description": ""}],
+        )
+        mock_query.return_value = new_status
+        app = _make_app()
+        p = Plugin()
+        p.on_activate(app)
+        cache = p._get_project_cache()
+        cache["/tmp/proj"] = {"status": {}, "scan_in_progress": True}
+
+        p._finish_scan("/tmp/proj", success=True)
+
+        proj = cache["/tmp/proj"]
+        assert proj["scan_in_progress"] is False
+        assert "last_scanned_at" in proj
+        assert len(proj["status"]["skills"]) == 1
+
+    def test_finish_scan_failure_clears_in_progress(self):
+        app = _make_app()
+        p = Plugin()
+        p.on_activate(app)
+        cache = p._get_project_cache()
+        cache["/tmp/proj"] = {"status": {"old": True}, "scan_in_progress": True}
+
+        p._finish_scan("/tmp/proj", success=False)
+
+        proj = cache["/tmp/proj"]
+        assert proj["scan_in_progress"] is False
+        # No timestamp recorded on failure
+        assert "last_scanned_at" not in proj
+        # Old status preserved
+        assert proj["status"] == {"old": True}
 
 
 class TestCliCommands:
