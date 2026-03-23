@@ -12,7 +12,6 @@ from typing import Any
 import objc
 from AppKit import (
     NSAnimationContext,
-    NSButton,
     NSColor,
     NSLayoutConstraint,
     NSStackView,
@@ -73,9 +72,10 @@ class ControlCenterViewController(NSViewController):
         # Plugin UI sections
         self._plugin_section_views: list[Any] = []
         self._plugin_sections: list[Any] = []  # UISection instances
-        # Plugins management section
+        # Plugins management (inside settings section)
         self._plugins_section_stack: Any = None
         self._plugin_row_views: list[Any] = []
+        self._installing_plugins: set[str] = set()
         # Collapsible settings section
         self._settings_expanded: bool = False
         self._settings_animating: bool = False
@@ -243,11 +243,8 @@ class ControlCenterViewController(NSViewController):
         # Plugin sections (e.g. Beads task lists) are inserted here dynamically.
         self._plugin_insertion_index = len(stack.arrangedSubviews())
 
-        # ── Plugins management ────────────────────────────────────────────────
-        plugins_view = self._make_plugins_section()
-        stack.addArrangedSubview_(plugins_view)
-
         # ── Collapsible settings section ──────────────────────────────────────
+        # Plugins management is inside the settings section (not in the main view).
         settings_view = self._make_settings_section()
         settings_view.setHidden_(True)
         self._settings_section_view = settings_view
@@ -318,7 +315,13 @@ class ControlCenterViewController(NSViewController):
 
     @objc.python_method
     def _rebuild_plugins_section(self) -> None:
-        """Rebuild plugin checkbox rows from the current plugin manager state."""
+        """Rebuild plugin rows from the current plugin manager state.
+
+        Each row shows: [name]  [description]  [Install | toggle]
+        - Not installed → "Install" button
+        - Installing → "Installing…" + spinner
+        - Installed → NSSwitch (on/off)
+        """
         if self._plugins_section_stack is None or self._app is None:
             return
         mgr = getattr(self._app, "_plugin_mgr", None)
@@ -338,25 +341,48 @@ class ControlCenterViewController(NSViewController):
 
         for name, plugin in mgr.all_plugins.items():
             row = NSStackView.alloc().init()
-            row.setOrientation_(0)
+            row.setOrientation_(0)    # horizontal
             row.setSpacing_(8.0)
-            row.setDistribution_(0)
+            row.setDistribution_(3)   # NSStackViewDistributionEqualSpacing
+            row.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
-            checkbox = NSButton.alloc().init()
-            checkbox.setButtonType_(3)   # NSButtonTypeSwitch
-            checkbox.setTitle_("")
-            checkbox.setState_(1 if name in active_names else 0)
-            checkbox.setTarget_(self)
-            checkbox.setAction_("_togglePlugin:")
-            checkbox.setRepresentedObject_(name)
+            # Left side: name + description
+            left = NSStackView.alloc().init()
+            left.setOrientation_(0)
+            left.setSpacing_(6.0)
 
             name_lbl = make_label(plugin.name, size=12.0, bold=True)
-            desc_lbl = make_label(plugin.description, size=11.0, secondary=True)
-            desc_lbl.setContentCompressionResistancePriority_forOrientation_(249, 0)
+            left.addArrangedSubview_(name_lbl)
 
-            row.addArrangedSubview_(checkbox)
-            row.addArrangedSubview_(name_lbl)
-            row.addArrangedSubview_(desc_lbl)
+            installing = name in self._installing_plugins
+            available = plugin.is_available()
+
+            if installing:
+                desc_lbl = make_label("Installing…", size=11.0, secondary=True)
+            else:
+                desc_lbl = make_label(plugin.description, size=11.0, secondary=True)
+            desc_lbl.setContentCompressionResistancePriority_forOrientation_(249, 0)
+            left.addArrangedSubview_(desc_lbl)
+
+            row.addArrangedSubview_(left)
+
+            # Right side: Install button, spinner, or toggle
+            if installing:
+                spinner_lbl = make_label("⏳", size=12.0, secondary=True)
+                row.addArrangedSubview_(spinner_lbl)
+            elif not available:
+                install_btn = make_button("Install", self, "_installPlugin:")
+                install_btn.setRepresentedObject_(name)
+                row.addArrangedSubview_(install_btn)
+            else:
+                sw = NSSwitch.alloc().init()
+                sw.setTarget_(self)
+                sw.setAction_("_togglePlugin:")
+                sw.setRepresentedObject_(name)
+                sw.setControlSize_(1)   # NSControlSizeSmall
+                sw.setState_(1 if name in active_names else 0)
+                row.addArrangedSubview_(sw)
 
             self._plugins_section_stack.addArrangedSubview_(row)
             self._plugin_row_views.append(row)
@@ -364,20 +390,81 @@ class ControlCenterViewController(NSViewController):
         self._plugins_section_stack.setHidden_(not bool(mgr.all_plugins))
 
     def _togglePlugin_(self, sender: Any) -> None:
-        """Toggle a plugin on or off via the plugins management checkboxes."""
+        """Toggle a plugin on or off via the NSSwitch."""
         plugin_name = str(sender.representedObject() or "")
         if not plugin_name or not self._app:
             return
         self._app.set_plugin_enabled(plugin_name, bool(sender.state()))
 
+    def _installPlugin_(self, sender: Any) -> None:
+        """Install a plugin's dependencies in the background."""
+        import subprocess
+        import threading
+
+        plugin_name = str(sender.representedObject() or "")
+        if not plugin_name or not self._app:
+            return
+        mgr = getattr(self._app, "_plugin_mgr", None)
+        if mgr is None:
+            return
+        plugin = mgr.all_plugins.get(plugin_name)
+        if plugin is None:
+            return
+        cmd = plugin.install_command()
+        if cmd is None:
+            return
+
+        # Mark as installing and refresh UI
+        self._installing_plugins.add(plugin_name)
+        self._rebuild_plugins_section()
+        self._relayout()
+
+        def _run_install():
+            try:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=120,
+                )
+                success = result.returncode == 0
+                if not success:
+                    print(f"[penny] plugin install failed for {plugin_name}: {result.stderr.strip()}", flush=True)
+            except Exception as exc:
+                print(f"[penny] plugin install error for {plugin_name}: {exc}", flush=True)
+                success = False
+
+            # Back to main thread
+            from AppKit import NSApp
+            NSApp.delegate().performSelectorOnMainThread_withObject_waitUntilDone_(
+                "_pluginInstallDone:", {"name": plugin_name, "success": success}, False,
+            )
+
+        threading.Thread(target=_run_install, daemon=True).start()
+
+    @objc.python_method
+    def _make_plugins_section(self) -> NSView:
+        """Create the Plugins management section (header + rows)."""
+        outer = NSStackView.alloc().init()
+        outer.setOrientation_(1)
+        outer.setAlignment_(5)
+        outer.setSpacing_(6.0)
+        outer.addArrangedSubview_(make_label("Plugins", size=11.0, secondary=True))
+        outer.setHidden_(True)   # Hidden until plugins are registered
+        self._plugins_section_stack = outer
+        return outer
+
     @objc.python_method
     def _make_settings_section(self) -> NSView:
-        """Collapsible settings section: Keep Alive + Launch at Login."""
+        """Collapsible settings section: Plugins + Keep Alive + Launch at Login."""
         outer = NSStackView.alloc().init()
         outer.setOrientation_(1)   # vertical
         outer.setAlignment_(5)     # NSLayoutAttributeLeading
         outer.setSpacing_(8.0)
 
+        # ── Plugins (above service toggles) ──────────────────────────────
+        plugins_view = self._make_plugins_section()
+        outer.addArrangedSubview_(plugins_view)
+        outer.addArrangedSubview_(_make_separator())
+
+        # ── Service toggles ──────────────────────────────────────────────
         _services = [
             ("Keep Alive",       "toggleKeepAlive:",      "_keep_alive_btn"),
             ("Launch at Login",  "toggleLaunchAtLogin:", "_login_btn"),

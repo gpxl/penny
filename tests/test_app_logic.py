@@ -1213,6 +1213,64 @@ class TestSetPluginEnabled:
         assert hot_reload_called  # _hot_reload_config was called
 
 
+# ── _pluginInstallDone_ (direct call into penny/app.py) ─────────────────────
+
+
+class TestPluginInstallDoneDirect:
+    """Call PennyApp._pluginInstallDone_ directly to cover plugin install callback."""
+
+    def test_handles_none_vc_gracefully(self):
+        """When _vc is None, should return early without error."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        app._vc = None
+        # Should not raise
+        PennyApp._pluginInstallDone_(app, {"name": "test", "success": True})
+
+    def test_removes_plugin_from_installing_set_on_success(self):
+        """When success=True, plugin name is removed from _installing_plugins."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        app._vc._installing_plugins = {"test"}
+        app.set_plugin_enabled = MagicMock()
+        PennyApp._pluginInstallDone_(app, {"name": "test", "success": True})
+        assert "test" not in app._vc._installing_plugins
+        # Should call set_plugin_enabled to enable the plugin
+        assert app._vc._installing_plugins == set()
+
+    def test_enables_plugin_on_success(self):
+        """When success=True, should call set_plugin_enabled with True."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        app._vc._installing_plugins = set()
+        app.set_plugin_enabled = MagicMock()
+        PennyApp._pluginInstallDone_(app, {"name": "loadout", "success": True})
+        app.set_plugin_enabled.assert_called_once_with("loadout", True)
+
+    def test_rebuilds_ui_on_install_failure(self):
+        """When success=False, should rebuild plugins section and relayout."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        app._vc._installing_plugins = {"test"}
+        PennyApp._pluginInstallDone_(app, {"name": "test", "success": False})
+        app._vc._rebuild_plugins_section.assert_called_once()
+        app._vc._relayout.assert_called_once()
+
+    def test_removes_plugin_from_installing_on_failure(self):
+        """Plugin is removed from _installing_plugins even on failure."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        app._vc._installing_plugins = {"loadout", "other"}
+        PennyApp._pluginInstallDone_(app, {"name": "loadout", "success": False})
+        assert "loadout" not in app._vc._installing_plugins
+        assert "other" in app._vc._installing_plugins
+
+
 # ── _write_config (direct call into penny/app.py) ────────────────────────────
 
 
