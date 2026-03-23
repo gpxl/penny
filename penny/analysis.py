@@ -179,6 +179,22 @@ def format_reset_label(label: str) -> str:
     return label
 
 
+def short_reset_label(label: str) -> str:
+    """Return a compact version of a reset label for inline display.
+
+    - "Mar 28 at 10am" → "Mar 28"  (weekly: strip time, just show date)
+    - "5pm" → "5pm"               (session: already short, pass through)
+    - "Mar 24 at 20" → "Mar 24"   (24h formatted: strip time)
+    """
+    if not label or label == "—":
+        return label
+    # Weekly labels have "at" — strip everything from "at" onward
+    m = re.match(r"^([A-Z][a-z]{2}\s+\d{1,2})\s+at\s+", label)
+    if m:
+        return m.group(1)
+    return label
+
+
 # ---------------------------------------------------------------------------
 # Token counting from JSONL files
 # ---------------------------------------------------------------------------
@@ -640,8 +656,8 @@ def _parse_rate_limit_reset(text: str) -> datetime | None:
         hour_24 = 12 if hour == 12 else hour + 12
 
     try:
-        msg_tz = ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, KeyError):
+        msg_tz = ZoneInfo(tz_name.strip())
+    except (ZoneInfoNotFoundError, KeyError, ValueError):
         return None
 
     # We need a context timestamp to determine the reset date — caller must provide it
@@ -710,8 +726,8 @@ def find_session_boundaries(since: datetime) -> list[datetime]:
                             hour_24 = 12 if hour == 12 else hour + 12
 
                         try:
-                            msg_tz = ZoneInfo(tz_name)
-                        except (ZoneInfoNotFoundError, KeyError):
+                            msg_tz = ZoneInfo(tz_name.strip())
+                        except (ZoneInfoNotFoundError, KeyError, ValueError):
                             continue
 
                         try:
@@ -880,10 +896,10 @@ def _hours_until_dated_reset_label(label: str, tz_name: str) -> float:
     """
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-    if not tz_name:
+    if not tz_name or not tz_name.strip():
         return 0.0
     try:
-        tz = ZoneInfo(tz_name)
+        tz = ZoneInfo(tz_name.strip())
     except (ZoneInfoNotFoundError, KeyError, ValueError):
         return 0.0
 
@@ -930,10 +946,10 @@ def _hours_until_reset_label(label: str, tz_name: str) -> float:
     """
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-    if not tz_name:
+    if not tz_name or not tz_name.strip():
         return 0.0
     try:
-        tz = ZoneInfo(tz_name)
+        tz = ZoneInfo(tz_name.strip())
     except (ZoneInfoNotFoundError, KeyError, ValueError):
         return 0.0
 

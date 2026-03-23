@@ -22,7 +22,7 @@ from AppKit import (
 )
 from Foundation import NSEdgeInsets, NSTimer
 
-from .analysis import format_reset_label
+from .analysis import format_reset_label, short_reset_label
 from .ui_components import ProgressBarView, make_button, make_label
 
 _SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -51,14 +51,13 @@ class ControlCenterViewController(NSViewController):
         # Progress bars and labels
         self._bar_all: ProgressBarView | None = None
         self._bar_sonnet: ProgressBarView | None = None
-        self._lbl_all_reset: NSTextField | None = None
-        self._lbl_sonnet_reset: NSTextField | None = None
         self._bar_session: ProgressBarView | None = None
         self._lbl_all_pct: NSTextField | None = None
         self._lbl_sonnet_pct: NSTextField | None = None
         self._lbl_session_pct: NSTextField | None = None
-        self._lbl_weekly_header: NSTextField | None = None
-        self._lbl_session_header: NSTextField | None = None
+        self._lbl_all_reset: NSTextField | None = None
+        self._lbl_sonnet_reset: NSTextField | None = None
+        self._lbl_session_reset: NSTextField | None = None
         self._lbl_outage_warning: NSTextField | None = None
         # UI state
         self._refresh_btn: Any = None
@@ -124,26 +123,19 @@ class ControlCenterViewController(NSViewController):
             self._lbl_all_pct.setStringValue_(f"{pred.pct_all:.0f}%")
             self._lbl_sonnet_pct.setStringValue_(f"{pred.pct_sonnet:.0f}%")
             self._lbl_session_pct.setStringValue_(f"{pred.session_pct_all:.0f}%")
+            # Inline reset labels (compact, in each bar row)
             if pred.session_reset_label:
                 formatted = format_reset_label(pred.session_reset_label)
-                parts = formatted.split(" at ", 1)
-                sess_time = parts[1] if len(parts) > 1 else formatted
-                self._lbl_session_header.setStringValue_(
-                    f"Session Budget resets at {sess_time}"
-                )
-            else:
-                self._lbl_session_header.setStringValue_("Session Budget")
-            self._lbl_weekly_header.setStringValue_("Weekly Budget")
-
-            # Per-bar reset sub-labels
+                self._lbl_session_reset.setStringValue_(formatted)
+                self._lbl_session_reset.setToolTip_(f"Resets {formatted}")
             if pred.reset_label:
-                self._lbl_all_reset.setStringValue_(
-                    f"Resets {format_reset_label(pred.reset_label)}"
-                )
+                full = format_reset_label(pred.reset_label)
+                self._lbl_all_reset.setStringValue_(short_reset_label(full))
+                self._lbl_all_reset.setToolTip_(f"Resets {full}")
             if pred.reset_label_sonnet:
-                self._lbl_sonnet_reset.setStringValue_(
-                    f"Resets {format_reset_label(pred.reset_label_sonnet)}"
-                )
+                full = format_reset_label(pred.reset_label_sonnet)
+                self._lbl_sonnet_reset.setStringValue_(short_reset_label(full))
+                self._lbl_sonnet_reset.setToolTip_(f"Resets {full}")
             if self._lbl_outage_warning is not None:
                 if pred.outage:
                     self._lbl_outage_warning.setStringValue_(
@@ -223,22 +215,18 @@ class ControlCenterViewController(NSViewController):
         stack.addArrangedSubview_(self._lbl_outage_warning)
 
         # ── Session Budget ───────────────────────────────────────────────────
-        self._lbl_session_header = make_label("Session Budget", size=11.0, secondary=True)
-        stack.addArrangedSubview_(self._lbl_session_header)
-        self._bar_session, self._lbl_session_pct = self._add_bar_row(
-            stack, "This session", 0.0
+        self._bar_session, self._lbl_session_pct, self._lbl_session_reset = (
+            self._add_bar_row(stack, "Session", 0.0)
         )
         stack.addArrangedSubview_(_make_separator())
 
         # ── Weekly Budget ────────────────────────────────────────────────────
-        self._lbl_weekly_header = make_label("Weekly Budget", size=11.0, secondary=True)
-        stack.addArrangedSubview_(self._lbl_weekly_header)
-        self._bar_all, self._lbl_all_pct = self._add_bar_row(stack, "All models", 0.0)
-        self._lbl_all_reset = make_label("", size=9.0, secondary=True)
-        stack.addArrangedSubview_(self._lbl_all_reset)
-        self._bar_sonnet, self._lbl_sonnet_pct = self._add_bar_row(stack, "Sonnet", 0.0)
-        self._lbl_sonnet_reset = make_label("", size=9.0, secondary=True)
-        stack.addArrangedSubview_(self._lbl_sonnet_reset)
+        self._bar_all, self._lbl_all_pct, self._lbl_all_reset = (
+            self._add_bar_row(stack, "All models", 0.0)
+        )
+        self._bar_sonnet, self._lbl_sonnet_pct, self._lbl_sonnet_reset = (
+            self._add_bar_row(stack, "Sonnet", 0.0)
+        )
 
         stack.addArrangedSubview_(_make_separator())
 
@@ -593,7 +581,7 @@ class ControlCenterViewController(NSViewController):
 
     @objc.python_method
     def _add_bar_row(self, stack: NSStackView, label: str,
-                     initial_pct: float) -> tuple[ProgressBarView, NSTextField]:
+                     initial_pct: float) -> tuple[ProgressBarView, NSTextField, NSTextField]:
         row = NSStackView.alloc().init()
         row.setOrientation_(0)
         row.setSpacing_(8.0)
@@ -603,7 +591,7 @@ class ControlCenterViewController(NSViewController):
 
         lbl = make_label(label, size=12.0)
         lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        lbl.widthAnchor().constraintEqualToConstant_(90.0).setActive_(True)
+        lbl.widthAnchor().constraintEqualToConstant_(80.0).setActive_(True)
 
         bar = ProgressBarView.alloc().initWithFrame_(((0, 0), (100.0, _BAR_HEIGHT)))
         bar.setPct(initial_pct)
@@ -616,11 +604,17 @@ class ControlCenterViewController(NSViewController):
         pct_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
         pct_lbl.widthAnchor().constraintEqualToConstant_(36.0).setActive_(True)
 
+        reset_lbl = make_label("", size=9.0, secondary=True)
+        reset_lbl.setAlignment_(1)  # NSTextAlignmentRight
+        reset_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        reset_lbl.widthAnchor().constraintEqualToConstant_(60.0).setActive_(True)
+
         row.addArrangedSubview_(lbl)
         row.addArrangedSubview_(bar)
         row.addArrangedSubview_(pct_lbl)
+        row.addArrangedSubview_(reset_lbl)
         stack.addArrangedSubview_(row)
-        return bar, pct_lbl
+        return bar, pct_lbl, reset_lbl
 
     # ── Footer helpers ─────────────────────────────────────────────────────
 
