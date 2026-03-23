@@ -51,6 +51,8 @@ class ControlCenterViewController(NSViewController):
         # Progress bars and labels
         self._bar_all: ProgressBarView | None = None
         self._bar_sonnet: ProgressBarView | None = None
+        self._lbl_all_reset: NSTextField | None = None
+        self._lbl_sonnet_reset: NSTextField | None = None
         self._bar_session: ProgressBarView | None = None
         self._lbl_all_pct: NSTextField | None = None
         self._lbl_sonnet_pct: NSTextField | None = None
@@ -131,20 +133,17 @@ class ControlCenterViewController(NSViewController):
                 )
             else:
                 self._lbl_session_header.setStringValue_("Session Budget")
+            self._lbl_weekly_header.setStringValue_("Weekly Budget")
+
+            # Per-bar reset sub-labels
             if pred.reset_label:
-                formatted = format_reset_label(pred.reset_label)
-                parts = formatted.split(" at ", 1)
-                if len(parts) == 2:
-                    weekly_date, weekly_time = parts[0], parts[1]
-                    self._lbl_weekly_header.setStringValue_(
-                        f"Weekly Budget resets at {weekly_time} on {weekly_date}"
-                    )
-                else:
-                    self._lbl_weekly_header.setStringValue_(
-                        f"Weekly Budget resets at {formatted}"
-                    )
-            else:
-                self._lbl_weekly_header.setStringValue_("Weekly Budget")
+                self._lbl_all_reset.setStringValue_(
+                    f"Resets {format_reset_label(pred.reset_label)}"
+                )
+            if pred.reset_label_sonnet:
+                self._lbl_sonnet_reset.setStringValue_(
+                    f"Resets {format_reset_label(pred.reset_label_sonnet)}"
+                )
             if self._lbl_outage_warning is not None:
                 if pred.outage:
                     self._lbl_outage_warning.setStringValue_(
@@ -235,7 +234,11 @@ class ControlCenterViewController(NSViewController):
         self._lbl_weekly_header = make_label("Weekly Budget", size=11.0, secondary=True)
         stack.addArrangedSubview_(self._lbl_weekly_header)
         self._bar_all, self._lbl_all_pct = self._add_bar_row(stack, "All models", 0.0)
+        self._lbl_all_reset = make_label("", size=9.0, secondary=True)
+        stack.addArrangedSubview_(self._lbl_all_reset)
         self._bar_sonnet, self._lbl_sonnet_pct = self._add_bar_row(stack, "Sonnet", 0.0)
+        self._lbl_sonnet_reset = make_label("", size=9.0, secondary=True)
+        stack.addArrangedSubview_(self._lbl_sonnet_reset)
 
         stack.addArrangedSubview_(_make_separator())
 

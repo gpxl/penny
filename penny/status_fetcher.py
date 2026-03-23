@@ -66,6 +66,8 @@ def _make_outage_status() -> LiveStatus:
         weekly_pct_sonnet=good.weekly_pct_sonnet if good else 0.0,
         weekly_reset_label=good.weekly_reset_label if good else "\u2014",
         weekly_reset_tz=good.weekly_reset_tz if good else "",
+        weekly_reset_label_sonnet=good.weekly_reset_label_sonnet if good else "\u2014",
+        weekly_reset_tz_sonnet=good.weekly_reset_tz_sonnet if good else "",
         fetched_at=datetime.now(timezone.utc),
         outage=True,
     )
@@ -90,6 +92,8 @@ def _stale_or_default() -> LiveStatus:
         weekly_pct_sonnet=0.0,
         weekly_reset_label="\u2014",
         weekly_reset_tz="",
+        weekly_reset_label_sonnet="\u2014",
+        weekly_reset_tz_sonnet="",
         fetched_at=datetime.now(timezone.utc),
     )
 
@@ -113,6 +117,8 @@ def _save_cache(status: LiveStatus) -> None:
             "weekly_pct_sonnet": status.weekly_pct_sonnet,
             "weekly_reset_label": status.weekly_reset_label,
             "weekly_reset_tz": status.weekly_reset_tz,
+            "weekly_reset_label_sonnet": status.weekly_reset_label_sonnet,
+            "weekly_reset_tz_sonnet": status.weekly_reset_tz_sonnet,
             "fetched_at": status.fetched_at.isoformat(),
         }))
     except Exception:
@@ -133,6 +139,8 @@ def _load_cache() -> LiveStatus | None:
             weekly_pct_sonnet=d["weekly_pct_sonnet"],
             weekly_reset_label=d["weekly_reset_label"],
             weekly_reset_tz=d["weekly_reset_tz"],
+            weekly_reset_label_sonnet=d.get("weekly_reset_label_sonnet", d["weekly_reset_label"]),
+            weekly_reset_tz_sonnet=d.get("weekly_reset_tz_sonnet", d["weekly_reset_tz"]),
             fetched_at=datetime.fromisoformat(d["fetched_at"]),
         )
     except Exception:
@@ -147,15 +155,17 @@ _COLS = 200
 @dataclass
 class LiveStatus:
     """Parsed data from claude /status Usage tab, all values ground-truth from Anthropic."""
-    session_pct: float          # "16% used"
-    session_reset_label: str    # "2pm" (extracted from "Resets 2pm (Europe/Amsterdam)")
-    session_reset_tz: str       # "Europe/Amsterdam" (timezone shown in /status)
-    weekly_pct_all: float       # "30% used"
-    weekly_pct_sonnet: float    # "41% used"
-    weekly_reset_label: str     # "Mar 6 at 9pm"
-    weekly_reset_tz: str        # "Europe/Amsterdam" (timezone shown in /status)
+    session_pct: float              # "16% used"
+    session_reset_label: str        # "2pm" (extracted from "Resets 2pm (Europe/Amsterdam)")
+    session_reset_tz: str           # "Europe/Amsterdam" (timezone shown in /status)
+    weekly_pct_all: float           # "30% used"
+    weekly_pct_sonnet: float        # "41% used"
+    weekly_reset_label: str         # "Mar 28 at 9:59am" (all-models reset)
+    weekly_reset_tz: str            # "Europe/Amsterdam"
     fetched_at: datetime
-    outage: bool = False        # True when /status returned an API error instead of data
+    outage: bool = False            # True when /status returned an API error instead of data
+    weekly_reset_label_sonnet: str = ""   # "Mar 24 at 8pm" (Sonnet-specific reset)
+    weekly_reset_tz_sonnet: str = ""      # "Europe/Amsterdam"
 
 
 def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
@@ -165,7 +175,7 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     Labels on screen (from /status Usage tab):
       "Current session"              → N% used  →  Resets TIME (timezone)
       "Current week (all models)"    → N% used  →  Resets DATE at TIME (timezone)
-      "Current week (Sonnet only)"   → N% used  (same reset as all models)
+      "Current week (Sonnet only)"   → N% used  →  Resets DATE at TIME (timezone) [independent]
 
     We extract percentages by anchoring to label text to avoid misassignment when the
     pyte screen contains residual content from a prior tab or partial render.
@@ -226,27 +236,65 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
         pct_all     = float(pcts[1])
         pct_sonnet  = float(pcts[2])
 
-    # Capture both the time label AND the timezone string — works for any timezone.
-    # Resets: session reset first (short: "2pm"), weekly reset last (long: "Mar 6 at 9pm").
-    resets = re.findall(r"Resets\s+(.+?)\s*\(([^)]+)\)", section)
-    if len(resets) < 1:
+    # Label-anchored reset extraction: walk section lines and assign each
+    # "Resets ..." line to its preceding section label.  This handles both
+    # the old format (single shared weekly reset) and the new format (separate
+    # resets for all-models and Sonnet).
+    _reset_re = re.compile(r"Resets\s+(.+?)\s*\(([^)]+)\)")
+
+    def _extract_labeled_reset(label_pattern: str) -> tuple[str, str] | None:
+        for i, line in enumerate(section_lines):
+            if re.search(label_pattern, line, re.IGNORECASE):
+                # Check subsequent lines for a Resets line.
+                # Don't stop at "Sonnet only" since in the shared-reset format
+                # the Resets line follows both "all models" and "Sonnet only".
+                for j in range(1, 6):
+                    if i + j < len(section_lines):
+                        m = _reset_re.search(section_lines[i + j])
+                        if m:
+                            return m.group(1).strip(), m.group(2).strip()
+                        # Stop at a different major section (session), not at
+                        # peer labels (Sonnet/all-models share a section)
+                        if re.search(r"current session", section_lines[i + j], re.IGNORECASE):
+                            break
         return None
 
-    session_reset_label = resets[0][0].strip()
-    session_reset_tz    = resets[0][1].strip()
-    weekly_reset_label  = resets[-1][0].strip()
-    weekly_reset_tz     = resets[-1][1].strip()
+    session_reset = _extract_labeled_reset(r"current session")
+    all_models_reset = _extract_labeled_reset(r"all models")
+    sonnet_reset = _extract_labeled_reset(r"sonnet")
+
+    # Fallback: positional parsing for old/minimal formats
+    if session_reset is None or (all_models_reset is None and sonnet_reset is None):
+        resets = _reset_re.findall(section)
+        if len(resets) < 1:
+            return None
+        if session_reset is None:
+            session_reset = (resets[0][0].strip(), resets[0][1].strip())
+        if all_models_reset is None:
+            all_models_reset = (resets[-1][0].strip(), resets[-1][1].strip())
+
+    # If Sonnet has no independent reset, use the all-models reset
+    if sonnet_reset is None:
+        sonnet_reset = all_models_reset
 
     return LiveStatus(
         session_pct=session_pct,
-        session_reset_label=session_reset_label,
-        session_reset_tz=session_reset_tz,
+        session_reset_label=session_reset[0],
+        session_reset_tz=session_reset[1],
         weekly_pct_all=pct_all,
         weekly_pct_sonnet=pct_sonnet,
-        weekly_reset_label=weekly_reset_label,
-        weekly_reset_tz=weekly_reset_tz,
+        weekly_reset_label=all_models_reset[0],
+        weekly_reset_tz=all_models_reset[1],
+        weekly_reset_label_sonnet=sonnet_reset[0],
+        weekly_reset_tz_sonnet=sonnet_reset[1],
         fetched_at=datetime.now(timezone.utc),
     )
+
+
+def _safe_feed(stream: Any, data: Any) -> None:
+    """Feed data to a pyte stream, ignoring non-bytes values (e.g. pexpect.TIMEOUT class)."""
+    if isinstance(data, bytes) and data:
+        stream.feed(data)
 
 
 def _feed_child(child: Any, stream: Any, secs: float) -> None:
@@ -325,8 +373,8 @@ def fetch_live_status(force: bool = False) -> LiveStatus:
             [b"\xe2\x9d\xaf", pexpect.TIMEOUT, pexpect.EOF],
             timeout=30,
         )
-        pyte_stream.feed(child.before or b"")
-        pyte_stream.feed(child.after or b"")
+        _safe_feed(pyte_stream, child.before)
+        _safe_feed(pyte_stream, child.after)
         if idx != 0:   # TIMEOUT or EOF — claude didn't start cleanly
             txt = _screen_text(screen)
             child.close(force=True)
@@ -346,21 +394,25 @@ def fetch_live_status(force: bool = False) -> LiveStatus:
         child.send(b"\r")
 
         # Phase 3: wait for the /status dialog to open.
-        # Every tab of the dialog shows navigation hints.
-        idx2 = child.expect(
-            [b"to cycle", b"Esc to cancel", pexpect.TIMEOUT, pexpect.EOF],
-            timeout=15,
-        )
-        pyte_stream.feed(child.before or b"")
-        pyte_stream.feed(child.after or b"")
-        if idx2 >= 2:   # dialog didn't open
-            txt = _screen_text(screen)
-            child.close(force=True)
-            if _detect_api_error(txt):
-                return _make_outage_status()
-            return _stale_or_default()
-
-        _feed_child(child, pyte_stream, 1.5)
+        # Claude's TUI renders dialog content via ANSI cursor positioning, so
+        # pexpect.expect can't reliably match text like "Esc to cancel" in the
+        # raw byte stream.  Instead, wait a fixed time and check the pyte screen.
+        _feed_child(child, pyte_stream, 4.0)
+        screen_check = _screen_text(screen)
+        if "Esc to cancel" not in screen_check and "to cycle" not in screen_check:
+            # Dialog didn't open — try expect as fallback
+            idx2 = child.expect(
+                [b"to cycle", b"Esc to cancel", pexpect.TIMEOUT, pexpect.EOF],
+                timeout=10,
+            )
+            _safe_feed(pyte_stream, child.before)
+            _safe_feed(pyte_stream, child.after)
+            if idx2 >= 2:
+                txt = _screen_text(screen)
+                child.close(force=True)
+                if _detect_api_error(txt):
+                    return _make_outage_status()
+                return _stale_or_default()
 
         # Phase 4: navigate to the Usage tab.
         # Tab order: Settings(1) | Status(2) | Config(3) | Usage(4)
@@ -400,7 +452,7 @@ def fetch_live_status(force: bool = False) -> LiveStatus:
         child.send(b"\x03")   # Ctrl-C
         try:
             child.expect(pexpect.EOF, timeout=5)
-            pyte_stream.feed(child.before or b"")
+            _safe_feed(pyte_stream, child.before)
         except Exception:
             pass
         child.close(force=True)
@@ -442,4 +494,6 @@ def status_as_prediction_overrides(status: LiveStatus) -> dict[str, Any]:
         "pct_sonnet": status.weekly_pct_sonnet,
         "reset_label": status.weekly_reset_label,
         "reset_tz": status.weekly_reset_tz,
+        "reset_label_sonnet": status.weekly_reset_label_sonnet,
+        "reset_tz_sonnet": status.weekly_reset_tz_sonnet,
     }

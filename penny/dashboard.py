@@ -248,6 +248,8 @@ def _snapshot(app) -> dict[str, Any]:
         pred_dict["reset_label"] = format_reset_label(pred_dict["reset_label"])
     if pred_dict.get("session_reset_label"):
         pred_dict["session_reset_label"] = format_reset_label(pred_dict["session_reset_label"])
+    if pred_dict.get("reset_label_sonnet"):
+        pred_dict["reset_label_sonnet"] = format_reset_label(pred_dict["reset_label_sonnet"])
 
     # Plugin-contributed cards ({name, html} per active plugin)
     plugin_cards: list[dict[str, Any]] = []
@@ -425,11 +427,12 @@ function renderPeriod(pred, samples) {
   return `
     <div class="stat-row"><span>All models${tip("Total output tokens across Opus, Sonnet, and Haiku. This is the primary limit Anthropic tracks.")}</span><span><b>${pa}%</b></span></div>
     ${bar(pred.pct_all||0, barColor(pred.pct_all||0))}
-    <div class="stat-row"><span>Sonnet only${tip("Output tokens from Sonnet models only. Anthropic may apply a separate sublimit for Sonnet.")}</span><span><b>${ps}%</b></span></div>
+    <div class="stat-row" style="font-size:0.85em;color:#888"><span>Resets at</span><span>${pred.reset_label||'–'}</span></div>
+    <div class="stat-row"><span>Sonnet only${tip("Output tokens from Sonnet models only. Anthropic applies a separate sublimit for Sonnet with its own reset schedule.")}</span><span><b>${ps}%</b></span></div>
     ${bar(pred.pct_sonnet||0, barColor(pred.pct_sonnet||0))}
+    <div class="stat-row" style="font-size:0.85em;color:#888"><span>Resets at</span><span>${pred.reset_label_sonnet||pred.reset_label||'–'}</span></div>
     <div class="stat-row" style="margin-top:8px"><span>${(pred.days_remaining||0).toFixed(1)} days remaining</span></div>
     <div class="stat-row"><span>Projected token use${tip("Extrapolates your current daily burn rate to end-of-week. Red means you'll likely hit the limit before reset.")}</span><span>${proj}%</span></div>
-    <div class="stat-row"><span>Resets at</span><span>${pred.reset_label||'–'}</span></div>
     ${renderSparkline(samples)}`;
 }
 

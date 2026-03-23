@@ -53,6 +53,23 @@ SAMPLE_USAGE_SCREEN = """\
   Resets 2pm (Europe/Amsterdam)
 
   Current week (all models)                                       30% used
+  Resets Mar 28 at 9:59am (Europe/Amsterdam)
+
+  Current week (Sonnet only)                                      41% used
+  Resets Mar 24 at 8pm (Europe/Amsterdam)
+
+  Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
+"""
+
+# Legacy format: Sonnet shared the same reset line as all-models
+SAMPLE_USAGE_SCREEN_SHARED_RESET = """\
+                                                Settings   Status   Config   Usage
+ ─────────────────────────────────────────────────────────────────────────────────
+
+  Current session                                                 16% used
+  Resets 2pm (Europe/Amsterdam)
+
+  Current week (all models)                                       30% used
   Current week (Sonnet only)                                      41% used
   Resets Mar 6 at 9pm (Europe/Amsterdam)
 
@@ -74,11 +91,25 @@ class TestParseUsageScreen:
         assert result.session_reset_label == "2pm"
         assert result.session_reset_tz == "Europe/Amsterdam"
 
-    def test_parses_weekly_reset(self):
+    def test_parses_weekly_all_models_reset(self):
         result = _parse_usage_screen(SAMPLE_USAGE_SCREEN)
         assert result is not None
-        assert result.weekly_reset_label == "Mar 6 at 9pm"
+        assert result.weekly_reset_label == "Mar 28 at 9:59am"
         assert result.weekly_reset_tz == "Europe/Amsterdam"
+
+    def test_parses_weekly_sonnet_reset(self):
+        result = _parse_usage_screen(SAMPLE_USAGE_SCREEN)
+        assert result is not None
+        assert result.weekly_reset_label_sonnet == "Mar 24 at 8pm"
+        assert result.weekly_reset_tz_sonnet == "Europe/Amsterdam"
+
+    def test_shared_reset_assigns_to_both(self):
+        """Legacy format: single shared reset line → same value for both budgets."""
+        result = _parse_usage_screen(SAMPLE_USAGE_SCREEN_SHARED_RESET)
+        assert result is not None
+        assert result.weekly_reset_label == "Mar 6 at 9pm"
+        assert result.weekly_reset_label_sonnet == "Mar 6 at 9pm"
+        assert result.weekly_reset_tz_sonnet == "Europe/Amsterdam"
 
     def test_returns_none_on_empty(self):
         assert _parse_usage_screen("") is None
@@ -143,7 +174,8 @@ Resets Jan 1 at 3am (US/Pacific)
         assert result.weekly_pct_all == 37.0
         assert result.weekly_pct_sonnet == 0.0
         assert result.session_reset_label == "3pm"
-        assert result.weekly_reset_label == "Mar 24 at 8pm"
+        assert result.weekly_reset_label == "Mar 21 at 9am"
+        assert result.weekly_reset_label_sonnet == "Mar 24 at 8pm"
 
 
 # ── _screen_text ───────────────────────────────────────────────────────────────
@@ -188,6 +220,8 @@ class TestCache:
             weekly_pct_sonnet=41.0,
             weekly_reset_label="Mar 6 at 9pm",
             weekly_reset_tz="Europe/Amsterdam",
+            weekly_reset_label_sonnet="Mar 3 at 8pm",
+            weekly_reset_tz_sonnet="Europe/Amsterdam",
             fetched_at=datetime(2025, 3, 6, 12, 0, 0, tzinfo=timezone.utc),
         )
         with patch("penny.status_fetcher._cache_file", return_value=tmp_path / "cache.json"):
@@ -215,6 +249,36 @@ class TestCache:
         with patch("penny.status_fetcher._cache_file", return_value=cache_file):
             _save_cache(status)
         assert not cache_file.exists()
+
+    def test_round_trip_includes_sonnet_reset(self, tmp_path):
+        status = _make_live_status()
+        with patch("penny.status_fetcher._cache_file", return_value=tmp_path / "cache.json"):
+            _save_cache(status)
+            loaded = _load_cache()
+        assert loaded is not None
+        assert loaded.weekly_reset_label_sonnet == "Mar 3 at 8pm"
+        assert loaded.weekly_reset_tz_sonnet == "UTC"
+
+    def test_load_old_cache_without_sonnet_fields(self, tmp_path):
+        """Old cache files missing Sonnet fields should load with fallback to all-models values."""
+        cache_file = tmp_path / "cache.json"
+        old_data = {
+            "session_pct": 10.0,
+            "session_reset_label": "3pm",
+            "session_reset_tz": "UTC",
+            "weekly_pct_all": 20.0,
+            "weekly_pct_sonnet": 30.0,
+            "weekly_reset_label": "Mar 10 at 5pm",
+            "weekly_reset_tz": "UTC",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        cache_file.write_text(json.dumps(old_data))
+        with patch("penny.status_fetcher._cache_file", return_value=cache_file):
+            loaded = _load_cache()
+        assert loaded is not None
+        # Sonnet fields should fall back to all-models values
+        assert loaded.weekly_reset_label_sonnet == "Mar 10 at 5pm"
+        assert loaded.weekly_reset_tz_sonnet == "UTC"
 
     def test_load_returns_none_on_missing(self, tmp_path):
         with patch("penny.status_fetcher._cache_file", return_value=tmp_path / "nope.json"):
@@ -298,6 +362,8 @@ class TestStatusAsPredictionOverrides:
             weekly_pct_sonnet=41.0,
             weekly_reset_label="Mar 6 at 9pm",
             weekly_reset_tz="Europe/Amsterdam",
+            weekly_reset_label_sonnet="Mar 3 at 8pm",
+            weekly_reset_tz_sonnet="Europe/Amsterdam",
             fetched_at=datetime.now(timezone.utc),
         )
         result = status_as_prediction_overrides(status)
@@ -307,6 +373,8 @@ class TestStatusAsPredictionOverrides:
         assert result["reset_label"] == "Mar 6 at 9pm"
         assert result["session_reset_label"] == "2pm"
         assert result["reset_tz"] == "Europe/Amsterdam"
+        assert result["reset_label_sonnet"] == "Mar 3 at 8pm"
+        assert result["reset_tz_sonnet"] == "Europe/Amsterdam"
 
 
 # ── fetch_live_status TTL / no-claude behaviour ───────────────────────────────
@@ -321,6 +389,8 @@ def _make_live_status(**overrides):
         weekly_pct_sonnet=41.0,
         weekly_reset_label="Mar 6 at 9pm",
         weekly_reset_tz="UTC",
+        weekly_reset_label_sonnet="Mar 3 at 8pm",
+        weekly_reset_tz_sonnet="UTC",
         fetched_at=datetime.now(timezone.utc),
     )
     defaults.update(overrides)
@@ -860,3 +930,5 @@ class TestScreenTextEdgeCases:
         screen.display = ["line  with  spaces  ", "another    line  "]
         result = _screen_text(screen)
         assert result == "line  with  spaces\nanother    line"
+
+
