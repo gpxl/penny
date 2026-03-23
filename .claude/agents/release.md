@@ -91,16 +91,21 @@ gh pr checks <PR-number>
 - If checks are still pending: output `RELEASE RESULT: FAIL` asking to
   retry once checks complete.
 
-### Step 3 — Merge PR to main
+### Step 3 — Require user to merge the feature PR
+
+**Do NOT merge feature PRs autonomously.** Report the PR number, its status,
+and that it is ready for release, then ask the user to merge it.
+
+Once the user confirms the PR has been merged:
 
 ```bash
-gh pr merge <PR-number> --merge --delete-branch
 git checkout main
 git pull origin main
 ```
 
-Use `--merge` (not squash or rebase) to preserve individual commit messages
-for changelog generation.
+Use `--merge` (not squash or rebase) when merging feature PRs to preserve
+individual commit messages for changelog generation. Remind the user of this
+if needed.
 
 ### Step 4 — Find last tag
 
