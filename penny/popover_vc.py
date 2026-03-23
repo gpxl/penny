@@ -127,15 +127,15 @@ class ControlCenterViewController(NSViewController):
             if pred.session_reset_label:
                 formatted = format_reset_label(pred.session_reset_label)
                 self._lbl_session_reset.setStringValue_(formatted)
-                self._lbl_session_reset.setToolTip_(f"Resets {formatted}")
+                self._lbl_session_reset.setToolTip_(f"Resets at {formatted}")
             if pred.reset_label:
                 full = format_reset_label(pred.reset_label)
                 self._lbl_all_reset.setStringValue_(short_reset_label(full))
-                self._lbl_all_reset.setToolTip_(f"Resets {full}")
+                self._lbl_all_reset.setToolTip_(f"Resets at {full}")
             if pred.reset_label_sonnet:
                 full = format_reset_label(pred.reset_label_sonnet)
                 self._lbl_sonnet_reset.setStringValue_(short_reset_label(full))
-                self._lbl_sonnet_reset.setToolTip_(f"Resets {full}")
+                self._lbl_sonnet_reset.setToolTip_(f"Resets at {full}")
             if self._lbl_outage_warning is not None:
                 if pred.outage:
                     self._lbl_outage_warning.setStringValue_(
