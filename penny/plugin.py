@@ -126,6 +126,14 @@ class PennyPlugin(ABC):
         """Contribute UI sections to the popover."""
         return []
 
+    def install_command(self) -> str | None:
+        """Return a shell command to install this plugin's dependencies.
+
+        Called when the user clicks "Install" in the settings panel.
+        Return None if the plugin cannot be installed automatically.
+        """
+        return None
+
     def config_schema(self) -> dict[str, Any]:
         """Declare plugin-specific config keys and defaults."""
         return {}
