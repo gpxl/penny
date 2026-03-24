@@ -601,10 +601,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card" id="settings-notifications">
     <h2>Notifications</h2>
     <div class="setting-row">
-      <div class="setting-label-wrap"><span class="setting-label">Weekly Summary</span><span class="setting-hint">Show weekly usage summary notification</span></div>
-      <label class="toggle"><input type="checkbox" id="cfg-notif-weekly" onchange="saveSetting('notifications',{weekly_summary:this.checked},this)"><span class="slider"></span></label>
-    </div>
-    <div class="setting-row">
       <div class="setting-label-wrap"><span class="setting-label">Agent Spawn</span><span class="setting-hint">Notify when agents are spawned</span></div>
       <label class="toggle"><input type="checkbox" id="cfg-notif-spawn" onchange="saveSetting('notifications',{spawn:this.checked},this)"><span class="slider"></span></label>
     </div>
@@ -629,10 +625,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div class="card" id="settings-work">
     <h2>Work</h2>
-    <div class="setting-row">
-      <div class="setting-label-wrap"><span class="setting-label">Max Agents Per Run</span></div>
-      <input type="number" class="setting-input" id="cfg-work-max-agents" min="1" onchange="saveSetting('work',{max_agents_per_run:+this.value},this)">
-    </div>
     <div class="setting-row">
       <div class="setting-label-wrap"><span class="setting-label">Agent Permissions</span><span class="setting-hint">off = no spawning, scoped = restricted, full = unrestricted</span></div>
       <select class="setting-select" id="cfg-work-perms" onchange="saveSetting('work',{agent_permissions:this.value},this)"><option value="off">Off</option><option value="scoped">Scoped</option><option value="full">Full</option></select>
@@ -1202,7 +1194,6 @@ function populateSettings(cfg, plugins) {
   document.getElementById('cfg-show-sonnet').checked = mb.show_sonnet !== false;
   // Notifications
   const notif = cfg.notifications || {};
-  document.getElementById('cfg-notif-weekly').checked = notif.weekly_summary !== false;
   document.getElementById('cfg-notif-spawn').checked = notif.spawn !== false;
   document.getElementById('cfg-notif-completion').checked = notif.completion !== false;
   // Trigger
@@ -1211,7 +1202,6 @@ function populateSettings(cfg, plugins) {
   document.getElementById('cfg-trigger-days').value = trig.max_days_remaining ?? 2;
   // Work
   const work = cfg.work || {};
-  document.getElementById('cfg-work-max-agents').value = work.max_agents_per_run ?? 2;
   document.getElementById('cfg-work-perms').value = work.agent_permissions || 'off';
   // Plugins
   renderPluginSettings(plugins, cfg.plugins || {});
@@ -1246,7 +1236,8 @@ function renderPluginSettings(plugins, pluginsCfg) {
 }
 
 async function saveSetting(section, values, el) {
-  // Optimistic: UI already updated by onchange
+  // Optimistic: UI already updated by onchange. Stash previous value for revert.
+  const prev = el ? (el.type === 'checkbox' ? el.checked : el.value) : null;
   const patch = {};
   patch[section] = values;
   try {
@@ -1259,11 +1250,30 @@ async function saveSetting(section, values, el) {
       const data = await resp.json().catch(() => ({}));
       throw new Error(data.error || 'Save failed');
     }
+    showSavedFlash(el);
   } catch (e) {
     // Revert optimistic update
-    if (el && el.type === 'checkbox') el.checked = !el.checked;
+    if (el) {
+      if (el.type === 'checkbox') el.checked = !prev;
+      else el.value = prev;
+    }
     showInlineError(el, e.message);
   }
+}
+
+function showSavedFlash(el) {
+  if (!el) return;
+  const row = el.closest('.setting-row') || el.parentElement;
+  let flash = row.querySelector('.save-flash');
+  if (!flash) {
+    flash = document.createElement('span');
+    flash.className = 'save-flash';
+    flash.style.cssText = 'font-size:10px;color:#10b981;margin-left:6px;opacity:0;transition:opacity .2s';
+    row.appendChild(flash);
+  }
+  flash.textContent = 'Saved';
+  flash.style.opacity = '1';
+  setTimeout(() => { flash.style.opacity = '0'; }, 1500);
 }
 
 function showInlineError(el, msg) {
