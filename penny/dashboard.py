@@ -409,13 +409,6 @@ def _validate_config_patch(patch: dict[str, Any]) -> str | None:
             if key in notif and not isinstance(notif[key], bool):
                 return f"notifications.{key} must be a boolean"
 
-    mb = patch.get("menubar")
-    if mb is not None:
-        if not isinstance(mb, dict):
-            return "menubar must be a dict"
-        if "show_sonnet" in mb and not isinstance(mb["show_sonnet"], bool):
-            return "menubar.show_sonnet must be a boolean"
-
     trigger = patch.get("trigger")
     if trigger is not None:
         if not isinstance(trigger, dict):
@@ -612,13 +605,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="setting-row">
       <div class="setting-label-wrap"><span class="setting-label">Launch at Login</span><span class="setting-hint">Start Penny when you log in</span></div>
       <label class="toggle"><input type="checkbox" id="cfg-launch-at-login" onchange="saveSetting('service',{launch_at_login:this.checked},this)"><span class="slider"></span></label>
-    </div>
-  </div>
-  <div class="card" id="settings-menubar">
-    <h2>Menubar</h2>
-    <div class="setting-row">
-      <div class="setting-label-wrap"><span class="setting-label">Show Sonnet Bar</span><span class="setting-hint">Display separate Sonnet budget bar in the menu bar</span></div>
-      <label class="toggle"><input type="checkbox" id="cfg-show-sonnet" onchange="saveSetting('menubar',{show_sonnet:this.checked},this)"><span class="slider"></span></label>
     </div>
   </div>
 </div>
@@ -1218,9 +1204,6 @@ function populateSettings(cfg, plugins) {
   const svc = cfg.service || {};
   document.getElementById('cfg-keep-alive').checked = svc.keep_alive !== false;
   document.getElementById('cfg-launch-at-login').checked = svc.launch_at_login !== false;
-  // Menubar
-  const mb = cfg.menubar || {};
-  document.getElementById('cfg-show-sonnet').checked = mb.show_sonnet !== false;
   // Notifications
   const notif = cfg.notifications || {};
   document.getElementById('cfg-notif-spawn').checked = notif.spawn !== false;

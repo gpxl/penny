@@ -388,10 +388,7 @@ class PennyApp(NSObject):
     def _start_final_cycle(self) -> None:
         """Compute targets from prediction and start the final animation cycle."""
         pred = self._prediction
-        show_sonnet = bool(self.config.get("menubar", {}).get("show_sonnet", True))
-        targets = [pred.session_pct_all, pred.pct_all]
-        if show_sonnet:
-            targets.append(pred.pct_sonnet)
+        targets = [pred.session_pct_all, pred.pct_all, pred.pct_sonnet]
         self._anim_bar_targets = targets
         # Resize bar vals to match targets
         self._anim_bar_vals = [0.0] * len(targets)
@@ -759,12 +756,7 @@ class PennyApp(NSObject):
         label color, adapting automatically to light/dark mode.
         """
         from AppKit import NSBezierPath, NSColor, NSImage
-        mb = self.config.get("menubar", {})
-        show_sonnet = bool(mb.get("show_sonnet", True))
-
-        pcts = [pred.session_pct_all, pred.pct_all]
-        if show_sonnet:
-            pcts.append(pred.pct_sonnet)
+        pcts = [pred.session_pct_all, pred.pct_all, pred.pct_sonnet]
 
         n_bars = len(pcts)
         bar_w = 5.0

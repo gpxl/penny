@@ -3251,10 +3251,10 @@ class TestStartFinalCycleDirect:
         assert app._loading_frame == 0
         assert app._data_pending is False
 
-    def test_omits_sonnet_when_disabled(self):
+    def test_always_includes_sonnet_bar(self):
         from penny.app import PennyApp
         pred = Prediction(session_pct_all=25.0, pct_all=40.0, pct_sonnet=30.0)
-        app = _make_fake_app(config={"menubar": {"show_sonnet": False}})
+        app = _make_fake_app(config={})
         app._prediction = pred
         app._anim_bar_vals = [0.0, 0.0, 0.0]
         app._anim_bar_targets = [0.0, 0.0, 0.0]
@@ -3262,8 +3262,8 @@ class TestStartFinalCycleDirect:
         app._loading_phase = "loading"
         app._loading_frame = 99
         PennyApp._start_final_cycle(app)
-        assert app._anim_bar_targets == [25.0, 40.0]
-        assert len(app._anim_bar_vals) == 2
+        assert app._anim_bar_targets == [25.0, 40.0, 30.0]
+        assert len(app._anim_bar_vals) == 3
 
 
 # ── _timerFired_ (direct call) ────────────────────────────────────────────

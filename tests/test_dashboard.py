@@ -665,7 +665,7 @@ class TestConfigPOST:
         app, port = dashboard_app
         app.config = {
             "service": {"keep_alive": True, "launch_at_login": True},
-            "menubar": {"mode": "bars", "show_sonnet": True},
+            "menubar": {"mode": "bars"},
         }
         status, _ = _post(port, "/api/config", {"service": {"keep_alive": False}})
         assert status == 200
@@ -767,55 +767,16 @@ class TestInstallLog:
         assert app._install_started == "testplugin"
 
 
-# ── Dashboard → Menubar integration tests ────────────────────────────────────
+
+# ── Dashboard config change → menubar refresh integration test ───────────────
 
 
-class TestShowSonnetDashboardE2E:
-    """End-to-end: dashboard settings toggle → config update.
+class TestDashboardConfigRefresh:
+    """Verify config changes via dashboard API trigger a menubar refresh."""
 
-    These tests verify the user-facing flow: clicking "Show Sonnet Bar" in the
-    dashboard settings page updates the in-memory config and triggers a refresh.
-    """
-
-    def test_toggle_show_sonnet_off_via_api(self, dashboard_app):
-        """POST show_sonnet=false → config updated."""
+    def test_config_change_triggers_refresh(self, dashboard_app):
+        """POST /api/config dispatches _checkConfig: on the main thread."""
         app, port = dashboard_app
-        app.config = {"menubar": {"show_sonnet": True}}
-        status, data = _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
-        assert status == 200
-        assert app.config["menubar"]["show_sonnet"] is False
-        assert data["config"]["menubar"]["show_sonnet"] is False
-
-    def test_toggle_show_sonnet_on_via_api(self, dashboard_app):
-        """POST show_sonnet=true → config updated."""
-        app, port = dashboard_app
-        app.config = {"menubar": {"show_sonnet": False}}
-        status, data = _post(port, "/api/config", {"menubar": {"show_sonnet": True}})
-        assert status == 200
-        assert app.config["menubar"]["show_sonnet"] is True
-
-    def test_rapid_toggle_via_api(self, dashboard_app):
-        """Rapid toggle: final state wins."""
-        app, port = dashboard_app
-        app.config = {"menubar": {"show_sonnet": True}}
-        _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
-        assert app.config["menubar"]["show_sonnet"] is False
-        _post(port, "/api/config", {"menubar": {"show_sonnet": True}})
-        assert app.config["menubar"]["show_sonnet"] is True
-
-    def test_config_roundtrip_preserves_show_sonnet(self, dashboard_app):
-        """POST toggle → GET /api/config → returned config reflects change."""
-        app, port = dashboard_app
-        app.config = {"menubar": {"show_sonnet": True}}
-        _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
-        status, data = _get(port, "/api/config")
-        assert status == 200
-        assert data["config"]["menubar"]["show_sonnet"] is False
-
-    def test_menubar_refresh_triggered_after_config_change(self, dashboard_app):
-        """Config change triggers _force_menubar_refresh to update menubar."""
-        app, port = dashboard_app
-        app.config = {"menubar": {"show_sonnet": True}}
         app._menubar_refreshed = False
-        _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
+        _post(port, "/api/config", {"service": {"keep_alive": False}})
         assert app._menubar_refreshed is True
