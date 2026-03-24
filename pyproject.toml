@@ -32,7 +32,7 @@ where = ["."]
 include = ["penny*"]
 
 [tool.setuptools.package-data]
-penny = []
+penny = ["resources/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

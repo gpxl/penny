@@ -225,6 +225,15 @@ class PennyApp(NSObject):
 
     def applicationDidFinishLaunching_(self, notification: Any) -> None:
         NSApplication.sharedApplication().setActivationPolicy_(1)   # Accessory
+
+        # Set custom app icon (appears in NSAlert dialogs and Dock when active)
+        icon_path = Path(__file__).parent / "resources" / "icon.png"
+        if icon_path.exists():
+            from AppKit import NSImage
+            icon = NSImage.alloc().initByReferencingFile_(str(icon_path))
+            if icon:
+                NSApplication.sharedApplication().setApplicationIconImage_(icon)
+
         # Defer first load so the menu bar icon is visible before any dialogs
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.4, self, "_startup:", None, False
