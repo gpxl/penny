@@ -230,11 +230,26 @@ class DashboardServer:
                     if error:
                         self._error(400, error)
                         return
-                    # Use wait=False to avoid deadlocking with the main thread's
-                    # animation timer.  The config patch is applied asynchronously
-                    # but the response returns the pre-patch config.
+                    # Dispatch to main thread async, then poll until config reflects
+                    # the change (up to 2s). wait=True deadlocks with the animation
+                    # timer, so we dispatch async and poll the config for confirmation.
                     _dispatch("applyConfigPatch:", json.dumps(payload), False)
-                    time.sleep(0.1)  # brief yield so main thread can process
+                    deadline = time.monotonic() + 2.0
+                    expected = payload  # what we expect to see in config
+                    while time.monotonic() < deadline:
+                        cfg = getattr(app, "config", {})
+                        # Check if at least one patched key matches
+                        matched = False
+                        for k, v in expected.items():
+                            if isinstance(v, dict):
+                                section = cfg.get(k, {})
+                                if all(section.get(sk) == sv for sk, sv in v.items()):
+                                    matched = True
+                            elif cfg.get(k) == v:
+                                matched = True
+                        if matched:
+                            break
+                        time.sleep(0.05)
                     self._json({"ok": True, "config": getattr(app, "config", {})})
 
                 elif self.path.startswith("/api/plugin/") and self.path.endswith("/install"):
