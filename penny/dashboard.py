@@ -454,6 +454,7 @@ def _validate_config_patch(patch: dict[str, Any]) -> str | None:
     return None
 
 
+
 def _try_plugin_route(app, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Route /api/plugin/<name>/<suffix> to the named plugin.
 

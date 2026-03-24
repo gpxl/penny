@@ -1148,7 +1148,7 @@ class PennyApp(NSObject):
 
     # ── Dashboard config API helpers ──────────────────────────────────────
 
-    def applyConfigPatch_(self, patch_json: str) -> None:
+    def applyConfigPatch_(self, patch_json: Any) -> None:
         """Apply a partial config update from the dashboard API (main thread).
 
         Merges the patch into self.config, persists to disk, then applies
@@ -1175,7 +1175,6 @@ class PennyApp(NSObject):
             })
         self._force_menubar_refresh()
         self._worker.fetch()
-        print("[penny] config patch applied", flush=True)
 
     @objc.python_method
     def run_plugin_install(self, plugin_name: str) -> bool:
