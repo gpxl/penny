@@ -161,7 +161,7 @@ class ControlCenterViewController(NSViewController):
         stack.setAlignment_(5)        # NSLayoutAttributeLeading
         stack.setSpacing_(_SECTION_SPACING)
         stack.setEdgeInsets_(NSEdgeInsets(_PADDING, _PADDING, _PADDING, _PADDING))
-        stack.setDistribution_(0)     # NSStackViewDistributionFill
+        stack.setDistribution_(1)     # NSStackViewDistributionGravityAreas
         stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
         self._root_stack = stack
         outer.addSubview_(stack)
