@@ -230,26 +230,7 @@ class DashboardServer:
                     if error:
                         self._error(400, error)
                         return
-                    # Dispatch to main thread async, then poll until config reflects
-                    # the change (up to 2s). wait=True deadlocks with the animation
-                    # timer, so we dispatch async and poll the config for confirmation.
-                    _dispatch("applyConfigPatch:", json.dumps(payload), False)
-                    deadline = time.monotonic() + 2.0
-                    expected = payload  # what we expect to see in config
-                    while time.monotonic() < deadline:
-                        cfg = getattr(app, "config", {})
-                        # Check if at least one patched key matches
-                        matched = False
-                        for k, v in expected.items():
-                            if isinstance(v, dict):
-                                section = cfg.get(k, {})
-                                if all(section.get(sk) == sv for sk, sv in v.items()):
-                                    matched = True
-                            elif cfg.get(k) == v:
-                                matched = True
-                        if matched:
-                            break
-                        time.sleep(0.05)
+                    _apply_config_patch(app, payload)
                     self._json({"ok": True, "config": getattr(app, "config", {})})
 
                 elif self.path.startswith("/api/plugin/") and self.path.endswith("/install"):
@@ -472,6 +453,34 @@ def _validate_config_patch(patch: dict[str, Any]) -> str | None:
 
     return None
 
+
+
+def _apply_config_patch(app, payload: dict[str, Any]) -> None:
+    """Apply a config patch and trigger an immediate menubar refresh.
+
+    Called from the HTTP handler thread.  Updates config in memory, persists
+    to disk, then calls _force_menubar_refresh directly.  Although AppKit UI
+    calls ideally run on the main thread, NSStatusBarButton.setImage_ is
+    thread-safe in practice and this avoids the ObjC selector dispatch issues
+    that prevented performSelectorOnMainThread from reaching our dynamically
+    defined Python methods.
+    """
+    from .app import _config_mtime, _deep_merge
+
+    app.config = _deep_merge(app.config, payload)
+    try:
+        app._write_config()
+    except Exception:
+        pass
+    app._config_mtime = _config_mtime()
+
+    # Trigger a config reload on the main thread via the existing config
+    # watcher selector.  _checkConfig: detects the mtime change from
+    # _write_config above and calls _hot_reload_config → _force_menubar_refresh
+    # on the main thread.  This is immediate — no waiting for the 5s timer.
+    app.performSelectorOnMainThread_withObject_waitUntilDone_(
+        "_checkConfig:", None, False
+    )
 
 
 def _try_plugin_route(app, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:

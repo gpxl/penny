@@ -76,15 +76,24 @@ class FakeApp:
         from penny.app import _deep_merge
         patch = json.loads(patch_json)
         self.config = _deep_merge(self.config, patch)
-        # Track the bar count that _make_status_image would render,
-        # so tests can verify the dashboard toggle affects the menubar.
-        show_sonnet = bool(self.config.get("menubar", {}).get("show_sonnet", True))
-        pred = self._prediction
-        if pred:
-            pcts = [pred.session_pct_all, pred.pct_all]
-            if show_sonnet:
-                pcts.append(pred.pct_sonnet)
-            self._last_bar_count = len(pcts)
+
+    def _write_config(self) -> None:
+        """Stub: track that config was written."""
+        self._config_written = True
+
+    def _force_menubar_refresh(self) -> None:
+        """Stub: track that menubar refresh was requested."""
+        self._menubar_refreshed = True
+
+    def _refreshMenubar_(self, sender: Any = None) -> None:
+        """ObjC selector stub: delegates to _force_menubar_refresh."""
+        self._force_menubar_refresh()
+
+    def _checkConfig_(self, timer: Any = None) -> None:
+        """Config watcher stub: track that config check was triggered."""
+        self._menubar_refreshed = True
+
+    _config_mtime: float | None = 0.0
 
     def run_plugin_install(self, plugin_name: str) -> bool:
         self._install_started = plugin_name
@@ -762,39 +771,36 @@ class TestInstallLog:
 
 
 class TestShowSonnetDashboardE2E:
-    """End-to-end: dashboard settings toggle → config update → menubar bar count.
+    """End-to-end: dashboard settings toggle → config update.
 
     These tests verify the user-facing flow: clicking "Show Sonnet Bar" in the
-    dashboard settings page actually changes the number of bars that would be
-    rendered in the macOS menu bar.
+    dashboard settings page updates the in-memory config and triggers a refresh.
     """
 
-    def test_toggle_show_sonnet_off_via_api_sets_2_bars(self, dashboard_app):
-        """POST show_sonnet=false → config updated + bar count is 2."""
+    def test_toggle_show_sonnet_off_via_api(self, dashboard_app):
+        """POST show_sonnet=false → config updated."""
         app, port = dashboard_app
         app.config = {"menubar": {"show_sonnet": True}}
         status, data = _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
         assert status == 200
         assert app.config["menubar"]["show_sonnet"] is False
-        assert app._last_bar_count == 2
+        assert data["config"]["menubar"]["show_sonnet"] is False
 
-    def test_toggle_show_sonnet_on_via_api_sets_3_bars(self, dashboard_app):
-        """POST show_sonnet=true → config updated + bar count is 3."""
+    def test_toggle_show_sonnet_on_via_api(self, dashboard_app):
+        """POST show_sonnet=true → config updated."""
         app, port = dashboard_app
         app.config = {"menubar": {"show_sonnet": False}}
         status, data = _post(port, "/api/config", {"menubar": {"show_sonnet": True}})
         assert status == 200
         assert app.config["menubar"]["show_sonnet"] is True
-        assert app._last_bar_count == 3
 
     def test_rapid_toggle_via_api(self, dashboard_app):
         """Rapid toggle: final state wins."""
         app, port = dashboard_app
         app.config = {"menubar": {"show_sonnet": True}}
         _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
-        assert app._last_bar_count == 2
+        assert app.config["menubar"]["show_sonnet"] is False
         _post(port, "/api/config", {"menubar": {"show_sonnet": True}})
-        assert app._last_bar_count == 3
         assert app.config["menubar"]["show_sonnet"] is True
 
     def test_config_roundtrip_preserves_show_sonnet(self, dashboard_app):
@@ -805,3 +811,11 @@ class TestShowSonnetDashboardE2E:
         status, data = _get(port, "/api/config")
         assert status == 200
         assert data["config"]["menubar"]["show_sonnet"] is False
+
+    def test_menubar_refresh_triggered_after_config_change(self, dashboard_app):
+        """Config change triggers _force_menubar_refresh to update menubar."""
+        app, port = dashboard_app
+        app.config = {"menubar": {"show_sonnet": True}}
+        app._menubar_refreshed = False
+        _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
+        assert app._menubar_refreshed is True

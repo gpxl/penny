@@ -857,6 +857,10 @@ class PennyApp(NSObject):
             return f"\u2728{n_running}" if n_running > 0 else "Loading\u2026"
         return f" \u2728{n_running}" if n_running > 0 else ""
 
+    def _refreshMenubar_(self, sender: Any) -> None:
+        """ObjC-callable menubar refresh (for performSelectorOnMainThread)."""
+        self._force_menubar_refresh()
+
     @objc.python_method
     def _force_menubar_refresh(self) -> None:
         """Force an immediate menubar re-render, bypassing animation guards.
