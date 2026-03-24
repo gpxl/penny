@@ -413,8 +413,6 @@ def _validate_config_patch(patch: dict[str, Any]) -> str | None:
     if mb is not None:
         if not isinstance(mb, dict):
             return "menubar must be a dict"
-        if "mode" in mb and mb["mode"] not in ("bars", "icon"):
-            return "menubar.mode must be 'bars' or 'icon'"
         if "show_sonnet" in mb and not isinstance(mb["show_sonnet"], bool):
             return "menubar.show_sonnet must be a boolean"
 
@@ -590,11 +588,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card" id="settings-menubar">
     <h2>Menubar</h2>
     <div class="setting-row">
-      <div class="setting-label-wrap"><span class="setting-label">Display Mode</span><span class="setting-hint">How Penny appears in the menu bar</span></div>
-      <select class="setting-select" id="cfg-menubar-mode" onchange="saveSetting('menubar',{mode:this.value},this)"><option value="bars">Bars</option><option value="icon">Icon</option></select>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label-wrap"><span class="setting-label">Show Sonnet Bar</span><span class="setting-hint">Display separate Sonnet budget bar</span></div>
+      <div class="setting-label-wrap"><span class="setting-label">Show Sonnet Bar</span><span class="setting-hint">Display separate Sonnet budget bar in the menu bar</span></div>
       <label class="toggle"><input type="checkbox" id="cfg-show-sonnet" onchange="saveSetting('menubar',{show_sonnet:this.checked},this)"><span class="slider"></span></label>
     </div>
   </div>
@@ -1205,7 +1199,6 @@ function populateSettings(cfg, plugins) {
   document.getElementById('cfg-launch-at-login').checked = svc.launch_at_login !== false;
   // Menubar
   const mb = cfg.menubar || {};
-  document.getElementById('cfg-menubar-mode').value = mb.mode || 'bars';
   document.getElementById('cfg-show-sonnet').checked = mb.show_sonnet !== false;
   // Notifications
   const notif = cfg.notifications || {};
