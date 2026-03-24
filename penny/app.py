@@ -100,8 +100,10 @@ def _load_app_icon():
         return None
     try:
         from AppKit import NSImage
+        from Foundation import NSSize
         icon = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
         if icon and icon.isValid():
+            icon.setSize_(NSSize(48, 48))
             return icon
     except Exception:
         pass
