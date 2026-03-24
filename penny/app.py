@@ -1129,14 +1129,33 @@ class PennyApp(NSObject):
     # ── Dashboard config API helpers ──────────────────────────────────────
 
     def applyConfigPatch_(self, patch_json: str) -> None:
-        """Apply a partial config update from the dashboard API (main thread)."""
+        """Apply a partial config update from the dashboard API (main thread).
+
+        Merges the patch into self.config, persists to disk, then applies
+        all side effects directly (without re-reading from disk).
+        """
         try:
             patch = json.loads(patch_json)
         except Exception:
             return
         self.config = _deep_merge(self.config, patch)
         self._write_config()
-        self._hot_reload_config()
+        self._config_mtime = _config_mtime()
+        # Apply all side effects with the in-memory config
+        self._sync_launchd_service()
+        self._plugin_mgr.sync_with_config(self, self.config)
+        if self._vc is not None:
+            self._vc.rebuild_plugin_sections()
+            self._vc.updateWithData_({
+                "prediction": self._prediction,
+                "state": self.state,
+                "ready_tasks": self._all_ready_tasks,
+                "fetched_at": self._last_fetch_at,
+                "update_check": self.state.get("update_check"),
+            })
+        self._update_status_title()
+        self._worker.fetch()
+        print("[penny] config patch applied", flush=True)
 
     @objc.python_method
     def run_plugin_install(self, plugin_name: str) -> bool:

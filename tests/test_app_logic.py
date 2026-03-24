@@ -3425,26 +3425,27 @@ class TestApplyConfigPatch:
         from penny.app import PennyApp
         app = _make_fake_app(config={"work": {"delay": 10}, "other": "value"})
         app._write_config = MagicMock()
-        app._hot_reload_config = MagicMock()
+        app._sync_launchd_service = MagicMock()
+        app._update_status_title = MagicMock()
 
         patch_json = '{"work": {"delay": 20}}'
         PennyApp.applyConfigPatch_(app, patch_json)
         assert app.config == {"work": {"delay": 20}, "other": "value"}
         app._write_config.assert_called_once()
-        app._hot_reload_config.assert_called_once()
+        app._update_status_title.assert_called_once()
 
     def test_invalid_json_silently_ignored(self):
         from penny.app import PennyApp
         app = _make_fake_app(config={"work": {"delay": 10}})
         original_config = app.config.copy()
         app._write_config = MagicMock()
-        app._hot_reload_config = MagicMock()
+        app._update_status_title = MagicMock()
 
         patch_json = "invalid json"
         PennyApp.applyConfigPatch_(app, patch_json)
         assert app.config == original_config  # Should be unchanged
         app._write_config.assert_not_called()
-        app._hot_reload_config.assert_not_called()
+        app._update_status_title.assert_not_called()
 
     def test_deep_merge_nested_dicts(self):
         from penny.app import PennyApp
@@ -3453,7 +3454,8 @@ class TestApplyConfigPatch:
             "work": {"delay": 10}
         })
         app._write_config = MagicMock()
-        app._hot_reload_config = MagicMock()
+        app._sync_launchd_service = MagicMock()
+        app._update_status_title = MagicMock()
 
         patch_json = '{"plugins": {"a": {"enabled": false}}}'
         PennyApp.applyConfigPatch_(app, patch_json)
