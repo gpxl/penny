@@ -30,7 +30,7 @@ _SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _WIDTH: float = 380.0           # Fixed popover width; height is dynamic
 _PADDING: float = 10.0          # Root stack edge insets (all sides)
 _BAR_HEIGHT: float = 8.0        # Progress bar track height
-_SECTION_SPACING: float = 4.0   # Vertical gap between root stack items
+_SECTION_SPACING: float = 2.0   # Vertical gap between root stack items
 _ITEM_SPACING: float = 6.0      # Horizontal gap within rows (bar rows, footer)
 
 
@@ -199,20 +199,16 @@ class ControlCenterViewController(NSViewController):
         self._lbl_outage_warning.setHidden_(True)
         stack.addArrangedSubview_(self._lbl_outage_warning)
 
-        # ── Session Budget ───────────────────────────────────────────────────
+        # ── Budget bars ────────────────────────────────────────────────────
         self._bar_session, self._lbl_session_pct, self._lbl_session_reset = (
             self._add_bar_row(stack, "Session", 0.0)
         )
-        stack.addArrangedSubview_(_make_separator())
-
-        # ── Weekly Budget ────────────────────────────────────────────────────
         self._bar_all, self._lbl_all_pct, self._lbl_all_reset = (
             self._add_bar_row(stack, "All models", 0.0)
         )
         self._bar_sonnet, self._lbl_sonnet_pct, self._lbl_sonnet_reset = (
             self._add_bar_row(stack, "Sonnet", 0.0)
         )
-
         stack.addArrangedSubview_(_make_separator())
 
         # ── Plugin section insertion point ─────────────────────────────────────
