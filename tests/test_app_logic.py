@@ -3423,45 +3423,43 @@ class TestApplyConfigPatch:
 
     def test_valid_json_patch_merges(self):
         from penny.app import PennyApp
-        app = MagicMock(spec=PennyApp)
-        app.config = {"work": {"delay": 10}, "other": "value"}
+        app = _make_fake_app(config={"work": {"delay": 10}, "other": "value"})
         app._write_config = MagicMock()
         app._hot_reload_config = MagicMock()
 
-        # Call the actual method by extracting it
-        import json
-
-        from penny.app import _deep_merge
-
         patch_json = '{"work": {"delay": 20}}'
-        config = {"work": {"delay": 10}, "other": "value"}
-        patch_dict = json.loads(patch_json)
-        result = _deep_merge(config, patch_dict)
-        assert result == {"work": {"delay": 20}, "other": "value"}
+        PennyApp.applyConfigPatch_(app, patch_json)
+        assert app.config == {"work": {"delay": 20}, "other": "value"}
+        app._write_config.assert_called_once()
+        app._hot_reload_config.assert_called_once()
 
     def test_invalid_json_silently_ignored(self):
         from penny.app import PennyApp
-        app = MagicMock(spec=PennyApp)
-        original_config = {"work": {"delay": 10}}
-        app.config = original_config.copy()
+        app = _make_fake_app(config={"work": {"delay": 10}})
+        original_config = app.config.copy()
         app._write_config = MagicMock()
         app._hot_reload_config = MagicMock()
 
-        # Test that invalid JSON doesn't crash
-        import json
+        patch_json = "invalid json"
+        PennyApp.applyConfigPatch_(app, patch_json)
+        assert app.config == original_config  # Should be unchanged
+        app._write_config.assert_not_called()
+        app._hot_reload_config.assert_not_called()
 
-        try:
-            json.loads("invalid json")
-        except Exception:
-            # Expected — the actual method catches this
-            pass
+    def test_deep_merge_nested_dicts(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={
+            "plugins": {"a": {"enabled": True}},
+            "work": {"delay": 10}
+        })
+        app._write_config = MagicMock()
+        app._hot_reload_config = MagicMock()
 
-    def test_empty_patch_no_change(self):
-        from penny.app import _deep_merge
-        config = {"work": {"delay": 10}}
-        patch = {}
-        result = _deep_merge(config, patch)
-        assert result == {"work": {"delay": 10}}
+        patch_json = '{"plugins": {"a": {"enabled": false}}}'
+        PennyApp.applyConfigPatch_(app, patch_json)
+        assert app.config["plugins"]["a"]["enabled"] is False
+        assert app.config["work"]["delay"] == 10  # Unchanged nested key
+        app._write_config.assert_called_once()
 
 
 # ── run_plugin_install ────────────────────────────────────────────────────────
@@ -3472,60 +3470,52 @@ class TestRunPluginInstall:
     def test_prevents_duplicate_install(self):
         """Should return False if install already running."""
         from penny.app import PennyApp
-        app = MagicMock(spec=PennyApp)
+        app = _make_fake_app()
         app._install_logs = {
             "test-plugin": {"status": "installing", "lines": []}
         }
         app._plugin_mgr = MagicMock()
 
-        # Call the actual method logic
-        plugin_name = "test-plugin"
-        if app._install_logs.get(plugin_name, {}).get("status") == "installing":
-            result = False
-        else:
-            result = True
+        result = PennyApp.run_plugin_install(app, "test-plugin")
         assert result is False
 
     def test_returns_false_for_missing_plugin(self):
         """Should return False if plugin not found."""
         from penny.app import PennyApp
-        app = MagicMock(spec=PennyApp)
+        app = _make_fake_app()
         app._install_logs = {}
         app._plugin_mgr = MagicMock()
         app._plugin_mgr.all_plugins = {}
 
-        plugin_name = "nonexistent"
-        plugin = app._plugin_mgr.all_plugins.get(plugin_name)
-        assert plugin is None
+        result = PennyApp.run_plugin_install(app, "nonexistent")
+        assert result is False
 
     def test_returns_false_if_no_install_command(self):
         """Should return False if plugin has no install_command."""
         from penny.app import PennyApp
-        app = MagicMock(spec=PennyApp)
+        app = _make_fake_app()
         app._install_logs = {}
-        app._plugin_mgr = MagicMock()
         mock_plugin = MagicMock()
         mock_plugin.install_command.return_value = None
+        app._plugin_mgr = MagicMock()
         app._plugin_mgr.all_plugins = {"test-plugin": mock_plugin}
 
-        plugin_name = "test-plugin"
-        plugin = app._plugin_mgr.all_plugins.get(plugin_name)
-        cmd = plugin.install_command()
-        assert cmd is None
+        result = PennyApp.run_plugin_install(app, "test-plugin")
+        assert result is False
 
-    def test_initializes_install_log(self):
-        """Should initialize log entry before spawning thread."""
+    def test_initializes_install_log_and_starts_thread(self):
+        """Should initialize log entry and return True when starting install."""
         from penny.app import PennyApp
-        app = MagicMock(spec=PennyApp)
+        app = _make_fake_app()
         app._install_logs = {}
-        app._plugin_mgr = MagicMock()
         mock_plugin = MagicMock()
         mock_plugin.install_command.return_value = "pip install test"
+        app._plugin_mgr = MagicMock()
         app._plugin_mgr.all_plugins = {"test-plugin": mock_plugin}
+        app.performSelectorOnMainThread_withObject_waitUntilDone_ = MagicMock()
 
-        # Simulate the log initialization
-        plugin_name = "test-plugin"
-        app._install_logs[plugin_name] = {"status": "installing", "lines": []}
-        log = app._install_logs[plugin_name]
-        assert log["status"] == "installing"
-        assert log["lines"] == []
+        result = PennyApp.run_plugin_install(app, "test-plugin")
+        assert result is True
+        assert "test-plugin" in app._install_logs
+        assert app._install_logs["test-plugin"]["status"] == "installing"
+        assert app._install_logs["test-plugin"]["lines"] == []

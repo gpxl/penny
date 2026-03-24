@@ -301,31 +301,26 @@ class TestSafeFeed:
     """Prevent the crash that silently killed all live fetches."""
 
     def test_feeds_bytes(self):
-        from penny.status_fetcher import _safe_feed
         mock_stream = MagicMock()
         _safe_feed(mock_stream, b"hello")
         mock_stream.feed.assert_called_once_with(b"hello")
 
     def test_ignores_pexpect_timeout_class(self):
-        from penny.status_fetcher import _safe_feed
         mock_stream = MagicMock()
         _safe_feed(mock_stream, pexpect.TIMEOUT)
         mock_stream.feed.assert_not_called()
 
     def test_ignores_pexpect_eof_class(self):
-        from penny.status_fetcher import _safe_feed
         mock_stream = MagicMock()
         _safe_feed(mock_stream, pexpect.EOF)
         mock_stream.feed.assert_not_called()
 
     def test_ignores_none(self):
-        from penny.status_fetcher import _safe_feed
         mock_stream = MagicMock()
         _safe_feed(mock_stream, None)
         mock_stream.feed.assert_not_called()
 
     def test_ignores_empty_bytes(self):
-        from penny.status_fetcher import _safe_feed
         mock_stream = MagicMock()
         _safe_feed(mock_stream, b"")
         mock_stream.feed.assert_not_called()
@@ -343,7 +338,6 @@ class TestStaleCachePredictionIntegration:
         """When cache has no Sonnet reset field, prediction.reset_label_sonnet
         should equal the all-models value (fallback), NOT appear as an
         independently determined value."""
-        from penny.analysis import Prediction
 
         old_cache_data = {
             "session_pct": 10.0,
