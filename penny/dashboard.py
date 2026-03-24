@@ -230,7 +230,11 @@ class DashboardServer:
                     if error:
                         self._error(400, error)
                         return
-                    _dispatch("applyConfigPatch:", json.dumps(payload), True)
+                    # Use wait=False to avoid deadlocking with the main thread's
+                    # animation timer.  The config patch is applied asynchronously
+                    # but the response returns the pre-patch config.
+                    _dispatch("applyConfigPatch:", json.dumps(payload), False)
+                    time.sleep(0.1)  # brief yield so main thread can process
                     self._json({"ok": True, "config": getattr(app, "config", {})})
 
                 elif self.path.startswith("/api/plugin/") and self.path.endswith("/install"):
