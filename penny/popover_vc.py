@@ -11,11 +11,9 @@ from typing import Any
 
 import objc
 from AppKit import (
-    NSAnimationContext,
     NSColor,
     NSLayoutConstraint,
     NSStackView,
-    NSSwitch,
     NSTextField,
     NSView,
     NSViewController,
@@ -63,8 +61,6 @@ class ControlCenterViewController(NSViewController):
         self._refresh_btn: Any = None
         self._spin_timer: Any = None
         self._spin_frame: int = 0
-        self._keep_alive_btn: Any = None
-        self._login_btn: Any = None
         self._last_refresh_at: datetime | None = None
         self._last_refresh_lbl: NSTextField | None = None
         self._app: Any = None      # set by app.py after construction
@@ -73,15 +69,6 @@ class ControlCenterViewController(NSViewController):
         # Plugin UI sections
         self._plugin_section_views: list[Any] = []
         self._plugin_sections: list[Any] = []  # UISection instances
-        # Plugins management (inside settings section)
-        self._plugins_section_stack: Any = None
-        self._plugin_row_views: list[Any] = []
-        self._installing_plugins: set[str] = set()
-        # Collapsible settings section
-        self._settings_expanded: bool = False
-        self._settings_animating: bool = False
-        self._settings_section_view: Any = None
-        self._prefs_btn: Any = None
         # Update banner
         self._update_banner: Any = None
         self._update_lbl: NSTextField | None = None
@@ -110,11 +97,6 @@ class ControlCenterViewController(NSViewController):
         # Guard: views not yet created (loadView not called yet)
         if self._bar_all is None:
             return
-
-        if self._keep_alive_btn is not None and self._app is not None:
-            svc = getattr(self._app, "config", {}).get("service", {})
-            self._keep_alive_btn.setState_(1 if svc.get("keep_alive", True) else 0)
-            self._login_btn.setState_(1 if svc.get("launch_at_login", True) else 0)
 
         if pred:
             self._bar_all.setPct(pred.pct_all)
@@ -234,13 +216,6 @@ class ControlCenterViewController(NSViewController):
         # Plugin sections (e.g. Beads task lists) are inserted here dynamically.
         self._plugin_insertion_index = len(stack.arrangedSubviews())
 
-        # ── Collapsible settings section ──────────────────────────────────────
-        # Plugins management is inside the settings section (not in the main view).
-        settings_view = self._make_settings_section()
-        settings_view.setHidden_(True)
-        self._settings_section_view = settings_view
-        stack.addArrangedSubview_(settings_view)
-
         # ── Update available banner (hidden by default) ───────────────────────
         update_banner = self._make_update_banner()
         update_banner.setHidden_(True)
@@ -289,197 +264,7 @@ class ControlCenterViewController(NSViewController):
     def rebuild_plugin_sections(self) -> None:
         """Re-discover and rebuild plugin sections (e.g. after config change)."""
         self._insert_plugin_sections()
-        self._rebuild_plugins_section()
         self._relayout()
-
-    @objc.python_method
-    def _make_plugins_section(self) -> NSView:
-        """Create the Plugins management section (header + checkbox rows)."""
-        outer = NSStackView.alloc().init()
-        outer.setOrientation_(1)
-        outer.setAlignment_(5)
-        outer.setSpacing_(6.0)
-        outer.addArrangedSubview_(make_label("Plugins", size=11.0, secondary=True))
-        outer.setHidden_(True)   # Hidden until plugins are registered
-        self._plugins_section_stack = outer
-        return outer
-
-    @objc.python_method
-    def _rebuild_plugins_section(self) -> None:
-        """Rebuild plugin rows from the current plugin manager state.
-
-        Each row shows: [name]  [description]  [Install | toggle]
-        - Not installed → "Install" button
-        - Installing → "Installing…" + spinner
-        - Installed → NSSwitch (on/off)
-        """
-        if self._plugins_section_stack is None or self._app is None:
-            return
-        mgr = getattr(self._app, "_plugin_mgr", None)
-        if mgr is None:
-            return
-
-        # Remove old rows
-        for view in self._plugin_row_views:
-            self._plugins_section_stack.removeArrangedSubview_(view)
-            view.removeFromSuperview()
-        self._plugin_row_views = []
-
-        # Hide the entire section when no plugins are available
-        self._plugins_section_stack.setHidden_(len(mgr.all_plugins) == 0)
-
-        active_names = {p.name for p in mgr.active_plugins}
-
-        for name, plugin in mgr.all_plugins.items():
-            row = NSStackView.alloc().init()
-            row.setOrientation_(0)    # horizontal
-            row.setSpacing_(8.0)
-            row.setDistribution_(3)   # NSStackViewDistributionEqualSpacing
-            row.setTranslatesAutoresizingMaskIntoConstraints_(False)
-            row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
-
-            # Left side: name + description
-            left = NSStackView.alloc().init()
-            left.setOrientation_(0)
-            left.setSpacing_(6.0)
-
-            name_lbl = make_label(plugin.name, size=12.0, bold=True)
-            left.addArrangedSubview_(name_lbl)
-
-            installing = name in self._installing_plugins
-            available = plugin.is_available()
-
-            if installing:
-                desc_lbl = make_label("Installing…", size=11.0, secondary=True)
-            else:
-                desc_lbl = make_label(plugin.description, size=11.0, secondary=True)
-            desc_lbl.setContentCompressionResistancePriority_forOrientation_(249, 0)
-            left.addArrangedSubview_(desc_lbl)
-
-            row.addArrangedSubview_(left)
-
-            # Right side: Install button, spinner, or toggle
-            if installing:
-                spinner_lbl = make_label("⏳", size=12.0, secondary=True)
-                row.addArrangedSubview_(spinner_lbl)
-            elif not available:
-                install_btn = make_button("Install", self, "_installPlugin:")
-                install_btn.setRepresentedObject_(name)
-                row.addArrangedSubview_(install_btn)
-            else:
-                sw = NSSwitch.alloc().init()
-                sw.setTarget_(self)
-                sw.setAction_("_togglePlugin:")
-                sw.setRepresentedObject_(name)
-                sw.setControlSize_(1)   # NSControlSizeSmall
-                sw.setState_(1 if name in active_names else 0)
-                row.addArrangedSubview_(sw)
-
-            self._plugins_section_stack.addArrangedSubview_(row)
-            self._plugin_row_views.append(row)
-
-        self._plugins_section_stack.setHidden_(not bool(mgr.all_plugins))
-
-    def _togglePlugin_(self, sender: Any) -> None:
-        """Toggle a plugin on or off via the NSSwitch."""
-        plugin_name = str(sender.representedObject() or "")
-        if not plugin_name or not self._app:
-            return
-        self._app.set_plugin_enabled(plugin_name, bool(sender.state()))
-
-    def _installPlugin_(self, sender: Any) -> None:
-        """Install a plugin's dependencies in the background."""
-        import subprocess
-        import threading
-
-        plugin_name = str(sender.representedObject() or "")
-        if not plugin_name or not self._app:
-            return
-        mgr = getattr(self._app, "_plugin_mgr", None)
-        if mgr is None:
-            return
-        plugin = mgr.all_plugins.get(plugin_name)
-        if plugin is None:
-            return
-        cmd = plugin.install_command()
-        if cmd is None:
-            return
-
-        # Mark as installing and refresh UI
-        self._installing_plugins.add(plugin_name)
-        self._rebuild_plugins_section()
-        self._relayout()
-
-        def _run_install():
-            try:
-                result = subprocess.run(
-                    cmd, shell=True, capture_output=True, text=True, timeout=120,
-                )
-                success = result.returncode == 0
-                if not success:
-                    print(f"[penny] plugin install failed for {plugin_name}: {result.stderr.strip()}", flush=True)
-            except Exception as exc:
-                print(f"[penny] plugin install error for {plugin_name}: {exc}", flush=True)
-                success = False
-
-            # Back to main thread
-            from AppKit import NSApp
-            NSApp.delegate().performSelectorOnMainThread_withObject_waitUntilDone_(
-                "_pluginInstallDone:", {"name": plugin_name, "success": success}, False,
-            )
-
-        threading.Thread(target=_run_install, daemon=True).start()
-
-    @objc.python_method
-    def _make_plugins_section(self) -> NSView:
-        """Create the Plugins management section (header + rows)."""
-        outer = NSStackView.alloc().init()
-        outer.setOrientation_(1)
-        outer.setAlignment_(5)
-        outer.setSpacing_(6.0)
-        outer.addArrangedSubview_(make_label("Plugins", size=11.0, secondary=True))
-        outer.setHidden_(True)   # Hidden until plugins are registered
-        self._plugins_section_stack = outer
-        return outer
-
-    @objc.python_method
-    def _make_settings_section(self) -> NSView:
-        """Collapsible settings section: Plugins + Keep Alive + Launch at Login."""
-        outer = NSStackView.alloc().init()
-        outer.setOrientation_(1)   # vertical
-        outer.setAlignment_(5)     # NSLayoutAttributeLeading
-        outer.setSpacing_(8.0)
-
-        # ── Plugins (above service toggles) ──────────────────────────────
-        plugins_view = self._make_plugins_section()
-        outer.addArrangedSubview_(plugins_view)
-        outer.addArrangedSubview_(_make_separator())
-
-        # ── Service toggles ──────────────────────────────────────────────
-        _services = [
-            ("Keep Alive",       "toggleKeepAlive:",      "_keep_alive_btn"),
-            ("Launch at Login",  "toggleLaunchAtLogin:", "_login_btn"),
-        ]
-        for label_text, action, attr in _services:
-            row = NSStackView.alloc().init()
-            row.setOrientation_(0)   # horizontal
-            row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
-            row.setTranslatesAutoresizingMaskIntoConstraints_(False)
-            row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
-
-            lbl = make_label(label_text, size=13.0)
-
-            sw = NSSwitch.alloc().init()
-            sw.setTarget_(self._app)
-            sw.setAction_(action)
-            sw.setControlSize_(1)    # NSControlSizeSmall
-
-            row.addArrangedSubview_(lbl)
-            row.addArrangedSubview_(sw)
-            setattr(self, attr, sw)
-            outer.addArrangedSubview_(row)
-
-        return outer
 
     @objc.python_method
     def _make_update_banner(self) -> NSView:
@@ -518,39 +303,44 @@ class ControlCenterViewController(NSViewController):
         row.setTranslatesAutoresizingMaskIntoConstraints_(False)
         row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
 
-        # Left: refresh button + last refresh label
+        # Left: refresh button + stacked last-refresh text
         left = NSStackView.alloc().init()
         left.setOrientation_(0)
         left.setSpacing_(6.0)
         left.setAlignment_(8)    # NSLayoutAttributeCenterY
 
         refresh_btn = make_button("↻", self, "refreshNow:")
-        last_refresh_lbl = make_label("—", size=11.0, secondary=True)
-        self._last_refresh_lbl = last_refresh_lbl
         self._refresh_btn = refresh_btn
 
-        left.addArrangedSubview_(refresh_btn)
-        left.addArrangedSubview_(last_refresh_lbl)
+        # Two-line vertical stack: "last refresh" (static) / time (dynamic)
+        refresh_text = NSStackView.alloc().init()
+        refresh_text.setOrientation_(1)   # vertical
+        refresh_text.setSpacing_(1.0)
+        refresh_text.setAlignment_(5)     # NSLayoutAttributeLeading
+        refresh_text.addArrangedSubview_(make_label("last refresh", size=10.0, secondary=True))
+        last_refresh_lbl = make_label("—", size=10.0, secondary=True)
+        self._last_refresh_lbl = last_refresh_lbl
+        refresh_text.addArrangedSubview_(last_refresh_lbl)
 
-        # Right: report, settings, quit
+        left.addArrangedSubview_(refresh_btn)
+        left.addArrangedSubview_(refresh_text)
+
+        # Right: dashboard, quit
         right = NSStackView.alloc().init()
         right.setOrientation_(0)
         right.setSpacing_(8.0)
 
-        report_btn = make_button("Report", self, "viewReport:")
-        prefs_btn = make_button("Settings ⚙", self, "toggleSettings:")
+        report_btn = make_button("Dashboard", self, "viewReport:")
         quit_btn = make_button("Quit", self, "quitApp:")
         quit_btn.setContentTintColor_(NSColor.systemRedColor())
-        self._prefs_btn = prefs_btn
 
         right.addArrangedSubview_(report_btn)
-        right.addArrangedSubview_(prefs_btn)
         right.addArrangedSubview_(quit_btn)
 
         row.addArrangedSubview_(left)
         row.addArrangedSubview_(right)
 
-        self._footer_btns = [report_btn, prefs_btn, quit_btn]
+        self._footer_btns = [report_btn, quit_btn]
         return row
 
     def setRefreshing_(self, refreshing: bool) -> None:
@@ -634,7 +424,7 @@ class ControlCenterViewController(NSViewController):
             hrs = delta // 3600
             mins = (delta % 3600) // 60
             text = f"{hrs}h {mins}m ago"
-        self._last_refresh_lbl.setStringValue_(f"last refresh {text}")
+        self._last_refresh_lbl.setStringValue_(text)
 
     # ── Layout pass ────────────────────────────────────────────────────────
 
@@ -663,31 +453,6 @@ class ControlCenterViewController(NSViewController):
     def viewReport_(self, sender: Any) -> None:
         if self._app:
             self._app.viewReport_(sender)
-
-    def toggleSettings_(self, sender: Any) -> None:
-        if self._settings_animating:
-            return
-        self._settings_expanded = not self._settings_expanded
-        if self._prefs_btn is not None:
-            self._prefs_btn.setTitle_("Settings ▲" if self._settings_expanded else "Settings ⚙")
-        if self._settings_section_view is None:
-            self._relayout()
-            return
-        self._settings_animating = True
-        view = self._settings_section_view
-
-        def _animation_block(ctx):
-            ctx.setDuration_(0.2)
-            ctx.setAllowsImplicitAnimation_(True)
-            view.setHidden_(not self._settings_expanded)
-            self._relayout()
-
-        def _completion():
-            self._settings_animating = False
-
-        NSAnimationContext.runAnimationGroup_completionHandler_(
-            _animation_block, _completion
-        )
 
     def openPrefs_(self, sender: Any) -> None:
         if self._app:

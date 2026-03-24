@@ -72,6 +72,18 @@ class FakeApp:
     def clearAllCompleted_(self, sender: Any = None) -> None:
         self.state["recently_completed"] = []
 
+    def applyConfigPatch_(self, patch_json: str) -> None:
+        from penny.app import _deep_merge
+        patch = json.loads(patch_json)
+        self.config = _deep_merge(self.config, patch)
+
+    def run_plugin_install(self, plugin_name: str) -> bool:
+        self._install_started = plugin_name
+        return True
+
+    # Install log storage for test verification
+    _install_logs: dict = {}
+
 
 @pytest.fixture
 def dashboard_app():
@@ -109,7 +121,10 @@ def _get(port: int, path: str) -> tuple[int, dict]:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
-        return e.code, {}
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {}
 
 
 def _post(port: int, path: str, body: dict | None = None) -> tuple[int, dict]:
@@ -123,7 +138,10 @@ def _post(port: int, path: str, body: dict | None = None) -> tuple[int, dict]:
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
-        return e.code, {}
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {}
 
 
 # ── _snapshot() unit tests ────────────────────────────────────────────────────
@@ -558,3 +576,174 @@ class TestDashboardPluginExtensibility:
         _, port = dashboard_app
         status, _ = _post(port, "/api/plugin/nonexistent/action")
         assert status == 429 or status == 404  # may be rate-limited first
+
+
+# ── Config API tests ─────────────────────────────────────────────────────────
+
+
+class TestConfigGET:
+    """Tests for GET /api/config."""
+
+    def test_returns_config_and_plugins(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"service": {"keep_alive": True}, "menubar": {"mode": "bars"}}
+        status, data = _get(port, "/api/config")
+        assert status == 200
+        assert "config" in data
+        assert "plugins" in data
+        assert isinstance(data["plugins"], list)
+
+    def test_includes_service_settings(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"service": {"keep_alive": False, "launch_at_login": True}}
+        status, data = _get(port, "/api/config")
+        assert status == 200
+        assert data["config"]["service"]["keep_alive"] is False
+        assert data["config"]["service"]["launch_at_login"] is True
+
+    def test_includes_plugin_metadata(self, dashboard_app):
+        app, port = dashboard_app
+        # Set up a mock plugin
+        mock_plugin = MagicMock()
+        mock_plugin.name = "test-plugin"
+        mock_plugin.description = "A test plugin"
+        mock_plugin.is_available.return_value = True
+        mock_plugin.install_command.return_value = None
+        mock_plugin.config_schema.return_value = {"option": "default"}
+        app._plugin_mgr.all_plugins = {"test-plugin": mock_plugin}
+        app.config = {"plugins": {"test-plugin": {"enabled": True}}}
+
+        status, data = _get(port, "/api/config")
+        assert status == 200
+        assert len(data["plugins"]) == 1
+        p = data["plugins"][0]
+        assert p["name"] == "test-plugin"
+        assert p["description"] == "A test plugin"
+        assert p["available"] is True
+        assert p["enabled"] is True
+
+
+class TestConfigPOST:
+    """Tests for POST /api/config."""
+
+    def test_updates_service(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"service": {"keep_alive": True, "launch_at_login": True}}
+        status, data = _post(port, "/api/config", {"service": {"keep_alive": False}})
+        assert status == 200
+        assert data["ok"] is True
+        assert app.config["service"]["keep_alive"] is False
+        # launch_at_login should be preserved (deep merge)
+        assert app.config["service"]["launch_at_login"] is True
+
+    def test_updates_plugins(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"plugins": {"beads": {"enabled": True}}}
+        status, data = _post(port, "/api/config", {"plugins": {"beads": {"enabled": False}}})
+        assert status == 200
+        assert app.config["plugins"]["beads"]["enabled"] is False
+
+    def test_deep_merges(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {
+            "service": {"keep_alive": True, "launch_at_login": True},
+            "menubar": {"mode": "bars", "show_sonnet": True},
+        }
+        status, _ = _post(port, "/api/config", {"service": {"keep_alive": False}})
+        assert status == 200
+        # Unpatched keys preserved
+        assert app.config["service"]["launch_at_login"] is True
+        assert app.config["menubar"]["mode"] == "bars"
+
+    def test_rejects_invalid_types(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"service": {"keep_alive": "not_bool"}})
+        assert status == 400
+        assert "error" in data
+
+    def test_rejects_unknown_keys(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"unknown_section": True})
+        assert status == 400
+        assert "error" in data
+
+    def test_projects_replace(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"projects": [{"path": "~/old", "priority": 1}]}
+        new_projects = [{"path": "~/new1", "priority": 1}, {"path": "~/new2", "priority": 2}]
+        status, _ = _post(port, "/api/config", {"projects": new_projects})
+        assert status == 200
+        assert len(app.config["projects"]) == 2
+        assert app.config["projects"][0]["path"] == "~/new1"
+
+    def test_updates_trigger(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"trigger": {"min_capacity_percent": 50}})
+        assert status == 200
+        assert app.config["trigger"]["min_capacity_percent"] == 50
+
+
+class TestDeepMerge:
+    """Unit tests for _deep_merge."""
+
+    def test_shallow_merge(self):
+        from penny.app import _deep_merge
+        base = {"a": 1, "b": 2}
+        patch = {"b": 3, "c": 4}
+        result = _deep_merge(base, patch)
+        assert result == {"a": 1, "b": 3, "c": 4}
+
+    def test_nested_merge(self):
+        from penny.app import _deep_merge
+        base = {"service": {"keep_alive": True, "launch_at_login": True}}
+        patch = {"service": {"keep_alive": False}}
+        result = _deep_merge(base, patch)
+        assert result == {"service": {"keep_alive": False, "launch_at_login": True}}
+
+    def test_list_replacement(self):
+        from penny.app import _deep_merge
+        base = {"projects": [{"path": "~/a"}]}
+        patch = {"projects": [{"path": "~/b"}, {"path": "~/c"}]}
+        result = _deep_merge(base, patch)
+        assert len(result["projects"]) == 2
+        assert result["projects"][0]["path"] == "~/b"
+
+
+class TestInstallLog:
+    """Tests for plugin install log API."""
+
+    def test_install_log_idle(self, dashboard_app):
+        app, port = dashboard_app
+        app._install_logs = {}
+        status, data = _get(port, "/api/plugin/loadout/install-log")
+        assert status == 200
+        assert data["status"] == "idle"
+        assert data["lines"] == []
+
+    def test_install_log_streams_lines(self, dashboard_app):
+        app, port = dashboard_app
+        app._install_logs = {
+            "loadout": {"status": "installing", "lines": ["line1", "line2", "line3"]}
+        }
+        status, data = _get(port, "/api/plugin/loadout/install-log?offset=1")
+        assert status == 200
+        assert data["status"] == "installing"
+        assert data["lines"] == ["line2", "line3"]
+        assert data["offset"] == 3
+
+    def test_install_log_after_success(self, dashboard_app):
+        app, port = dashboard_app
+        app._install_logs = {
+            "loadout": {"status": "success", "lines": ["done"]}
+        }
+        status, data = _get(port, "/api/plugin/loadout/install-log")
+        assert status == 200
+        assert data["status"] == "success"
+
+    def test_post_plugin_install_starts(self, dashboard_app):
+        app, port = dashboard_app
+        status, data = _post(port, "/api/plugin/testplugin/install")
+        assert status == 200
+        assert data["ok"] is True
+        assert app._install_started == "testplugin"

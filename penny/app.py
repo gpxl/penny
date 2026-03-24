@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shutil
@@ -92,6 +93,17 @@ def _config_mtime() -> float | None:
         return None
 
 
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *patch* into *base*. Dicts merge; lists replace."""
+    result = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 # ── Easing helpers ──────────────────────────────────────────────────────
 # Cubic curves: standard for UI motion — perceptually smooth without
 # feeling sluggish.  Each function maps t ∈ [0,1] → [0,1].
@@ -164,6 +176,9 @@ class PennyApp(NSObject):
         # Plugin system
         self._plugin_mgr = PluginManager()
         self._plugin_mgr.discover()
+
+        # Install log buffers for live-streaming plugin installs to dashboard
+        self._install_logs: dict[str, dict[str, Any]] = {}
 
         # Build status item (icon in menu bar)
         status_bar = NSStatusBar.systemStatusBar()
@@ -508,15 +523,8 @@ class PennyApp(NSObject):
         """Callback from background plugin install (runs on main thread)."""
         name = info.get("name", "")
         success = info.get("success", False)
-        vc = self._vc
-        if vc is None:
-            return
-        vc._installing_plugins.discard(name)
         if success:
             self.set_plugin_enabled(name, True)
-        else:
-            vc._rebuild_plugins_section()
-            vc._relayout()
 
     def refreshNow_(self, sender: Any) -> None:
         """Refresh button: force-bypass cache and fetch live /status data."""
@@ -1094,6 +1102,59 @@ class PennyApp(NSObject):
         self.config.setdefault("menubar", {})["mode"] = mode
         self._write_config()
         self._update_status_title()
+
+    # ── Dashboard config API helpers ──────────────────────────────────────
+
+    def applyConfigPatch_(self, patch_json: str) -> None:
+        """Apply a partial config update from the dashboard API (main thread)."""
+        try:
+            patch = json.loads(patch_json)
+        except Exception:
+            return
+        self.config = _deep_merge(self.config, patch)
+        self._write_config()
+        self._hot_reload_config()
+
+    @objc.python_method
+    def run_plugin_install(self, plugin_name: str) -> bool:
+        """Start a background plugin install with live log streaming.
+
+        Returns True if install was started, False if already running or plugin not found.
+        """
+        if self._install_logs.get(plugin_name, {}).get("status") == "installing":
+            return False
+        plugin = self._plugin_mgr.all_plugins.get(plugin_name)
+        if plugin is None:
+            return False
+        cmd = plugin.install_command()
+        if cmd is None:
+            return False
+
+        self._install_logs[plugin_name] = {"status": "installing", "lines": []}
+        log = self._install_logs[plugin_name]
+
+        def _run_install():
+            try:
+                proc = subprocess.Popen(
+                    cmd, shell=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                for line in proc.stdout:
+                    log["lines"].append(line.rstrip("\n"))
+                proc.wait(timeout=120)
+                log["status"] = "success" if proc.returncode == 0 else "failed"
+            except Exception as exc:
+                log["lines"].append(f"Error: {exc}")
+                log["status"] = "failed"
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "_pluginInstallDone:",
+                {"name": plugin_name, "success": log["status"] == "success"},
+                False,
+            )
+
+        threading.Thread(target=_run_install, daemon=True).start()
+        return True
 
     def _newTaskSheet_(self, sender: Any) -> None:
         subprocess.run(["open", str(CONFIG_PATH)], check=False)
