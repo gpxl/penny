@@ -35,6 +35,23 @@ _DEFAULT_SCOPED_TOOLS = [
 ]
 
 
+def _get_app_icon():
+    """Load the Penny icon for use in dialogs. Cached after first call."""
+    if not _HAS_APPKIT:
+        return None
+    if not hasattr(_get_app_icon, "_cached"):
+        from .app import _load_app_icon
+        _get_app_icon._cached = _load_app_icon()
+    return _get_app_icon._cached
+
+
+def _set_alert_icon(alert) -> None:
+    """Set the Penny icon on an NSAlert if available."""
+    icon = _get_app_icon()
+    if icon:
+        alert.setIcon_(icon)
+
+
 def needs_onboarding(config: dict[str, Any]) -> bool:
     """Return True if first-run setup is required (no real projects configured)."""
     projects = config.get("projects", [])
@@ -79,6 +96,7 @@ def _ask_agent_permissions(extra_tools: list[str] | None = None) -> tuple[str, l
         return "off", []
 
     alert = NSAlert.alloc().init()
+    _set_alert_icon(alert)
     alert.setMessageText_("Agent Permission Mode")
     alert.setInformativeText_(
         "Choose how much access Claude agents have when working on your projects.\n\n"
@@ -129,6 +147,7 @@ def check_full_permissions_consent(config: dict[str, Any], state: dict[str, Any]
     from datetime import datetime, timezone
 
     alert = NSAlert.alloc().init()
+    _set_alert_icon(alert)
     alert.setMessageText_("Enable Full Agent Permissions?")
     alert.setInformativeText_(
         "agent_permissions is set to \u201cfull\u201d in config.yaml.\n\n"
@@ -168,6 +187,7 @@ def run_onboarding(
 
     # ── Welcome ───────────────────────────────────────────────────────────
     welcome = NSAlert.alloc().init()
+    _set_alert_icon(welcome)
     welcome.setMessageText_("Welcome to Penny")
     welcome.setInformativeText_(
         "Penny monitors your Claude Pro or Max usage and helps you stay within "
@@ -195,6 +215,7 @@ def run_onboarding(
 
         # Offer to add another
         another = NSAlert.alloc().init()
+        _set_alert_icon(another)
         another.setMessageText_(f"\u201c{path.name}\u201d Added")
         another.setInformativeText_("Would you like to add another project folder?")
         another.addButtonWithTitle_("Add Another Folder\u2026")   # default

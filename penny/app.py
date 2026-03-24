@@ -93,6 +93,21 @@ def _config_mtime() -> float | None:
         return None
 
 
+def _load_app_icon():
+    """Load the pixel art penny icon as an NSImage, or return None."""
+    icon_path = Path(__file__).parent / "resources" / "icon.png"
+    if not icon_path.exists():
+        return None
+    try:
+        from AppKit import NSImage
+        icon = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
+        if icon and icon.isValid():
+            return icon
+    except Exception:
+        pass
+    return None
+
+
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge *patch* into *base*. Dicts merge; lists replace."""
     result = dict(base)
@@ -227,12 +242,9 @@ class PennyApp(NSObject):
         NSApplication.sharedApplication().setActivationPolicy_(1)   # Accessory
 
         # Set custom app icon (appears in NSAlert dialogs and Dock when active)
-        icon_path = Path(__file__).parent / "resources" / "icon.png"
-        if icon_path.exists():
-            from AppKit import NSImage
-            icon = NSImage.alloc().initByReferencingFile_(str(icon_path))
-            if icon:
-                NSApplication.sharedApplication().setApplicationIconImage_(icon)
+        self._app_icon = _load_app_icon()
+        if self._app_icon:
+            NSApplication.sharedApplication().setApplicationIconImage_(self._app_icon)
 
         # Defer first load so the menu bar icon is visible before any dialogs
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -1328,6 +1340,8 @@ class PennyApp(NSObject):
         alert = NSAlert.alloc().init()
         alert.setMessageText_(title)
         alert.setInformativeText_(message)
+        if self._app_icon:
+            alert.setIcon_(self._app_icon)
         alert.runModal()
 
 
