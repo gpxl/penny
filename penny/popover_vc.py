@@ -76,10 +76,11 @@ class ControlCenterViewController(NSViewController):
 
     def loadView(self) -> None:
         """Build the full popover UI."""
-        outer = NSView.alloc().initWithFrame_(((0, 0), (_WIDTH, 500)))
+        outer = NSView.alloc().initWithFrame_(((0, 0), (_WIDTH, 300)))
         self.setView_(outer)
         self._build(outer)
         self._insert_plugin_sections()
+        self._relayout()
 
     # ── Public update API ──────────────────────────────────────────────────
 
@@ -155,7 +156,7 @@ class ControlCenterViewController(NSViewController):
     @objc.python_method
     def _build(self, outer: NSView) -> None:
         """Construct all subviews inside `outer`."""
-        stack = NSStackView.alloc().initWithFrame_(((0, 0), (_WIDTH, 500)))
+        stack = NSStackView.alloc().initWithFrame_(((0, 0), (_WIDTH, 300)))
         stack.setOrientation_(1)      # NSUserInterfaceLayoutOrientationVertical
         stack.setAlignment_(5)        # NSLayoutAttributeLeading
         stack.setSpacing_(_SECTION_SPACING)
