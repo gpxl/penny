@@ -523,6 +523,8 @@ class PennyApp(NSObject):
                 "fetched_at": self._last_fetch_at,
                 "update_check": self.state.get("update_check"),
             })
+        # Refresh menubar immediately so show_sonnet and other display changes apply
+        self._update_status_title()
         # Trigger a fetch so newly-added project tasks appear immediately
         self._worker.fetch()
         print("[penny] config.yaml reloaded", flush=True)
