@@ -897,6 +897,10 @@ class PennyApp(NSObject):
 
         btn.setTitle_(title or "")
 
+        # Force the status bar button to redraw with the new image dimensions
+        btn.setNeedsDisplay_(True)
+        self._status_item.setLength_(-1.0)  # NSVariableStatusItemLength
+
         # Tooltip — shown automatically after ~0.8s hover; no Accessibility permission needed
         if pred:
             pct_s = int(round(pred.session_pct_all))
