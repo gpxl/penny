@@ -180,19 +180,33 @@ def format_reset_label(label: str) -> str:
 
 
 def short_reset_label(label: str) -> str:
-    """Return a compact version of a reset label for inline display.
+    """Return a compact reset label: 'today at <time>' or '<date> at <time>'.
 
-    - "Mar 28 at 10am" → "Mar 28"  (weekly: strip time, just show date)
-    - "5pm" → "5pm"               (session: already short, pass through)
-    - "Mar 24 at 20" → "Mar 24"   (24h formatted: strip time)
+    - "Mar 24 at 10am" → "today at 10am"  (if today is Mar 24)
+    - "Mar 28 at 9:59"  → "Mar 28 at 9:59"
+    - "Today at 5:59 PM" → "today at 5:59 PM"
+    - "5pm" → "today at 5pm"  (bare time from session scraper)
+    - "17:59" → "today at 17:59"
     """
     if not label or label == "—":
         return label
-    # Weekly labels have "at" — strip everything from "at" onward
-    m = re.match(r"^([A-Z][a-z]{2}\s+\d{1,2})\s+at\s+", label)
+
+    # Already has "Today at" — pass through
+    if label.lower().startswith("today at "):
+        return "Today at " + label[9:]
+
+    # Dated weekly: "Mar 28 at 9am" — replace today's date with "Today"
+    m = re.match(r"^([A-Z][a-z]{2}\s+\d{1,2})\s+at\s+(.*)", label)
     if m:
-        return m.group(1)
-    return label
+        date_str = m.group(1)
+        time_str = m.group(2)
+        today_str = datetime.now().strftime("%b ") + str(datetime.now().day)
+        if date_str == today_str:
+            return f"Today at {time_str}"
+        return label
+
+    # Bare time (session scraper): "5pm", "17:59", "21" — prefix with "Today"
+    return f"Today at {label}"
 
 
 # ---------------------------------------------------------------------------

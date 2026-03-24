@@ -346,6 +346,8 @@ def _config_payload(app) -> dict[str, Any]:
     plugins_info: list[dict[str, Any]] = []
     if plugin_mgr is not None:
         for name, plugin in plugin_mgr.all_plugins.items():
+            if plugin.hidden:
+                continue
             pcfg = plugins_cfg.get(name, {})
             if isinstance(pcfg, (bool, str)):
                 enabled = pcfg

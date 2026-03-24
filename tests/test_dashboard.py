@@ -625,6 +625,7 @@ class TestConfigGET:
         mock_plugin = MagicMock()
         mock_plugin.name = "test-plugin"
         mock_plugin.description = "A test plugin"
+        mock_plugin.hidden = False
         mock_plugin.is_available.return_value = True
         mock_plugin.install_command.return_value = None
         mock_plugin.config_schema.return_value = {"option": "default"}

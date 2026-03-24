@@ -111,7 +111,8 @@ class ControlCenterViewController(NSViewController):
             # Inline reset labels (compact, in each bar row)
             if pred.session_reset_label:
                 formatted = format_reset_label(pred.session_reset_label)
-                self._lbl_session_reset.setStringValue_(formatted)
+                short = short_reset_label(formatted)
+                self._lbl_session_reset.setStringValue_(short)
                 self._lbl_session_reset.setToolTip_(f"Resets at {formatted}")
             if pred.reset_label:
                 full = format_reset_label(pred.reset_label)
@@ -398,7 +399,7 @@ class ControlCenterViewController(NSViewController):
         reset_lbl = make_label("", size=9.0, secondary=True)
         reset_lbl.setAlignment_(1)  # NSTextAlignmentRight
         reset_lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        reset_lbl.widthAnchor().constraintEqualToConstant_(60.0).setActive_(True)
+        reset_lbl.widthAnchor().constraintEqualToConstant_(90.0).setActive_(True)
 
         row.addArrangedSubview_(lbl)
         row.addArrangedSubview_(bar)
@@ -436,7 +437,7 @@ class ControlCenterViewController(NSViewController):
             return
         self.view().layoutSubtreeIfNeeded()
         size = self._root_stack.fittingSize()
-        new_height = max(200.0, size.height)
+        new_height = max(60.0, size.height)
         self.view().setFrameSize_((_WIDTH, new_height))
         if self._app and hasattr(self._app, "_popover"):
             self._app._popover.setContentSize_((_WIDTH, new_height))

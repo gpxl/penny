@@ -41,6 +41,14 @@ class PennyPlugin(ABC):
         """Human-readable description shown in UI/config."""
         ...
 
+    @property
+    def hidden(self) -> bool:
+        """If True, plugin is not shown in UI or activated via config.
+
+        Use for plugins that are not ready for end-user consumption.
+        """
+        return False
+
     def is_available(self) -> bool:
         """Auto-detect if plugin's dependencies are present.
 
@@ -348,6 +356,11 @@ class PluginManager:
         plugins_cfg = config.get("plugins", {})
 
         for name, plugin in self._plugins.items():
+            if plugin.hidden:
+                if name in self._active:
+                    self.deactivate(name)
+                continue
+
             pcfg = plugins_cfg.get(name, {})
             if isinstance(pcfg, bool):
                 pcfg = {"enabled": pcfg}
