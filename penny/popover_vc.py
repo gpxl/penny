@@ -26,10 +26,12 @@ from .ui_components import ProgressBarView, make_button, make_label
 _SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # Popover width (fixed). Height is dynamic.
-_WIDTH: float = 380.0
-_PADDING: float = 12.0
-_BAR_HEIGHT: float = 8.0
-_SECTION_SPACING: float = 6.0
+# ── Design system tokens ──────────────────────────────────────────────────
+_WIDTH: float = 380.0           # Fixed popover width; height is dynamic
+_PADDING: float = 10.0          # Root stack edge insets (all sides)
+_BAR_HEIGHT: float = 8.0        # Progress bar track height
+_SECTION_SPACING: float = 4.0   # Vertical gap between root stack items
+_ITEM_SPACING: float = 6.0      # Horizontal gap within rows (bar rows, footer)
 
 
 def _make_separator() -> NSView:
@@ -272,7 +274,7 @@ class ControlCenterViewController(NSViewController):
         """Create the update-available banner row."""
         row = NSStackView.alloc().init()
         row.setOrientation_(0)   # horizontal
-        row.setSpacing_(8.0)
+        row.setSpacing_(_ITEM_SPACING)
         row.setDistribution_(3)  # NSStackViewDistributionEqualSpacing
         row.setTranslatesAutoresizingMaskIntoConstraints_(False)
         row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
@@ -283,7 +285,7 @@ class ControlCenterViewController(NSViewController):
 
         btn_row = NSStackView.alloc().init()
         btn_row.setOrientation_(0)
-        btn_row.setSpacing_(6.0)
+        btn_row.setSpacing_(_ITEM_SPACING)
 
         update_btn = make_button("Update", self, "updateNow:")
         dismiss_btn = make_button("\u00d7", self, "dismissUpdate:")
@@ -299,7 +301,7 @@ class ControlCenterViewController(NSViewController):
     def _make_footer_row(self) -> NSView:
         row = NSStackView.alloc().init()
         row.setOrientation_(0)
-        row.setSpacing_(8.0)
+        row.setSpacing_(_ITEM_SPACING)
         row.setDistribution_(3)   # NSStackViewDistributionEqualSpacing
         row.setTranslatesAutoresizingMaskIntoConstraints_(False)
         row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
@@ -307,7 +309,7 @@ class ControlCenterViewController(NSViewController):
         # Left: refresh button + stacked last-refresh text
         left = NSStackView.alloc().init()
         left.setOrientation_(0)
-        left.setSpacing_(6.0)
+        left.setSpacing_(_ITEM_SPACING)
         left.setAlignment_(8)    # NSLayoutAttributeCenterY
 
         refresh_btn = make_button("↻", self, "refreshNow:")
@@ -329,7 +331,7 @@ class ControlCenterViewController(NSViewController):
         # Right: dashboard, quit
         right = NSStackView.alloc().init()
         right.setOrientation_(0)
-        right.setSpacing_(8.0)
+        right.setSpacing_(_ITEM_SPACING)
 
         report_btn = make_button("Dashboard", self, "viewReport:")
         quit_btn = make_button("Quit", self, "quitApp:")
@@ -375,7 +377,7 @@ class ControlCenterViewController(NSViewController):
                      initial_pct: float) -> tuple[ProgressBarView, NSTextField, NSTextField]:
         row = NSStackView.alloc().init()
         row.setOrientation_(0)
-        row.setSpacing_(8.0)
+        row.setSpacing_(_ITEM_SPACING)
         row.setDistribution_(0)
         row.setTranslatesAutoresizingMaskIntoConstraints_(False)
         row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
