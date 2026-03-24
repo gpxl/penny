@@ -1311,8 +1311,7 @@ class PennyApp(NSObject):
                 self.config = config
                 self._write_config()
                 print("[penny] Full-permission consent declined — reverted to off", flush=True)
-            else:
-                save_state(self.state)
+            save_state(self.state)
 
         self._plugin_mgr.sync_with_config(self, config)
 

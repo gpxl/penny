@@ -167,6 +167,13 @@ def check_full_permissions_consent(config: dict[str, Any], state: dict[str, Any]
         }
         return True
 
+    # User declined — record this so the dialog doesn't reappear on every restart.
+    # The caller reverts agent_permissions to "off" in config.yaml.
+    state["agent_permissions_consent"] = {
+        "given": False,
+        "mode": "full",
+        "date": datetime.now(timezone.utc).isoformat(),
+    }
     return False
 
 
