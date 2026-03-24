@@ -375,8 +375,10 @@ class ControlCenterViewController(NSViewController):
         row.setOrientation_(0)
         row.setSpacing_(_ITEM_SPACING)
         row.setDistribution_(0)
+        row.setAlignment_(8)    # NSLayoutAttributeCenterY
         row.setTranslatesAutoresizingMaskIntoConstraints_(False)
         row.widthAnchor().constraintEqualToConstant_(_WIDTH - _PADDING * 2).setActive_(True)
+        row.heightAnchor().constraintEqualToConstant_(18.0).setActive_(True)
 
         lbl = make_label(label, size=12.0)
         lbl.setTranslatesAutoresizingMaskIntoConstraints_(False)
