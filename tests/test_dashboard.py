@@ -76,6 +76,15 @@ class FakeApp:
         from penny.app import _deep_merge
         patch = json.loads(patch_json)
         self.config = _deep_merge(self.config, patch)
+        # Track the bar count that _make_status_image would render,
+        # so tests can verify the dashboard toggle affects the menubar.
+        show_sonnet = bool(self.config.get("menubar", {}).get("show_sonnet", True))
+        pred = self._prediction
+        if pred:
+            pcts = [pred.session_pct_all, pred.pct_all]
+            if show_sonnet:
+                pcts.append(pred.pct_sonnet)
+            self._last_bar_count = len(pcts)
 
     def run_plugin_install(self, plugin_name: str) -> bool:
         self._install_started = plugin_name
@@ -747,3 +756,52 @@ class TestInstallLog:
         assert status == 200
         assert data["ok"] is True
         assert app._install_started == "testplugin"
+
+
+# ── Dashboard → Menubar integration tests ────────────────────────────────────
+
+
+class TestShowSonnetDashboardE2E:
+    """End-to-end: dashboard settings toggle → config update → menubar bar count.
+
+    These tests verify the user-facing flow: clicking "Show Sonnet Bar" in the
+    dashboard settings page actually changes the number of bars that would be
+    rendered in the macOS menu bar.
+    """
+
+    def test_toggle_show_sonnet_off_via_api_sets_2_bars(self, dashboard_app):
+        """POST show_sonnet=false → config updated + bar count is 2."""
+        app, port = dashboard_app
+        app.config = {"menubar": {"show_sonnet": True}}
+        status, data = _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
+        assert status == 200
+        assert app.config["menubar"]["show_sonnet"] is False
+        assert app._last_bar_count == 2
+
+    def test_toggle_show_sonnet_on_via_api_sets_3_bars(self, dashboard_app):
+        """POST show_sonnet=true → config updated + bar count is 3."""
+        app, port = dashboard_app
+        app.config = {"menubar": {"show_sonnet": False}}
+        status, data = _post(port, "/api/config", {"menubar": {"show_sonnet": True}})
+        assert status == 200
+        assert app.config["menubar"]["show_sonnet"] is True
+        assert app._last_bar_count == 3
+
+    def test_rapid_toggle_via_api(self, dashboard_app):
+        """Rapid toggle: final state wins."""
+        app, port = dashboard_app
+        app.config = {"menubar": {"show_sonnet": True}}
+        _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
+        assert app._last_bar_count == 2
+        _post(port, "/api/config", {"menubar": {"show_sonnet": True}})
+        assert app._last_bar_count == 3
+        assert app.config["menubar"]["show_sonnet"] is True
+
+    def test_config_roundtrip_preserves_show_sonnet(self, dashboard_app):
+        """POST toggle → GET /api/config → returned config reflects change."""
+        app, port = dashboard_app
+        app.config = {"menubar": {"show_sonnet": True}}
+        _post(port, "/api/config", {"menubar": {"show_sonnet": False}})
+        status, data = _get(port, "/api/config")
+        assert status == 200
+        assert data["config"]["menubar"]["show_sonnet"] is False

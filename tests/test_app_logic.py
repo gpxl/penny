@@ -3471,44 +3471,66 @@ class TestApplyConfigPatch:
 class TestForceMenubarRefresh:
     """Test _force_menubar_refresh bypasses animation guard."""
 
-    def test_resets_loading_phase_and_calls_update(self):
+    def test_sets_done_phase_and_calls_update(self):
         from penny.app import PennyApp
         app = _make_fake_app()
         app._loading_phase = "final_bars"  # would block _update_status_title
         app._update_status_title = MagicMock()
         PennyApp._force_menubar_refresh(app)
-        assert app._loading_phase == "idle"
+        assert app._loading_phase == "done"
         app._update_status_title.assert_called_once()
 
-    def test_recomputes_targets_with_show_sonnet(self):
+    def test_bypasses_animation_guard(self):
+        """_update_status_title normally skips during animation; force_refresh overcomes it."""
         from penny.app import PennyApp
         app = _make_fake_app()
-        app._loading_phase = "final_bars"
+        app._loading_phase = "loading"  # would block _update_status_title
         app._update_status_title = MagicMock()
-        pred = MagicMock()
-        pred.session_pct_all = 10.0
-        pred.pct_all = 20.0
-        pred.pct_sonnet = 30.0
-        app._prediction = pred
-        app.config = {"menubar": {"show_sonnet": True}}
         PennyApp._force_menubar_refresh(app)
-        assert len(app._anim_bar_targets) == 3
-        assert app._anim_bar_vals == [10.0, 20.0, 30.0]
+        assert app._loading_phase == "done"
+        app._update_status_title.assert_called_once()
 
-    def test_recomputes_targets_without_sonnet(self):
+
+class TestAnimationTimerGuard:
+    """Test _loadingAnimTick_ is a no-op when not in an active loading phase."""
+
+    def test_noop_when_done(self):
+        """Timer tick does nothing when phase is 'done'."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "done"
+        btn = app._status_item.button()
+        btn.setImage_.reset_mock()
+        PennyApp._loadingAnimTick_(app, None)
+        btn.setImage_.assert_not_called()
+
+    def test_noop_when_idle(self):
+        """Timer tick does nothing when phase is 'idle'."""
         from penny.app import PennyApp
         app = _make_fake_app()
         app._loading_phase = "idle"
-        app._update_status_title = MagicMock()
-        pred = MagicMock()
-        pred.session_pct_all = 10.0
-        pred.pct_all = 20.0
-        pred.pct_sonnet = 30.0
-        app._prediction = pred
-        app.config = {"menubar": {"show_sonnet": False}}
-        PennyApp._force_menubar_refresh(app)
-        assert len(app._anim_bar_targets) == 2
-        assert app._anim_bar_vals == [10.0, 20.0]
+        btn = app._status_item.button()
+        btn.setImage_.reset_mock()
+        PennyApp._loadingAnimTick_(app, None)
+        btn.setImage_.assert_not_called()
+
+    def test_runs_during_loading(self):
+        """Timer tick proceeds during 'loading' phase (doesn't bail out)."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "loading"
+        app._anim_bar_vals = [0.0, 0.0]
+        app._anim_bar_targets = [50.0, 50.0]
+        app._loading_frame = 0
+        app._data_pending = False
+        app._anim_arc_val = 0.0
+        app._anim_arc_emptying = False
+        app._CAL_BAR_TICKS = 20
+        app._CAL_CLOCK_TICKS = 20
+        # Stub the methods that would be called during animation
+        app._tick_loading_bars = MagicMock()
+        PennyApp._loadingAnimTick_(app, None)
+        app._tick_loading_bars.assert_called_once()
 
 
 # ── run_plugin_install ────────────────────────────────────────────────────────
