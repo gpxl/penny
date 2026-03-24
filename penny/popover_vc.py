@@ -27,9 +27,9 @@ _SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # Popover width (fixed). Height is dynamic.
 _WIDTH: float = 380.0
-_PADDING: float = 16.0
+_PADDING: float = 12.0
 _BAR_HEIGHT: float = 8.0
-_SECTION_SPACING: float = 10.0
+_SECTION_SPACING: float = 6.0
 
 
 def _make_separator() -> NSView:
