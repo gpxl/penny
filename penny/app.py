@@ -476,6 +476,12 @@ class PennyApp(NSObject):
         if btn is None:
             return
 
+        # Only animate during active loading phases.  Once "done" or "idle",
+        # the timer is a no-op — this prevents the animation from overwriting
+        # menubar images set by _force_menubar_refresh / _update_status_title.
+        if self._loading_phase not in ("loading", "final_bars", "final_clock"):
+            return
+
         # ── PHASE: final_bars — bars rise to 100 then settle to real values ──
         if self._loading_phase == "final_bars":
             self._tick_final_bars(btn)
@@ -487,7 +493,7 @@ class PennyApp(NSObject):
             return
 
         # ── PHASE: loading — data just arrived? mark pending ──
-        if self._prediction is not None and self._loading_phase == "loading":
+        if self._prediction is not None:
             self._data_pending = True
 
         # ── PHASE: loading — still waiting / looping with data_pending ──
@@ -858,17 +864,11 @@ class PennyApp(NSObject):
         Called when config changes (e.g. show_sonnet toggle) to ensure
         the menubar reflects the new settings without waiting for the
         current animation cycle to finish.
+
+        Sets _loading_phase to "done" so _loadingAnimTick_ becomes a no-op
+        and won't overwrite the image we're about to render.
         """
-        self._loading_phase = "idle"
-        # Recompute animation targets with new config
-        pred = self._prediction
-        if pred:
-            show_sonnet = bool(self.config.get("menubar", {}).get("show_sonnet", True))
-            targets = [pred.session_pct_all, pred.pct_all]
-            if show_sonnet:
-                targets.append(pred.pct_sonnet)
-            self._anim_bar_targets = targets
-            self._anim_bar_vals = list(targets)  # snap to final values
+        self._loading_phase = "done"
         self._update_status_title()
 
     @objc.python_method
