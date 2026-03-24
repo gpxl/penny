@@ -523,8 +523,8 @@ class PennyApp(NSObject):
                 "fetched_at": self._last_fetch_at,
                 "update_check": self.state.get("update_check"),
             })
-        # Refresh menubar immediately so show_sonnet and other display changes apply
-        self._update_status_title()
+        # Force menubar refresh, bypassing animation guards
+        self._force_menubar_refresh()
         # Trigger a fetch so newly-added project tasks appear immediately
         self._worker.fetch()
         print("[penny] config.yaml reloaded", flush=True)
@@ -852,6 +852,26 @@ class PennyApp(NSObject):
         return f" \u2728{n_running}" if n_running > 0 else ""
 
     @objc.python_method
+    def _force_menubar_refresh(self) -> None:
+        """Force an immediate menubar re-render, bypassing animation guards.
+
+        Called when config changes (e.g. show_sonnet toggle) to ensure
+        the menubar reflects the new settings without waiting for the
+        current animation cycle to finish.
+        """
+        self._loading_phase = "idle"
+        # Recompute animation targets with new config
+        pred = self._prediction
+        if pred:
+            show_sonnet = bool(self.config.get("menubar", {}).get("show_sonnet", True))
+            targets = [pred.session_pct_all, pred.pct_all]
+            if show_sonnet:
+                targets.append(pred.pct_sonnet)
+            self._anim_bar_targets = targets
+            self._anim_bar_vals = list(targets)  # snap to final values
+        self._update_status_title()
+
+    @objc.python_method
     def _update_status_title(self) -> None:
         # Don't clobber a running animation — timer calls us back when done
         if self._loading_phase in ("loading", "final_bars", "final_clock"):
@@ -1153,7 +1173,7 @@ class PennyApp(NSObject):
                 "fetched_at": self._last_fetch_at,
                 "update_check": self.state.get("update_check"),
             })
-        self._update_status_title()
+        self._force_menubar_refresh()
         self._worker.fetch()
         print("[penny] config patch applied", flush=True)
 

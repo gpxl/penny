@@ -1154,8 +1154,12 @@ def _make_fake_app(config=None, state=None, tmp_path=None):
     app._hot_reload_config = MagicMock()
     app._sync_launchd_service = MagicMock()
     app._update_status_title = MagicMock()
+    app._force_menubar_refresh = MagicMock()
     app._spawn_agents = MagicMock()
     app._write_config = MagicMock()
+    app._loading_phase = "idle"
+    app._anim_bar_targets = []
+    app._anim_bar_vals = []
     if tmp_path:
         app._state_path = tmp_path / "state.json"
     return app
@@ -3426,26 +3430,26 @@ class TestApplyConfigPatch:
         app = _make_fake_app(config={"work": {"delay": 10}, "other": "value"})
         app._write_config = MagicMock()
         app._sync_launchd_service = MagicMock()
-        app._update_status_title = MagicMock()
+        app._force_menubar_refresh = MagicMock()
 
         patch_json = '{"work": {"delay": 20}}'
         PennyApp.applyConfigPatch_(app, patch_json)
         assert app.config == {"work": {"delay": 20}, "other": "value"}
         app._write_config.assert_called_once()
-        app._update_status_title.assert_called_once()
+        app._force_menubar_refresh.assert_called_once()
 
     def test_invalid_json_silently_ignored(self):
         from penny.app import PennyApp
         app = _make_fake_app(config={"work": {"delay": 10}})
         original_config = app.config.copy()
         app._write_config = MagicMock()
-        app._update_status_title = MagicMock()
+        app._force_menubar_refresh = MagicMock()
 
         patch_json = "invalid json"
         PennyApp.applyConfigPatch_(app, patch_json)
         assert app.config == original_config  # Should be unchanged
         app._write_config.assert_not_called()
-        app._update_status_title.assert_not_called()
+        app._force_menubar_refresh.assert_not_called()
 
     def test_deep_merge_nested_dicts(self):
         from penny.app import PennyApp
@@ -3455,13 +3459,56 @@ class TestApplyConfigPatch:
         })
         app._write_config = MagicMock()
         app._sync_launchd_service = MagicMock()
-        app._update_status_title = MagicMock()
+        app._force_menubar_refresh = MagicMock()
 
         patch_json = '{"plugins": {"a": {"enabled": false}}}'
         PennyApp.applyConfigPatch_(app, patch_json)
         assert app.config["plugins"]["a"]["enabled"] is False
         assert app.config["work"]["delay"] == 10  # Unchanged nested key
         app._write_config.assert_called_once()
+
+
+class TestForceMenubarRefresh:
+    """Test _force_menubar_refresh bypasses animation guard."""
+
+    def test_resets_loading_phase_and_calls_update(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "final_bars"  # would block _update_status_title
+        app._update_status_title = MagicMock()
+        PennyApp._force_menubar_refresh(app)
+        assert app._loading_phase == "idle"
+        app._update_status_title.assert_called_once()
+
+    def test_recomputes_targets_with_show_sonnet(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "final_bars"
+        app._update_status_title = MagicMock()
+        pred = MagicMock()
+        pred.session_pct_all = 10.0
+        pred.pct_all = 20.0
+        pred.pct_sonnet = 30.0
+        app._prediction = pred
+        app.config = {"menubar": {"show_sonnet": True}}
+        PennyApp._force_menubar_refresh(app)
+        assert len(app._anim_bar_targets) == 3
+        assert app._anim_bar_vals == [10.0, 20.0, 30.0]
+
+    def test_recomputes_targets_without_sonnet(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "idle"
+        app._update_status_title = MagicMock()
+        pred = MagicMock()
+        pred.session_pct_all = 10.0
+        pred.pct_all = 20.0
+        pred.pct_sonnet = 30.0
+        app._prediction = pred
+        app.config = {"menubar": {"show_sonnet": False}}
+        PennyApp._force_menubar_refresh(app)
+        assert len(app._anim_bar_targets) == 2
+        assert app._anim_bar_vals == [10.0, 20.0]
 
 
 # ── run_plugin_install ────────────────────────────────────────────────────────
