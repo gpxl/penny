@@ -234,6 +234,20 @@ class TestSnapshot:
         assert result["prediction"]["reset_label"] == "fmt:9pm"
         assert result["prediction"]["session_reset_label"] == "fmt:2pm"
 
+    def test_reset_label_sonnet_formatted(self):
+        pred = Prediction(reset_label_sonnet="Mar 28 at 9am")
+        app = FakeApp(prediction=pred)
+        with patch("penny.dashboard.format_reset_label", side_effect=lambda x: f"fmt:{x}"):
+            result = _snapshot(app)
+        assert result["prediction"]["reset_label_sonnet"] == "fmt:Mar 28 at 9am"
+
+    def test_reset_label_sonnet_empty_not_formatted(self):
+        pred = Prediction(reset_label_sonnet="")
+        app = FakeApp(prediction=pred)
+        with patch("penny.dashboard.format_reset_label", side_effect=lambda x: f"fmt:{x}"):
+            result = _snapshot(app)
+        assert result["prediction"]["reset_label_sonnet"] == ""
+
     def test_json_serializable(self):
         pred = Prediction(pct_all=10.0)
         tasks = [Task("t-1", "Title", "P1", "/tmp/p", "p")]
@@ -640,6 +654,37 @@ class TestConfigGET:
         assert p["description"] == "A test plugin"
         assert p["available"] is True
         assert p["enabled"] is True
+
+
+    def test_hidden_plugin_excluded_from_config(self, dashboard_app):
+        app, port = dashboard_app
+        visible = MagicMock()
+        visible.name = "visible-plugin"
+        visible.description = "Visible"
+        visible.hidden = False
+        visible.is_available.return_value = True
+        visible.install_command.return_value = None
+        visible.config_schema.return_value = {}
+
+        hidden = MagicMock()
+        hidden.name = "hidden-plugin"
+        hidden.description = "Hidden"
+        hidden.hidden = True
+        hidden.is_available.return_value = True
+        hidden.install_command.return_value = None
+        hidden.config_schema.return_value = {}
+
+        app._plugin_mgr.all_plugins = {
+            "visible-plugin": visible,
+            "hidden-plugin": hidden,
+        }
+        app.config = {"plugins": {}}
+
+        status, data = _get(port, "/api/config")
+        assert status == 200
+        names = [p["name"] for p in data["plugins"]]
+        assert "visible-plugin" in names
+        assert "hidden-plugin" not in names
 
 
 class TestConfigPOST:
