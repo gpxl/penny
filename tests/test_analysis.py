@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from penny.analysis import (
     Prediction,
     SessionInfo,
+    _hours_until_dated_reset_label,
     _hours_until_reset_label,
     count_tokens_since,
     current_billing_period,
@@ -22,6 +23,7 @@ from penny.analysis import (
     reset_label,
     scan_rich_metrics,
     scan_rich_metrics_multi,
+    short_reset_label,
     should_trigger,
     uses_24h_time,
 )
@@ -1371,3 +1373,125 @@ class TestScanRichMetricsMulti:
         with patch("penny.analysis.Path.home", return_value=tmp_path):
             result = scan_rich_metrics_multi(windows)
         assert result["recent"].total_turns == 0
+
+
+# ---------------------------------------------------------------------------
+# short_reset_label
+# ---------------------------------------------------------------------------
+
+class TestShortResetLabel:
+    def test_empty_passthrough(self):
+        assert short_reset_label("") == ""
+
+    def test_dash_passthrough(self):
+        assert short_reset_label("—") == "—"
+
+    def test_none_passthrough(self):
+        assert short_reset_label(None) is None
+
+    def test_today_at_normalises_case(self):
+        assert short_reset_label("today at 5pm") == "Today at 5pm"
+
+    def test_today_at_preserves_time(self):
+        assert short_reset_label("Today at 17:59") == "Today at 17:59"
+
+    def test_bare_time_gets_today_prefix(self):
+        assert short_reset_label("5pm") == "Today at 5pm"
+
+    def test_bare_24h_time_gets_today_prefix(self):
+        assert short_reset_label("17:59") == "Today at 17:59"
+
+    def test_bare_hour_gets_today_prefix(self):
+        assert short_reset_label("21") == "Today at 21"
+
+    def test_todays_date_replaced_with_today(self):
+        today = datetime.now()
+        date_str = today.strftime("%b ") + str(today.day)
+        label = f"{date_str} at 10am"
+        assert short_reset_label(label) == "Today at 10am"
+
+    def test_future_date_preserved(self):
+        # Use a date that is definitely not today
+        label = "Dec 31 at 9:59am"
+        now = datetime.now()
+        if now.month == 12 and now.day == 31:
+            label = "Jan 1 at 9:59am"
+        result = short_reset_label(label)
+        assert result == label  # unchanged
+
+    def test_future_date_keeps_full_format(self):
+        label = "Mar 28 at 9am"
+        now = datetime.now()
+        if now.month == 3 and now.day == 28:
+            # Today IS Mar 28, so use a different date
+            label = "Mar 29 at 9am"
+        result = short_reset_label(label)
+        assert "at" in result
+        assert "Today" not in result
+
+
+# ---------------------------------------------------------------------------
+# _hours_until_dated_reset_label
+# ---------------------------------------------------------------------------
+
+class TestHoursUntilDatedResetLabel:
+    def test_returns_float_for_future_date(self):
+        # Build a label for tomorrow in UTC
+        from datetime import timezone as tz
+        tomorrow = datetime.now(tz.utc) + timedelta(days=1)
+        label = tomorrow.strftime("%b ") + str(tomorrow.day) + " at 8pm"
+        hours = _hours_until_dated_reset_label(label, "UTC")
+        assert isinstance(hours, float)
+        assert hours > 0.0
+
+    def test_returns_zero_for_empty_tz(self):
+        assert _hours_until_dated_reset_label("Mar 28 at 8pm", "") == 0.0
+
+    def test_returns_zero_for_none_tz(self):
+        assert _hours_until_dated_reset_label("Mar 28 at 8pm", None) == 0.0
+
+    def test_returns_zero_for_invalid_tz(self):
+        assert _hours_until_dated_reset_label("Mar 28 at 8pm", "Fake/Zone") == 0.0
+
+    def test_returns_zero_for_unrecognised_label(self):
+        assert _hours_until_dated_reset_label("garbage", "UTC") == 0.0
+
+    def test_returns_zero_for_plain_time(self):
+        # Only handles dated labels, not bare times
+        assert _hours_until_dated_reset_label("8pm", "UTC") == 0.0
+
+    def test_handles_label_with_minutes(self):
+        from datetime import timezone as tz
+        tomorrow = datetime.now(tz.utc) + timedelta(days=1)
+        label = tomorrow.strftime("%b ") + str(tomorrow.day) + " at 9:59am"
+        hours = _hours_until_dated_reset_label(label, "UTC")
+        assert isinstance(hours, float)
+        assert hours > 0.0
+
+    def test_handles_midnight_12am(self):
+        from datetime import timezone as tz
+        tomorrow = datetime.now(tz.utc) + timedelta(days=1)
+        label = tomorrow.strftime("%b ") + str(tomorrow.day) + " at 12am"
+        hours = _hours_until_dated_reset_label(label, "UTC")
+        assert hours > 0.0
+
+    def test_handles_noon_12pm(self):
+        from datetime import timezone as tz
+        tomorrow = datetime.now(tz.utc) + timedelta(days=1)
+        label = tomorrow.strftime("%b ") + str(tomorrow.day) + " at 12pm"
+        hours = _hours_until_dated_reset_label(label, "UTC")
+        assert hours > 0.0
+
+    def test_invalid_month_returns_zero(self):
+        assert _hours_until_dated_reset_label("Xyz 15 at 8pm", "UTC") == 0.0
+
+    def test_year_rollover_for_past_date(self):
+        # A date earlier this year (if already past) should roll to next year
+        from datetime import timezone as tz
+        now = datetime.now(tz.utc)
+        past = now - timedelta(days=30)
+        label = past.strftime("%b ") + str(past.day) + " at " + past.strftime("%-I%p").lower()
+        hours = _hours_until_dated_reset_label(label, "UTC")
+        # Should either be 0.0 (if it can't find a future match) or > 0 (next year)
+        assert isinstance(hours, float)
+        assert hours >= 0.0

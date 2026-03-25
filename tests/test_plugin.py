@@ -48,6 +48,17 @@ class StubPlugin(PennyPlugin):
         pass
 
 
+class HiddenPlugin(StubPlugin):
+    """Plugin with hidden=True for testing hidden plugin filtering."""
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(plugin_name="hidden-stub", **kwargs)
+
+    @property
+    def hidden(self) -> bool:
+        return True
+
+
 class ErrorPlugin(StubPlugin):
     """Plugin that raises on activate/deactivate."""
 
@@ -321,6 +332,35 @@ class TestSyncWithConfig:
         config = {"plugins": {"stub": {"enabled": "false"}}}
         mgr.sync_with_config(MagicMock(), config)
         assert not stub.activated
+
+    def test_hidden_plugin_not_activated_even_if_enabled(self):
+        stub = HiddenPlugin()
+        mgr = _make_manager_with(stub)
+        config = {"plugins": {"hidden-stub": {"enabled": True}}}
+        mgr.sync_with_config(MagicMock(), config)
+        assert not stub.activated
+        assert mgr.active_plugins == []
+
+    def test_hidden_plugin_not_activated_on_auto(self):
+        stub = HiddenPlugin(available=True)
+        mgr = _make_manager_with(stub)
+        mgr.sync_with_config(MagicMock(), {})
+        assert not stub.activated
+
+    def test_hidden_plugin_deactivated_if_previously_active(self):
+        stub = HiddenPlugin(available=True)
+        mgr = _make_manager_with(stub)
+        # Force activate it first (simulating it was active before hidden was set)
+        mgr.activate("hidden-stub", MagicMock(), {})
+        assert stub.activated
+        # Now sync — hidden plugin should be deactivated
+        mgr.sync_with_config(MagicMock(), {"plugins": {"hidden-stub": {"enabled": True}}})
+        assert stub.deactivated
+        assert mgr.active_plugins == []
+
+    def test_hidden_default_is_false(self):
+        stub = StubPlugin()
+        assert stub.hidden is False
 
 
 # ── PluginManager.discover ────────────────────────────────────────────────────

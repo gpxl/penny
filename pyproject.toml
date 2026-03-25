@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "penny"
-version = "0.3.0b1"
+version = "0.4.0b1"
 description = "Claude Code Token Monitor — macOS menu bar app"
 requires-python = ">=3.9"
 dependencies = [
@@ -32,7 +32,7 @@ where = ["."]
 include = ["penny*"]
 
 [tool.setuptools.package-data]
-penny = []
+penny = ["resources/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shutil
@@ -18,7 +19,6 @@ import setproctitle
 import yaml
 from AppKit import (
     NSApplication,
-    NSEvent,
     NSPopover,
     NSStatusBar,
     NSVariableStatusItemLength,
@@ -92,6 +92,32 @@ def _config_mtime() -> float | None:
         return None
 
 
+def _load_app_icon():
+    """Load the pixel art penny icon as an NSImage, or return None."""
+    icon_path = Path(__file__).parent / "resources" / "icon.png"
+    if not icon_path.exists():
+        return None
+    try:
+        from AppKit import NSImage
+        icon = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
+        if icon and icon.isValid():
+            return icon
+    except Exception:
+        pass
+    return None
+
+
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *patch* into *base*. Dicts merge; lists replace."""
+    result = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 # ── Easing helpers ──────────────────────────────────────────────────────
 # Cubic curves: standard for UI motion — perceptually smooth without
 # feeling sluggish.  Each function maps t ∈ [0,1] → [0,1].
@@ -148,7 +174,6 @@ class PennyApp(NSObject):
         self._ready_tasks: list[Any] = []
         self._has_setup_issues: bool = False
         self._last_fetch_at: datetime | None = None
-        self._event_monitor: Any = None
         self._pending_spawns: dict = {}
         self._loading_frame: int = 0
         self._loading_anim_timer: Any = None
@@ -164,6 +189,9 @@ class PennyApp(NSObject):
         # Plugin system
         self._plugin_mgr = PluginManager()
         self._plugin_mgr.discover()
+
+        # Install log buffers for live-streaming plugin installs to dashboard
+        self._install_logs: dict[str, dict[str, Any]] = {}
 
         # Build status item (icon in menu bar)
         status_bar = NSStatusBar.systemStatusBar()
@@ -185,7 +213,9 @@ class PennyApp(NSObject):
 
         self._popover = NSPopover.alloc().init()
         self._popover.setContentViewController_(self._vc)
-        self._popover.setBehavior_(0)   # NSPopoverBehaviorApplicationDefined — avoids click-eating on macOS 26+
+        self._popover.setBehavior_(1)   # NSPopoverBehaviorTransient — auto-close on outside interaction
+        self._popover.setDelegate_(self)
+        self._last_popover_close: float = 0
 
         # Live dashboard HTTP server (lazy-started on first "View Report")
         self._dashboard = DashboardServer(self)
@@ -210,6 +240,12 @@ class PennyApp(NSObject):
 
     def applicationDidFinishLaunching_(self, notification: Any) -> None:
         NSApplication.sharedApplication().setActivationPolicy_(1)   # Accessory
+
+        # Set custom app icon (appears in NSAlert dialogs and Dock when active)
+        self._app_icon = _load_app_icon()
+        if self._app_icon:
+            NSApplication.sharedApplication().setApplicationIconImage_(self._app_icon)
+
         # Defer first load so the menu bar icon is visible before any dialogs
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.4, self, "_startup:", None, False
@@ -224,22 +260,21 @@ class PennyApp(NSObject):
     # ── Toggle popover ────────────────────────────────────────────────────
 
     def togglePopover_(self, sender: Any) -> None:
+        import time
         if self._popover.isShown():
             self._popover.performClose_(sender)
-            self._remove_event_monitor()
-        else:
+        elif time.monotonic() - self._last_popover_close > 0.3:
+            # Guard: Transient auto-closes the popover when the status-bar
+            # button is clicked, then this action fires.  Without the time
+            # guard the popover would immediately reopen.
             btn = self._status_item.button()
             if btn:
-                # Activate so the popover renders at full opacity immediately
-                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                app = NSApplication.sharedApplication()
+                app.setActivationPolicy_(0)  # Regular — enables resign-active
+                app.activateIgnoringOtherApps_(True)
                 self._popover.showRelativeToRect_ofView_preferredEdge_(
                     btn.bounds(), btn, 3  # NSRectEdgeMaxY = bottom edge of menu bar
                 )
-                # Show cached data immediately — force-fetch only on first open
-                # (fetch_live_status spawns claude which counts against session budget).
-                # Subsequent opens do a non-force fetch: uses cached Claude status but
-                # re-runs `bd ready` so newly-added tasks appear without waiting for
-                # the 5-minute background timer.
                 self._vc.updateWithData_({
                     "prediction": self._prediction,
                     "state": self.state,
@@ -248,32 +283,30 @@ class PennyApp(NSObject):
                     "update_check": self.state.get("update_check"),
                 })
                 self._worker.fetch(force=(self._prediction is None))
-                # Global monitor to close on outside click (ApplicationDefined behavior
-                # requires manual dismissal — avoids the click-eating bug on macOS 26+).
-                self._add_event_monitor()
+                # Watchdog: poll isActive() to catch menu-bar clicks from other
+                # apps that Transient behavior alone may miss.
+                self._popover_watchdog = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.25, self, "_checkPopoverFocus:", None, True
+                )
 
-    # ── Event monitor (outside-click dismissal) ───────────────────────────
+    # ── Popover focus watchdog + delegate ─────────────────────────────────
 
-    @objc.python_method
-    def _add_event_monitor(self) -> None:
-        if self._event_monitor is not None:
+    def _checkPopoverFocus_(self, timer: Any) -> None:
+        """Close the popover when the app is no longer active."""
+        if not self._popover.isShown():
+            timer.invalidate()
             return
+        if not NSApplication.sharedApplication().isActive():
+            self._popover.performClose_(None)
+            timer.invalidate()
 
-        def _on_outside_click(event: Any) -> None:
-            if self._popover.isShown():
-                self._popover.performClose_(None)
-            self._remove_event_monitor()
-
-        # NSEventMaskLeftMouseDown = 1 << 1
-        self._event_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            1 << 1, _on_outside_click
-        )
-
-    @objc.python_method
-    def _remove_event_monitor(self) -> None:
-        if self._event_monitor is not None:
-            NSEvent.removeMonitor_(self._event_monitor)
-            self._event_monitor = None
+    def popoverDidClose_(self, notification: Any) -> None:
+        import time
+        self._last_popover_close = time.monotonic()
+        if hasattr(self, "_popover_watchdog") and self._popover_watchdog:
+            self._popover_watchdog.invalidate()
+            self._popover_watchdog = None
+        NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory
 
     # ── Timer ─────────────────────────────────────────────────────────────
 
@@ -352,10 +385,7 @@ class PennyApp(NSObject):
     def _start_final_cycle(self) -> None:
         """Compute targets from prediction and start the final animation cycle."""
         pred = self._prediction
-        show_sonnet = bool(self.config.get("menubar", {}).get("show_sonnet", True))
-        targets = [pred.session_pct_all, pred.pct_all]
-        if show_sonnet:
-            targets.append(pred.pct_sonnet)
+        targets = [pred.session_pct_all, pred.pct_all, pred.pct_sonnet]
         self._anim_bar_targets = targets
         # Resize bar vals to match targets
         self._anim_bar_vals = [0.0] * len(targets)
@@ -440,6 +470,12 @@ class PennyApp(NSObject):
         if btn is None:
             return
 
+        # Only animate during active loading phases.  Once "done" or "idle",
+        # the timer is a no-op — this prevents the animation from overwriting
+        # menubar images set by _force_menubar_refresh / _update_status_title.
+        if self._loading_phase not in ("loading", "final_bars", "final_clock"):
+            return
+
         # ── PHASE: final_bars — bars rise to 100 then settle to real values ──
         if self._loading_phase == "final_bars":
             self._tick_final_bars(btn)
@@ -451,7 +487,7 @@ class PennyApp(NSObject):
             return
 
         # ── PHASE: loading — data just arrived? mark pending ──
-        if self._prediction is not None and self._loading_phase == "loading":
+        if self._prediction is not None:
             self._data_pending = True
 
         # ── PHASE: loading — still waiting / looping with data_pending ──
@@ -487,6 +523,8 @@ class PennyApp(NSObject):
                 "fetched_at": self._last_fetch_at,
                 "update_check": self.state.get("update_check"),
             })
+        # Force menubar refresh, bypassing animation guards
+        self._force_menubar_refresh()
         # Trigger a fetch so newly-added project tasks appear immediately
         self._worker.fetch()
         print("[penny] config.yaml reloaded", flush=True)
@@ -508,15 +546,8 @@ class PennyApp(NSObject):
         """Callback from background plugin install (runs on main thread)."""
         name = info.get("name", "")
         success = info.get("success", False)
-        vc = self._vc
-        if vc is None:
-            return
-        vc._installing_plugins.discard(name)
         if success:
             self.set_plugin_enabled(name, True)
-        else:
-            vc._rebuild_plugins_section()
-            vc._relayout()
 
     def refreshNow_(self, sender: Any) -> None:
         """Refresh button: force-bypass cache and fetch live /status data."""
@@ -722,12 +753,7 @@ class PennyApp(NSObject):
         label color, adapting automatically to light/dark mode.
         """
         from AppKit import NSBezierPath, NSColor, NSImage
-        mb = self.config.get("menubar", {})
-        show_sonnet = bool(mb.get("show_sonnet", True))
-
-        pcts = [pred.session_pct_all, pred.pct_all]
-        if show_sonnet:
-            pcts.append(pred.pct_sonnet)
+        pcts = [pred.session_pct_all, pred.pct_all, pred.pct_sonnet]
 
         n_bars = len(pcts)
         bar_w = 5.0
@@ -820,6 +846,24 @@ class PennyApp(NSObject):
             return f"\u2728{n_running}" if n_running > 0 else "Loading\u2026"
         return f" \u2728{n_running}" if n_running > 0 else ""
 
+    def _refreshMenubar_(self, sender: Any) -> None:
+        """ObjC-callable menubar refresh (for performSelectorOnMainThread)."""
+        self._force_menubar_refresh()
+
+    @objc.python_method
+    def _force_menubar_refresh(self) -> None:
+        """Force an immediate menubar re-render, bypassing animation guards.
+
+        Called when config changes (e.g. show_sonnet toggle) to ensure
+        the menubar reflects the new settings without waiting for the
+        current animation cycle to finish.
+
+        Sets _loading_phase to "done" so _loadingAnimTick_ becomes a no-op
+        and won't overwrite the image we're about to render.
+        """
+        self._loading_phase = "done"
+        self._update_status_title()
+
     @objc.python_method
     def _update_status_title(self) -> None:
         # Don't clobber a running animation — timer calls us back when done
@@ -845,6 +889,10 @@ class PennyApp(NSObject):
             btn.setImagePosition_(0)   # NSNoImage
 
         btn.setTitle_(title or "")
+
+        # Force the status bar button to redraw with the new image dimensions
+        btn.setNeedsDisplay_(True)
+        self._status_item.setLength_(-1.0)  # NSVariableStatusItemLength
 
         # Tooltip — shown automatically after ~0.8s hover; no Accessibility permission needed
         if pred:
@@ -1095,6 +1143,77 @@ class PennyApp(NSObject):
         self._write_config()
         self._update_status_title()
 
+    # ── Dashboard config API helpers ──────────────────────────────────────
+
+    def applyConfigPatch_(self, patch_json: Any) -> None:
+        """Apply a partial config update from the dashboard API (main thread).
+
+        Merges the patch into self.config, persists to disk, then applies
+        all side effects directly (without re-reading from disk).
+        """
+        try:
+            patch = json.loads(patch_json)
+        except Exception:
+            return
+        self.config = _deep_merge(self.config, patch)
+        self._write_config()
+        self._config_mtime = _config_mtime()
+        # Apply all side effects with the in-memory config
+        self._sync_launchd_service()
+        self._plugin_mgr.sync_with_config(self, self.config)
+        if self._vc is not None:
+            self._vc.rebuild_plugin_sections()
+            self._vc.updateWithData_({
+                "prediction": self._prediction,
+                "state": self.state,
+                "ready_tasks": self._all_ready_tasks,
+                "fetched_at": self._last_fetch_at,
+                "update_check": self.state.get("update_check"),
+            })
+        self._force_menubar_refresh()
+        self._worker.fetch()
+
+    @objc.python_method
+    def run_plugin_install(self, plugin_name: str) -> bool:
+        """Start a background plugin install with live log streaming.
+
+        Returns True if install was started, False if already running or plugin not found.
+        """
+        if self._install_logs.get(plugin_name, {}).get("status") == "installing":
+            return False
+        plugin = self._plugin_mgr.all_plugins.get(plugin_name)
+        if plugin is None:
+            return False
+        cmd = plugin.install_command()
+        if cmd is None:
+            return False
+
+        self._install_logs[plugin_name] = {"status": "installing", "lines": []}
+        log = self._install_logs[plugin_name]
+
+        def _run_install():
+            try:
+                proc = subprocess.Popen(
+                    cmd, shell=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                for line in proc.stdout:
+                    log["lines"].append(line.rstrip("\n"))
+                proc.wait(timeout=120)
+                log["status"] = "success" if proc.returncode == 0 else "failed"
+            except Exception as exc:
+                log["lines"].append(f"Error: {exc}")
+                log["status"] = "failed"
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "_pluginInstallDone:",
+                {"name": plugin_name, "success": log["status"] == "success"},
+                False,
+            )
+
+        threading.Thread(target=_run_install, daemon=True).start()
+        return True
+
     def _newTaskSheet_(self, sender: Any) -> None:
         subprocess.run(["open", str(CONFIG_PATH)], check=False)
 
@@ -1160,10 +1279,12 @@ class PennyApp(NSObject):
         self.state = load_state()
         self.state = reset_period_if_needed(self.state)
 
+        just_onboarded = False
         if needs_onboarding(config) and not self.state.get("onboarding_deferred"):
             updated = run_onboarding(CONFIG_PATH, config, plugin_manager=self._plugin_mgr)
             if updated is not None:
                 config = updated
+                just_onboarded = True
                 self.state.pop("onboarding_deferred", None)
             else:
                 self.state["onboarding_deferred"] = True
@@ -1182,15 +1303,21 @@ class PennyApp(NSObject):
 
         # One-time consent check: if agent_permissions=full was enabled without going
         # through onboarding, show a confirmation dialog and record consent in state.
+        # Skip if the user just selected "full" during onboarding — they already chose it.
         if config.get("work", {}).get("agent_permissions") == "full":
-            if not check_full_permissions_consent(config, self.state):
+            if just_onboarded:
+                self.state["agent_permissions_consent"] = {
+                    "given": True,
+                    "mode": "full",
+                    "date": datetime.now(timezone.utc).isoformat(),
+                }
+            elif not check_full_permissions_consent(config, self.state):
                 # User declined — revert to off in config so agents don't spawn
                 config.setdefault("work", {})["agent_permissions"] = "off"
                 self.config = config
                 self._write_config()
                 print("[penny] Full-permission consent declined — reverted to off", flush=True)
-            else:
-                save_state(self.state)
+            save_state(self.state)
 
         self._plugin_mgr.sync_with_config(self, config)
 
@@ -1258,6 +1385,8 @@ class PennyApp(NSObject):
         alert = NSAlert.alloc().init()
         alert.setMessageText_(title)
         alert.setInformativeText_(message)
+        if self._app_icon:
+            alert.setIcon_(self._app_icon)
         alert.runModal()
 
 

@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.4.0b1] - 2026-03-23
+
+### Added
+
+- Loadout plugin with event-driven skill coverage tracking
+- Loadout plugin PATH fix, scan endpoint, and dashboard redesign
+
+### Fixed
+
+- Parse multi-line `/status` Usage tab format correctly
+
+### Changed
+
+- Plugin architecture rules for core/plugin separation documented
+- Simplified CLAUDE.md to template includes
+
 ## [0.3.0b1] - 2026-03-18
 
 ### Added

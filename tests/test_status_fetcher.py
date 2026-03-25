@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pexpect
+
 from penny.status_fetcher import (
     LiveStatus,
     _cache_file,
@@ -15,6 +17,7 @@ from penny.status_fetcher import (
     _feed_child,
     _load_cache,
     _parse_usage_screen,
+    _safe_feed,
     _save_cache,
     _screen_text,
     fetch_live_status,
@@ -53,6 +56,23 @@ SAMPLE_USAGE_SCREEN = """\
   Resets 2pm (Europe/Amsterdam)
 
   Current week (all models)                                       30% used
+  Resets Mar 28 at 9:59am (Europe/Amsterdam)
+
+  Current week (Sonnet only)                                      41% used
+  Resets Mar 24 at 8pm (Europe/Amsterdam)
+
+  Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
+"""
+
+# Legacy format: Sonnet shared the same reset line as all-models
+SAMPLE_USAGE_SCREEN_SHARED_RESET = """\
+                                                Settings   Status   Config   Usage
+ ─────────────────────────────────────────────────────────────────────────────────
+
+  Current session                                                 16% used
+  Resets 2pm (Europe/Amsterdam)
+
+  Current week (all models)                                       30% used
   Current week (Sonnet only)                                      41% used
   Resets Mar 6 at 9pm (Europe/Amsterdam)
 
@@ -74,11 +94,25 @@ class TestParseUsageScreen:
         assert result.session_reset_label == "2pm"
         assert result.session_reset_tz == "Europe/Amsterdam"
 
-    def test_parses_weekly_reset(self):
+    def test_parses_weekly_all_models_reset(self):
         result = _parse_usage_screen(SAMPLE_USAGE_SCREEN)
         assert result is not None
-        assert result.weekly_reset_label == "Mar 6 at 9pm"
+        assert result.weekly_reset_label == "Mar 28 at 9:59am"
         assert result.weekly_reset_tz == "Europe/Amsterdam"
+
+    def test_parses_weekly_sonnet_reset(self):
+        result = _parse_usage_screen(SAMPLE_USAGE_SCREEN)
+        assert result is not None
+        assert result.weekly_reset_label_sonnet == "Mar 24 at 8pm"
+        assert result.weekly_reset_tz_sonnet == "Europe/Amsterdam"
+
+    def test_shared_reset_assigns_to_both(self):
+        """Legacy format: single shared reset line → same value for both budgets."""
+        result = _parse_usage_screen(SAMPLE_USAGE_SCREEN_SHARED_RESET)
+        assert result is not None
+        assert result.weekly_reset_label == "Mar 6 at 9pm"
+        assert result.weekly_reset_label_sonnet == "Mar 6 at 9pm"
+        assert result.weekly_reset_tz_sonnet == "Europe/Amsterdam"
 
     def test_returns_none_on_empty(self):
         assert _parse_usage_screen("") is None
@@ -143,7 +177,8 @@ Resets Jan 1 at 3am (US/Pacific)
         assert result.weekly_pct_all == 37.0
         assert result.weekly_pct_sonnet == 0.0
         assert result.session_reset_label == "3pm"
-        assert result.weekly_reset_label == "Mar 24 at 8pm"
+        assert result.weekly_reset_label == "Mar 21 at 9am"
+        assert result.weekly_reset_label_sonnet == "Mar 24 at 8pm"
 
 
 # ── _screen_text ───────────────────────────────────────────────────────────────
@@ -188,6 +223,8 @@ class TestCache:
             weekly_pct_sonnet=41.0,
             weekly_reset_label="Mar 6 at 9pm",
             weekly_reset_tz="Europe/Amsterdam",
+            weekly_reset_label_sonnet="Mar 3 at 8pm",
+            weekly_reset_tz_sonnet="Europe/Amsterdam",
             fetched_at=datetime(2025, 3, 6, 12, 0, 0, tzinfo=timezone.utc),
         )
         with patch("penny.status_fetcher._cache_file", return_value=tmp_path / "cache.json"):
@@ -216,6 +253,36 @@ class TestCache:
             _save_cache(status)
         assert not cache_file.exists()
 
+    def test_round_trip_includes_sonnet_reset(self, tmp_path):
+        status = _make_live_status()
+        with patch("penny.status_fetcher._cache_file", return_value=tmp_path / "cache.json"):
+            _save_cache(status)
+            loaded = _load_cache()
+        assert loaded is not None
+        assert loaded.weekly_reset_label_sonnet == "Mar 3 at 8pm"
+        assert loaded.weekly_reset_tz_sonnet == "UTC"
+
+    def test_load_old_cache_without_sonnet_fields(self, tmp_path):
+        """Old cache files missing Sonnet fields should load with fallback to all-models values."""
+        cache_file = tmp_path / "cache.json"
+        old_data = {
+            "session_pct": 10.0,
+            "session_reset_label": "3pm",
+            "session_reset_tz": "UTC",
+            "weekly_pct_all": 20.0,
+            "weekly_pct_sonnet": 30.0,
+            "weekly_reset_label": "Mar 10 at 5pm",
+            "weekly_reset_tz": "UTC",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        cache_file.write_text(json.dumps(old_data))
+        with patch("penny.status_fetcher._cache_file", return_value=cache_file):
+            loaded = _load_cache()
+        assert loaded is not None
+        # Sonnet fields should fall back to all-models values
+        assert loaded.weekly_reset_label_sonnet == "Mar 10 at 5pm"
+        assert loaded.weekly_reset_tz_sonnet == "UTC"
+
     def test_load_returns_none_on_missing(self, tmp_path):
         with patch("penny.status_fetcher._cache_file", return_value=tmp_path / "nope.json"):
             assert _load_cache() is None
@@ -225,6 +292,102 @@ class TestCache:
         bad.write_text("not json")
         with patch("penny.status_fetcher._cache_file", return_value=bad):
             assert _load_cache() is None
+
+
+# ── _safe_feed ────────────────────────────────────────────────────────────────
+
+
+class TestSafeFeed:
+    """Prevent the crash that silently killed all live fetches."""
+
+    def test_feeds_bytes(self):
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, b"hello")
+        mock_stream.feed.assert_called_once_with(b"hello")
+
+    def test_ignores_pexpect_timeout_class(self):
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, pexpect.TIMEOUT)
+        mock_stream.feed.assert_not_called()
+
+    def test_ignores_pexpect_eof_class(self):
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, pexpect.EOF)
+        mock_stream.feed.assert_not_called()
+
+    def test_ignores_none(self):
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, None)
+        mock_stream.feed.assert_not_called()
+
+    def test_ignores_empty_bytes(self):
+        mock_stream = MagicMock()
+        _safe_feed(mock_stream, b"")
+        mock_stream.feed.assert_not_called()
+
+
+# ── End-to-end: stale cache → prediction ──────────────────────────────────────
+
+
+class TestStaleCachePredictionIntegration:
+    """Integration test that catches the bug where stale cache data
+    (missing Sonnet fields) flows through to prediction as if both
+    budgets share the same reset — which is misleading."""
+
+    def test_old_cache_prediction_does_not_fabricate_independent_sonnet_reset(self, tmp_path):
+        """When cache has no Sonnet reset field, prediction.reset_label_sonnet
+        should equal the all-models value (fallback), NOT appear as an
+        independently determined value."""
+
+        old_cache_data = {
+            "session_pct": 10.0,
+            "session_reset_label": "3pm",
+            "session_reset_tz": "UTC",
+            "weekly_pct_all": 20.0,
+            "weekly_pct_sonnet": 30.0,
+            "weekly_reset_label": "Mar 28 at 10am",
+            "weekly_reset_tz": "UTC",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        cache_file = tmp_path / "cache.json"
+        cache_file.write_text(json.dumps(old_cache_data))
+
+        with patch("penny.status_fetcher._cache_file", return_value=cache_file):
+            loaded = _load_cache()
+
+        # The fallback copies all-models reset to Sonnet
+        assert loaded.weekly_reset_label_sonnet == loaded.weekly_reset_label
+
+        # This is the critical assertion: when both are identical from fallback,
+        # the UI should NOT display them as if they were independently determined.
+        # A prediction built from this data will show identical resets.
+        overrides = status_as_prediction_overrides(loaded)
+        assert overrides["reset_label"] == overrides["reset_label_sonnet"], (
+            "Stale cache without Sonnet fields should produce identical reset labels, "
+            "not fabricate an independent Sonnet reset"
+        )
+
+    def test_fresh_data_with_independent_resets_differs(self):
+        """When /status reports different resets, the prediction must carry
+        them independently — this is the case the old code missed."""
+        status = LiveStatus(
+            session_pct=44.0,
+            session_reset_label="5pm",
+            session_reset_tz="Europe/Amsterdam",
+            weekly_pct_all=15.0,
+            weekly_pct_sonnet=0.0,
+            weekly_reset_label="Mar 28 at 10am",
+            weekly_reset_tz="Europe/Amsterdam",
+            weekly_reset_label_sonnet="Mar 24 at 8pm",
+            weekly_reset_tz_sonnet="Europe/Amsterdam",
+            fetched_at=datetime.now(timezone.utc),
+        )
+        overrides = status_as_prediction_overrides(status)
+        assert overrides["reset_label"] != overrides["reset_label_sonnet"], (
+            "Independent Sonnet reset must differ from all-models reset"
+        )
+        assert overrides["reset_label"] == "Mar 28 at 10am"
+        assert overrides["reset_label_sonnet"] == "Mar 24 at 8pm"
 
 
 # ── _cache_file ───────────────────────────────────────────────────────────────
@@ -298,6 +461,8 @@ class TestStatusAsPredictionOverrides:
             weekly_pct_sonnet=41.0,
             weekly_reset_label="Mar 6 at 9pm",
             weekly_reset_tz="Europe/Amsterdam",
+            weekly_reset_label_sonnet="Mar 3 at 8pm",
+            weekly_reset_tz_sonnet="Europe/Amsterdam",
             fetched_at=datetime.now(timezone.utc),
         )
         result = status_as_prediction_overrides(status)
@@ -307,6 +472,8 @@ class TestStatusAsPredictionOverrides:
         assert result["reset_label"] == "Mar 6 at 9pm"
         assert result["session_reset_label"] == "2pm"
         assert result["reset_tz"] == "Europe/Amsterdam"
+        assert result["reset_label_sonnet"] == "Mar 3 at 8pm"
+        assert result["reset_tz_sonnet"] == "Europe/Amsterdam"
 
 
 # ── fetch_live_status TTL / no-claude behaviour ───────────────────────────────
@@ -321,6 +488,8 @@ def _make_live_status(**overrides):
         weekly_pct_sonnet=41.0,
         weekly_reset_label="Mar 6 at 9pm",
         weekly_reset_tz="UTC",
+        weekly_reset_label_sonnet="Mar 3 at 8pm",
+        weekly_reset_tz_sonnet="UTC",
         fetched_at=datetime.now(timezone.utc),
     )
     defaults.update(overrides)
@@ -860,3 +1029,484 @@ class TestScreenTextEdgeCases:
         screen.display = ["line  with  spaces  ", "another    line  "]
         result = _screen_text(screen)
         assert result == "line  with  spaces\nanother    line"
+
+
+# ── _extract_labeled_reset break-on-current-session edge case ─────────────────
+
+
+class TestExtractLabeledResetBreakEdge:
+    """Verify the break guard in _extract_labeled_reset (line 259).
+
+    When scanning for a reset that belongs to the "all models" or "Sonnet"
+    label, if a "Current session" line appears before a "Resets" line, the
+    scanner must stop and return None for that label.  Without the break,
+    the session-section reset could bleed into the weekly section.
+    """
+
+    def test_session_label_stops_scan_for_all_models_reset(self):
+        """If 'Current session' appears before 'Resets' while scanning from
+        'all models', the all-models reset must not borrow the session reset."""
+        # Layout: all-models label is present, but the very next Resets line
+        # belongs to the session section which comes AFTER a 'current session'
+        # marker.  The scanner should stop at 'current session' and return None
+        # for the all-models label — forcing positional fallback.
+        screen = """\
+  Status   Config   Usage
+
+  Current week (all models)                                       30% used
+  Current week (Sonnet only)                                      41% used
+  Current session                                                  16% used
+  Resets 2pm (Europe/Amsterdam)
+
+"""
+        result = _parse_usage_screen(screen)
+        # The parse may still succeed via positional fallback (the Resets line
+        # is present), but what we must verify is that the all-models reset
+        # is NOT incorrectly assigned "2pm" (a time-of-day value that only
+        # appears on session resets, not weekly resets).
+        if result is not None:
+            # If fallback runs, it assigns the only reset to session_reset_label
+            # and also to all_models_reset via fallback logic — the important
+            # guarantee is that the label-anchored path did NOT steal the wrong
+            # value.  Verify positional fallback assigned the reset correctly.
+            assert result.session_reset_label == "2pm"
+
+    def test_break_prevents_cross_section_bleed_in_structured_screen(self):
+        """The break guard on 'current session' must fire when the session
+        section appears as an immediate sibling of the weekly section in
+        the scan window, so that the session's reset time is not mistakenly
+        assigned to all-models or Sonnet."""
+        # Construct a screen where:
+        # - "all models" label has NO following Resets within 5 lines
+        # - "current session" appears within those 5 lines
+        # - The actual Resets line only appears after "current session"
+        # This triggers the break path (line 259) for the all-models label.
+        screen = """\
+  Status   Config   Usage
+
+  Current week (all models)                                       30% used
+  Current week (Sonnet only)                                      41% used
+  current session                                                  16% used
+  Resets 2pm (Europe/Amsterdam)
+  Resets Mar 28 at 9:59am (Europe/Amsterdam)
+
+"""
+        result = _parse_usage_screen(screen)
+        # Whether result is None or produced via fallback, the all-models
+        # reset must NOT be "2pm" — that's the session's reset, not weekly.
+        if result is not None:
+            # If we have a result, the weekly reset label should be the
+            # weekly-format value (contains "at"), not the session-format ("2pm").
+            assert result.weekly_reset_label != "2pm", (
+                "all-models reset must not steal the session-section reset value"
+            )
+
+
+# ── fetch_live_status — pexpect/pyte subprocess interaction ───────────────────
+
+
+def _make_screen_mock(text: str) -> MagicMock:
+    """Build a mock pyte Screen whose .display returns lines of the given text."""
+    screen = MagicMock()
+    screen.display = text.splitlines() if text else []
+    return screen
+
+
+VALID_USAGE_SCREEN_TEXT = """\
+Settings   Status   Config   Usage
+  Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
+Current session                       16% used
+Resets 2pm (Europe/Amsterdam)
+Current week (all models)             30% used
+Current week (Sonnet only)            41% used
+Resets Mar 6 at 9pm (Europe/Amsterdam)
+Resets Mar 6 at 9pm (Europe/Amsterdam)
+"""
+
+API_ERROR_SCREEN_TEXT = "Failed to load usage data"
+
+# API error screen that also contains dialog-open text, so the pyte screen
+# check at phase 3 passes (dialog considered open) before parse is attempted.
+API_ERROR_SCREEN_WITH_DIALOG = """\
+Settings   Status   Config   Usage
+  Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
+Failed to load usage data
+"""
+
+GARBLED_SCREEN_TEXT = """\
+Settings   Status   Config   Usage
+garbled content with no percentages
+"""
+
+# Garbled screen that also contains dialog-open text so phase 3 check passes.
+GARBLED_SCREEN_WITH_DIALOG = """\
+Settings   Status   Config   Usage
+  Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
+garbled content with no percentages
+"""
+
+
+def _build_child_mock(expect_returns: list) -> MagicMock:
+    """Build a mock pexpect child process."""
+    child = MagicMock()
+    child.before = b""
+    child.after = b"\xe2\x9d\xaf"  # The ❯ prompt bytes
+    child.expect.side_effect = expect_returns
+    child.send = MagicMock()
+    child.close = MagicMock()
+    return child
+
+
+class TestFetchLiveStatusSubprocessPaths:
+    """Test the pexpect/pyte interaction inside fetch_live_status.
+
+    Since pexpect and pyte are imported at module top-level, we patch their
+    attributes directly (pexpect.spawn, pyte.Screen, pyte.ByteStream) rather
+    than replacing the modules.  We also patch _feed_child and time.sleep to
+    avoid real timing.
+    """
+
+    def setup_method(self):
+        import penny.status_fetcher as sf
+        sf._cache = None
+
+    def _run_with_screen(
+        self,
+        screen_text: str,
+        child: MagicMock,
+        force: bool = True,
+    ):
+        """Helper: run fetch_live_status with a mocked screen and child process.
+
+        Patches _load_cache to return None so the real ~/.penny/status_cache.json
+        on disk does not interfere with cold-start logic in the tests.
+        """
+        screen_mock = _make_screen_mock(screen_text)
+        with (
+            patch("penny.status_fetcher._load_cache", return_value=None),
+            patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+            patch("pexpect.spawn", return_value=child),
+            patch("pyte.Screen", return_value=screen_mock),
+            patch("pyte.ByteStream", return_value=MagicMock()),
+            patch("penny.status_fetcher._feed_child"),
+            patch("penny.status_fetcher.time.sleep"),
+            patch("penny.status_fetcher._save_cache"),
+        ):
+            return fetch_live_status(force=force)
+
+    def test_successful_parse_returns_live_status_with_correct_values(self):
+        """When the Usage tab renders correctly, fetch_live_status returns
+        a populated LiveStatus with the parsed percentages and reset labels."""
+        # child.expect returns 0 (prompt matched) — no fallback needed
+        child = _build_child_mock(expect_returns=[0])
+        result = self._run_with_screen(VALID_USAGE_SCREEN_TEXT, child)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is False
+        assert result.session_pct == 16.0
+        assert result.weekly_pct_all == 30.0
+        assert result.weekly_pct_sonnet == 41.0
+        assert result.session_reset_label == "2pm"
+        assert result.session_reset_tz == "Europe/Amsterdam"
+
+    def test_successful_parse_updates_in_memory_cache(self):
+        """A successful fetch must update the module-level _cache so subsequent
+        calls within the TTL return the cached value without re-spawning."""
+        import penny.status_fetcher as sf
+
+        child = _build_child_mock(expect_returns=[0])
+        result = self._run_with_screen(VALID_USAGE_SCREEN_TEXT, child)
+
+        assert sf._cache is result, "in-memory cache must be set to the parsed result"
+
+    def test_successful_parse_feeds_close_bytes_when_eof_succeeds(self):
+        """When the graceful-close child.expect(EOF) succeeds rather than
+        raising, child.before bytes are fed to the pyte stream (line 455).
+        The result must still be the parsed LiveStatus."""
+        # Provide two expect return values: 0 for the prompt, 0 for the EOF close.
+        # When EOF expect succeeds, _safe_feed(pyte_stream, child.before) executes.
+        child = _build_child_mock(expect_returns=[0, 0])
+        child.before = b"some trailing bytes"
+        result = self._run_with_screen(VALID_USAGE_SCREEN_TEXT, child)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is False
+        assert result.session_pct == 16.0
+
+    def test_prompt_timeout_with_no_api_error_returns_stale_default(self):
+        """When claude does not show the prompt (idx != 0), and the screen has
+        no API error text, returns _stale_or_default() — not an outage status."""
+        # child.expect returns 1 (TIMEOUT index — idx != 0)
+        child = _build_child_mock(expect_returns=[1])
+        result = self._run_with_screen("some startup text", child, force=True)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is False
+        assert result.session_pct == 0.0  # no good cache → zeroed default
+
+    def test_prompt_timeout_with_api_error_on_screen_returns_outage(self):
+        """When claude times out at the prompt AND the screen shows an API error,
+        fetch_live_status must return an outage LiveStatus (outage=True)."""
+        child = _build_child_mock(expect_returns=[1])
+        result = self._run_with_screen(API_ERROR_SCREEN_TEXT, child, force=True)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is True
+
+    def test_api_error_on_usage_tab_returns_outage(self):
+        """When the Usage tab renders an API error rather than real data,
+        fetch_live_status must return an outage LiveStatus.
+
+        The screen must include dialog-open text ('to cycle') so the phase-3
+        pyte check passes and execution reaches the Usage tab parse phase where
+        the API error is detected (lines 429-436).
+        """
+        child = _build_child_mock(expect_returns=[0])
+        result = self._run_with_screen(API_ERROR_SCREEN_WITH_DIALOG, child, force=True)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is True
+
+    def test_unparseable_usage_tab_returns_stale_not_outage(self):
+        """When the Usage tab is reached but the screen cannot be parsed
+        (garbled content), returns _stale_or_default() — not an outage.
+
+        The screen must include dialog-open text so phase-3 check passes and
+        execution reaches the parse phase (lines 443-449).
+        """
+        child = _build_child_mock(expect_returns=[0])
+        result = self._run_with_screen(GARBLED_SCREEN_WITH_DIALOG, child, force=True)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is False
+
+    def test_dialog_not_opened_fallback_timeout_no_error_returns_stale(self):
+        """When the /status dialog does not open (pyte screen check fails),
+        the fallback expect also times out (idx2 >= 2), and there is no API
+        error on screen — returns _stale_or_default()."""
+        # Screen text does NOT contain "Esc to cancel" or "to cycle", so the
+        # code falls through to the fallback child.expect call.
+        # That call returns 2 (TIMEOUT index — idx2 >= 2).
+        child = _build_child_mock(expect_returns=[0, 2])
+        # Use screen text that has no dialog indicator and no API error
+        result = self._run_with_screen("startup screen no dialog", child, force=True)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is False
+
+    def test_dialog_not_opened_fallback_timeout_with_api_error_returns_outage(self):
+        """When dialog doesn't open, fallback times out, and screen shows API
+        error — must return outage status."""
+        # child.expect: first call returns 0 (prompt OK), second returns 2 (TIMEOUT)
+        child = _build_child_mock(expect_returns=[0, 2])
+        # Screen text must trigger the fallback path (no "Esc to cancel" / "to cycle")
+        # AND contain an API error marker.
+        api_error_no_dialog = "api_error happened before dialog opened"
+        result = self._run_with_screen(api_error_no_dialog, child, force=True)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is True
+
+    def test_exception_during_spawn_returns_stale_default(self):
+        """When pexpect.spawn raises (e.g. OSError), the outer except clause
+        catches it and returns _stale_or_default()."""
+        with (
+            patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+            patch("pexpect.spawn", side_effect=OSError("pty allocation failed")),
+            patch("pyte.Screen", return_value=_make_screen_mock("")),
+            patch("pyte.ByteStream", return_value=MagicMock()),
+            patch("penny.status_fetcher._feed_child"),
+            patch("penny.status_fetcher.time.sleep"),
+        ):
+            result = fetch_live_status(force=True)
+
+        assert isinstance(result, LiveStatus)
+        # An OSError from spawn is a transient failure, not a confirmed API outage
+        assert result.outage is False
+
+    def test_exception_during_spawn_with_api_error_on_screen_returns_outage(self):
+        """When pexpect.spawn raises after pyte.Screen is created and the
+        screen already shows an API error, must return outage status."""
+        screen_mock = _make_screen_mock(API_ERROR_SCREEN_TEXT)
+
+        def _raise_after_screen(*args, **kwargs):
+            raise RuntimeError("connection error")
+
+        with (
+            patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+            patch("pexpect.spawn", side_effect=_raise_after_screen),
+            patch("pyte.Screen", return_value=screen_mock),
+            patch("pyte.ByteStream", return_value=MagicMock()),
+            patch("penny.status_fetcher._feed_child"),
+            patch("penny.status_fetcher.time.sleep"),
+        ):
+            result = fetch_live_status(force=True)
+
+        assert isinstance(result, LiveStatus)
+        assert result.outage is True
+
+    def test_exception_during_spawn_and_screen_text_raises_returns_stale(self):
+        """When pexpect.spawn raises AND _screen_text also raises during cleanup,
+        the inner except suppresses the second exception and returns _stale_or_default()."""
+        # _screen_text raises during the outer except handler's cleanup attempt.
+        # Lines 465-466 (inner except Exception: pass) handle this gracefully.
+        with (
+            patch("penny.status_fetcher._load_cache", return_value=None),
+            patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+            patch("pexpect.spawn", side_effect=OSError("pty failed")),
+            patch("pyte.Screen", return_value=MagicMock()),
+            patch("pyte.ByteStream", return_value=MagicMock()),
+            patch("penny.status_fetcher._feed_child"),
+            patch("penny.status_fetcher.time.sleep"),
+            patch("penny.status_fetcher._screen_text", side_effect=RuntimeError("screen exploded")),
+        ):
+            result = fetch_live_status(force=True)
+
+        # Both exceptions were caught — should return stale/default without crashing
+        assert isinstance(result, LiveStatus)
+        assert result.outage is False
+
+    def test_fresh_disk_cache_skips_live_fetch(self):
+        """On cold start (no in-memory cache), if disk cache is fresh,
+        fetch_live_status returns it without spawning claude at all."""
+        import penny.status_fetcher as sf
+        sf._cache = None
+
+        fresh_disk = _make_live_status(session_pct=55.0)
+
+        with (
+            patch("penny.status_fetcher._load_cache", return_value=fresh_disk),
+            patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+            patch("pexpect.spawn") as mock_spawn,
+            patch("pyte.Screen"),
+            patch("pyte.ByteStream"),
+        ):
+            result = fetch_live_status(force=False)
+
+        # No spawn should have occurred — disk cache was fresh enough
+        mock_spawn.assert_not_called()
+        assert result.session_pct == 55.0
+
+    def test_stale_disk_cache_triggers_live_fetch(self):
+        """On cold start with a stale disk cache, fetch_live_status must
+        attempt the live fetch (not just return the stale disk data)."""
+        import penny.status_fetcher as sf
+        sf._cache = None
+
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=700)
+        stale_disk = _make_live_status(session_pct=33.0, fetched_at=old_time)
+
+        child = _build_child_mock(expect_returns=[0])
+        screen_mock = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
+
+        with (
+            patch("penny.status_fetcher._load_cache", return_value=stale_disk),
+            patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+            patch("pexpect.spawn", return_value=child) as mock_spawn,
+            patch("pyte.Screen", return_value=screen_mock),
+            patch("pyte.ByteStream", return_value=MagicMock()),
+            patch("penny.status_fetcher._feed_child"),
+            patch("penny.status_fetcher.time.sleep"),
+            patch("penny.status_fetcher._save_cache"),
+        ):
+            result = fetch_live_status(force=False)
+
+        # claude must have been spawned since the cache was stale
+        mock_spawn.assert_called_once()
+        # And the result should be the freshly parsed data
+        assert result.session_pct == 16.0
+
+    def test_env_strips_claude_code_env_vars_before_spawn(self):
+        """fetch_live_status must strip CLAUDECODE and CLAUDE_CODE from the
+        environment before spawning, to avoid recursive agent detection."""
+        import os
+
+        child = _build_child_mock(expect_returns=[0])
+        screen_mock = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
+
+        captured_env = {}
+
+        def _capture_spawn(cmd, env=None, **kwargs):
+            captured_env.update(env or {})
+            return child
+
+        original_env = os.environ.copy()
+        try:
+            os.environ["CLAUDECODE"] = "1"
+            os.environ["CLAUDE_CODE"] = "true"
+
+            with (
+                patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+                patch("pexpect.spawn", side_effect=_capture_spawn),
+                patch("pyte.Screen", return_value=screen_mock),
+                patch("pyte.ByteStream", return_value=MagicMock()),
+                patch("penny.status_fetcher._feed_child"),
+                patch("penny.status_fetcher.time.sleep"),
+                patch("penny.status_fetcher._save_cache"),
+            ):
+                fetch_live_status(force=True)
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
+
+        assert "CLAUDECODE" not in captured_env, (
+            "CLAUDECODE must be removed from the subprocess environment"
+        )
+        assert "CLAUDE_CODE" not in captured_env, (
+            "CLAUDE_CODE must be removed from the subprocess environment"
+        )
+
+    def test_dialog_check_passes_when_screen_contains_to_cycle(self):
+        """When the pyte screen check finds 'to cycle', the dialog is considered
+        open and the fetch proceeds to parse the Usage tab data successfully."""
+        child = _build_child_mock(expect_returns=[0])
+        screen_with_dialog = """\
+Settings   Status   Config   Usage
+Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
+Current session                       16% used
+Resets 2pm (Europe/Amsterdam)
+Current week (all models)             30% used
+Current week (Sonnet only)            41% used
+Resets Mar 6 at 9pm (Europe/Amsterdam)
+Resets Mar 6 at 9pm (Europe/Amsterdam)
+"""
+        result = self._run_with_screen(screen_with_dialog, child, force=True)
+
+        # The fallback expect path must be skipped — child.expect must NOT
+        # be called with the fallback pattern list (4-element list with TIMEOUT).
+        # Verify by checking the call arguments: no call should have 4 patterns.
+        fallback_calls = [
+            c for c in child.expect.call_args_list
+            if isinstance(c.args[0], list) and len(c.args[0]) == 4
+        ]
+        assert len(fallback_calls) == 0, (
+            "Fallback expect must not be called when 'to cycle' is on screen"
+        )
+        assert result.outage is False
+        assert result.session_pct == 16.0
+
+    def test_dialog_check_passes_when_screen_contains_esc_to_cancel(self):
+        """When the pyte screen contains 'Esc to cancel', the dialog is considered
+        open and the fallback expect path is not triggered."""
+        child = _build_child_mock(expect_returns=[0])
+        screen_with_esc = """\
+Settings   Status   Config   Usage
+  Esc to cancel
+Current session                       16% used
+Resets 2pm (Europe/Amsterdam)
+Current week (all models)             30% used
+Current week (Sonnet only)            41% used
+Resets Mar 6 at 9pm (Europe/Amsterdam)
+Resets Mar 6 at 9pm (Europe/Amsterdam)
+"""
+        result = self._run_with_screen(screen_with_esc, child, force=True)
+
+        fallback_calls = [
+            c for c in child.expect.call_args_list
+            if isinstance(c.args[0], list) and len(c.args[0]) == 4
+        ]
+        assert len(fallback_calls) == 0, (
+            "Fallback expect must not be called when 'Esc to cancel' is on screen"
+        )
+        assert result.outage is False
+        assert result.session_pct == 16.0

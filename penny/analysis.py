@@ -179,6 +179,36 @@ def format_reset_label(label: str) -> str:
     return label
 
 
+def short_reset_label(label: str) -> str:
+    """Return a compact reset label: 'today at <time>' or '<date> at <time>'.
+
+    - "Mar 24 at 10am" → "today at 10am"  (if today is Mar 24)
+    - "Mar 28 at 9:59"  → "Mar 28 at 9:59"
+    - "Today at 5:59 PM" → "today at 5:59 PM"
+    - "5pm" → "today at 5pm"  (bare time from session scraper)
+    - "17:59" → "today at 17:59"
+    """
+    if not label or label == "—":
+        return label
+
+    # Already has "Today at" — pass through
+    if label.lower().startswith("today at "):
+        return "Today at " + label[9:]
+
+    # Dated weekly: "Mar 28 at 9am" — replace today's date with "Today"
+    m = re.match(r"^([A-Z][a-z]{2}\s+\d{1,2})\s+at\s+(.*)", label)
+    if m:
+        date_str = m.group(1)
+        time_str = m.group(2)
+        today_str = datetime.now().strftime("%b ") + str(datetime.now().day)
+        if date_str == today_str:
+            return f"Today at {time_str}"
+        return label
+
+    # Bare time (session scraper): "5pm", "17:59", "21" — prefix with "Today"
+    return f"Today at {label}"
+
+
 # ---------------------------------------------------------------------------
 # Token counting from JSONL files
 # ---------------------------------------------------------------------------
@@ -640,8 +670,8 @@ def _parse_rate_limit_reset(text: str) -> datetime | None:
         hour_24 = 12 if hour == 12 else hour + 12
 
     try:
-        msg_tz = ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, KeyError):
+        msg_tz = ZoneInfo(tz_name.strip())
+    except (ZoneInfoNotFoundError, KeyError, ValueError):
         return None
 
     # We need a context timestamp to determine the reset date — caller must provide it
@@ -710,8 +740,8 @@ def find_session_boundaries(since: datetime) -> list[datetime]:
                             hour_24 = 12 if hour == 12 else hour + 12
 
                         try:
-                            msg_tz = ZoneInfo(tz_name)
-                        except (ZoneInfoNotFoundError, KeyError):
+                            msg_tz = ZoneInfo(tz_name.strip())
+                        except (ZoneInfoNotFoundError, KeyError, ValueError):
                             continue
 
                         try:
@@ -847,11 +877,15 @@ class Prediction:
     pct_all: float = 0.0
     pct_sonnet: float = 0.0
 
-    # Time
+    # Time (all-models)
     days_remaining: float = 0.0
     reset_label: str = ""
     period_start: str = ""
     period_end: str = ""
+
+    # Time (Sonnet — independent reset schedule)
+    days_remaining_sonnet: float = 0.0
+    reset_label_sonnet: str = ""
 
     # Trigger
     will_trigger: bool = False
@@ -868,6 +902,56 @@ class Prediction:
     outage: bool = False
 
 
+def _hours_until_dated_reset_label(label: str, tz_name: str) -> float:
+    """Parse a dated reset label like 'Mar 24 at 8pm' and return hours until that time.
+
+    Handles formats: 'Mar 24 at 8pm', 'Mar 28 at 9:59am'.
+    Falls back to 0.0 if the label doesn't match.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    if not tz_name or not tz_name.strip():
+        return 0.0
+    try:
+        tz = ZoneInfo(tz_name.strip())
+    except (ZoneInfoNotFoundError, KeyError, ValueError):
+        return 0.0
+
+    label = label.strip()
+    # Match "Mar 24 at 8pm", "Mar 28 at 9:59am"
+    m = re.match(
+        r"^([A-Z][a-z]{2})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?(am|pm)$",
+        label,
+    )
+    if not m:
+        return 0.0
+
+    month_str, day, hour = m.group(1), int(m.group(2)), int(m.group(3))
+    minute = int(m.group(4)) if m.group(4) else 0
+    meridiem = m.group(5)
+
+    months = {
+        "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+        "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+    }
+    month = months.get(month_str, 0)
+    if month == 0:
+        return 0.0
+
+    hour_24 = (0 if hour == 12 else hour) if meridiem == "am" else (12 if hour == 12 else hour + 12)
+
+    now_tz = datetime.now(tz)
+    # Try current year first, then next year
+    for year in [now_tz.year, now_tz.year + 1]:
+        try:
+            reset = datetime(year, month, day, hour_24, minute, tzinfo=tz)
+            if reset > now_tz:
+                return max(0.0, (reset - now_tz).total_seconds() / 3600)
+        except ValueError:
+            continue
+    return 0.0
+
+
 def _hours_until_reset_label(label: str, tz_name: str) -> float:
     """Parse a live reset label like '2pm' or '2:30pm' and return hours until that time.
 
@@ -876,10 +960,10 @@ def _hours_until_reset_label(label: str, tz_name: str) -> float:
     """
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-    if not tz_name:
+    if not tz_name or not tz_name.strip():
         return 0.0
     try:
-        tz = ZoneInfo(tz_name)
+        tz = ZoneInfo(tz_name.strip())
     except (ZoneInfoNotFoundError, KeyError, ValueError):
         return 0.0
 
@@ -933,9 +1017,15 @@ def build_prediction(
     session_pct_all = live.session_pct
     session_reset_label = live.session_reset_label
     live_weekly_reset = live.weekly_reset_label
+    live_sonnet_reset = live.weekly_reset_label_sonnet or live.weekly_reset_label
     session_hours_remaining = _hours_until_reset_label(
         live.session_reset_label, live.session_reset_tz
     )
+    sonnet_hours = _hours_until_dated_reset_label(
+        live_sonnet_reset, live.weekly_reset_tz_sonnet or live.weekly_reset_tz
+    )
+    # Fall back to all-models days_remaining if Sonnet date parsing fails
+    days_rem_sonnet = sonnet_hours / 24 if sonnet_hours > 0 else days_rem
 
     # Back-calculate budget from live percentage + observed token count
     # pct = tokens / budget * 100  →  budget = tokens / (pct / 100)
@@ -965,6 +1055,8 @@ def build_prediction(
         pct_sonnet=round(pct_sonnet, 1),
         days_remaining=round(days_rem, 2),
         reset_label=live_weekly_reset,
+        days_remaining_sonnet=round(days_rem_sonnet, 2),
+        reset_label_sonnet=live_sonnet_reset,
         period_start=start.isoformat(),
         period_end=end.isoformat(),
         will_trigger=(remaining_pct >= 1.0),

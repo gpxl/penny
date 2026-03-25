@@ -1154,8 +1154,12 @@ def _make_fake_app(config=None, state=None, tmp_path=None):
     app._hot_reload_config = MagicMock()
     app._sync_launchd_service = MagicMock()
     app._update_status_title = MagicMock()
+    app._force_menubar_refresh = MagicMock()
     app._spawn_agents = MagicMock()
     app._write_config = MagicMock()
+    app._loading_phase = "idle"
+    app._anim_bar_targets = []
+    app._anim_bar_vals = []
     if tmp_path:
         app._state_path = tmp_path / "state.json"
     return app
@@ -1219,56 +1223,23 @@ class TestSetPluginEnabled:
 class TestPluginInstallDoneDirect:
     """Call PennyApp._pluginInstallDone_ directly to cover plugin install callback."""
 
-    def test_handles_none_vc_gracefully(self):
-        """When _vc is None, should return early without error."""
-        from penny.app import PennyApp
-
-        app = _make_fake_app()
-        app._vc = None
-        # Should not raise
-        PennyApp._pluginInstallDone_(app, {"name": "test", "success": True})
-
-    def test_removes_plugin_from_installing_set_on_success(self):
-        """When success=True, plugin name is removed from _installing_plugins."""
-        from penny.app import PennyApp
-
-        app = _make_fake_app()
-        app._vc._installing_plugins = {"test"}
-        app.set_plugin_enabled = MagicMock()
-        PennyApp._pluginInstallDone_(app, {"name": "test", "success": True})
-        assert "test" not in app._vc._installing_plugins
-        # Should call set_plugin_enabled to enable the plugin
-        assert app._vc._installing_plugins == set()
-
     def test_enables_plugin_on_success(self):
         """When success=True, should call set_plugin_enabled with True."""
         from penny.app import PennyApp
 
         app = _make_fake_app()
-        app._vc._installing_plugins = set()
         app.set_plugin_enabled = MagicMock()
         PennyApp._pluginInstallDone_(app, {"name": "loadout", "success": True})
         app.set_plugin_enabled.assert_called_once_with("loadout", True)
 
-    def test_rebuilds_ui_on_install_failure(self):
-        """When success=False, should rebuild plugins section and relayout."""
+    def test_noop_on_failure(self):
+        """When success=False, should not call set_plugin_enabled."""
         from penny.app import PennyApp
 
         app = _make_fake_app()
-        app._vc._installing_plugins = {"test"}
+        app.set_plugin_enabled = MagicMock()
         PennyApp._pluginInstallDone_(app, {"name": "test", "success": False})
-        app._vc._rebuild_plugins_section.assert_called_once()
-        app._vc._relayout.assert_called_once()
-
-    def test_removes_plugin_from_installing_on_failure(self):
-        """Plugin is removed from _installing_plugins even on failure."""
-        from penny.app import PennyApp
-
-        app = _make_fake_app()
-        app._vc._installing_plugins = {"loadout", "other"}
-        PennyApp._pluginInstallDone_(app, {"name": "loadout", "success": False})
-        assert "loadout" not in app._vc._installing_plugins
-        assert "other" in app._vc._installing_plugins
+        app.set_plugin_enabled.assert_not_called()
 
 
 # ── _write_config (direct call into penny/app.py) ────────────────────────────
@@ -2558,6 +2529,40 @@ class TestLoadAndRefreshDirect:
         assert app.config["projects"] == [{"path": "/tmp/proj"}]
         assert "onboarding_deferred" not in app.state
 
+    def test_onboarding_full_mode_records_consent_skips_dialog(self, tmp_path):
+        """When onboarding selects full permissions, consent is recorded without showing the dialog again."""
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("{}\n")
+        updated_config = {
+            "projects": [{"path": "/tmp/proj"}],
+            "work": {"agent_permissions": "full"},
+        }
+        app = _make_fake_app()
+        app._show_alert = MagicMock()
+        app._has_setup_issues = False
+        mock_consent = MagicMock()
+        with (
+            patch("penny.app.CONFIG_PATH", cfg_file),
+            patch("penny.app.load_state", return_value={}),
+            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
+            patch("penny.app.needs_onboarding", return_value=True),
+            patch("penny.app.run_onboarding", return_value=updated_config),
+            patch("penny.app.run_preflight", return_value=[]),
+            patch("penny.app.save_state") as mock_save,
+            patch("penny.app._config_mtime", return_value=12345.0),
+            patch("penny.app.check_full_permissions_consent", mock_consent),
+        ):
+            PennyApp._load_and_refresh(app)
+        # Consent dialog should NOT have been called — onboarding already chose full
+        mock_consent.assert_not_called()
+        # But consent should be recorded in state
+        consent = app.state.get("agent_permissions_consent", {})
+        assert consent["given"] is True
+        assert consent["mode"] == "full"
+        # State should have been saved (to persist consent)
+        assert mock_save.called
+
     def test_full_permissions_granted_saves_state(self, tmp_path):
         """When consent is granted for full permissions, state is saved."""
         from penny.app import PennyApp
@@ -3280,10 +3285,10 @@ class TestStartFinalCycleDirect:
         assert app._loading_frame == 0
         assert app._data_pending is False
 
-    def test_omits_sonnet_when_disabled(self):
+    def test_always_includes_sonnet_bar(self):
         from penny.app import PennyApp
         pred = Prediction(session_pct_all=25.0, pct_all=40.0, pct_sonnet=30.0)
-        app = _make_fake_app(config={"menubar": {"show_sonnet": False}})
+        app = _make_fake_app(config={})
         app._prediction = pred
         app._anim_bar_vals = [0.0, 0.0, 0.0]
         app._anim_bar_targets = [0.0, 0.0, 0.0]
@@ -3291,8 +3296,8 @@ class TestStartFinalCycleDirect:
         app._loading_phase = "loading"
         app._loading_frame = 99
         PennyApp._start_final_cycle(app)
-        assert app._anim_bar_targets == [25.0, 40.0]
-        assert len(app._anim_bar_vals) == 2
+        assert app._anim_bar_targets == [25.0, 40.0, 30.0]
+        assert len(app._anim_bar_vals) == 3
 
 
 # ── _timerFired_ (direct call) ────────────────────────────────────────────
@@ -3367,3 +3372,255 @@ class TestMainEntryPoint:
                 main()
         # Lock should still be released even on exception
         mock_release.assert_called_once()
+
+
+# ── _deep_merge ───────────────────────────────────────────────────────────────
+
+class TestDeepMerge:
+    """Test the _deep_merge utility for recursive config patching."""
+
+    def test_simple_scalar_override(self):
+        from penny.app import _deep_merge
+        base = {"a": 1}
+        patch = {"a": 2}
+        result = _deep_merge(base, patch)
+        assert result == {"a": 2}
+        assert base == {"a": 1}  # Original unchanged
+
+    def test_add_new_key(self):
+        from penny.app import _deep_merge
+        base = {"a": 1}
+        patch = {"b": 2}
+        result = _deep_merge(base, patch)
+        assert result == {"a": 1, "b": 2}
+
+    def test_nested_dict_merge(self):
+        from penny.app import _deep_merge
+        base = {"a": {"x": 1, "y": 2}}
+        patch = {"a": {"x": 10}}
+        result = _deep_merge(base, patch)
+        assert result == {"a": {"x": 10, "y": 2}}
+
+    def test_deeply_nested_merge(self):
+        from penny.app import _deep_merge
+        base = {"a": {"b": {"c": 1, "d": 2}}}
+        patch = {"a": {"b": {"c": 99}}}
+        result = _deep_merge(base, patch)
+        assert result == {"a": {"b": {"c": 99, "d": 2}}}
+
+    def test_dict_replaces_scalar(self):
+        from penny.app import _deep_merge
+        base = {"a": 1}
+        patch = {"a": {"x": 2}}
+        result = _deep_merge(base, patch)
+        assert result == {"a": {"x": 2}}
+
+    def test_scalar_replaces_dict(self):
+        from penny.app import _deep_merge
+        base = {"a": {"x": 2}}
+        patch = {"a": 1}
+        result = _deep_merge(base, patch)
+        assert result == {"a": 1}
+
+    def test_list_replaces_list(self):
+        from penny.app import _deep_merge
+        base = {"a": [1, 2, 3]}
+        patch = {"a": [4, 5]}
+        result = _deep_merge(base, patch)
+        assert result == {"a": [4, 5]}
+
+    def test_empty_patch(self):
+        from penny.app import _deep_merge
+        base = {"a": 1}
+        patch = {}
+        result = _deep_merge(base, patch)
+        assert result == {"a": 1}
+
+    def test_empty_base(self):
+        from penny.app import _deep_merge
+        base = {}
+        patch = {"a": 1}
+        result = _deep_merge(base, patch)
+        assert result == {"a": 1}
+
+    def test_multiple_top_level_keys(self):
+        from penny.app import _deep_merge
+        base = {"plugins": {"a": {"enabled": True}}, "work": {"delay": 10}}
+        patch = {"plugins": {"a": {"enabled": False}}, "work": {"delay": 20}}
+        result = _deep_merge(base, patch)
+        assert result == {
+            "plugins": {"a": {"enabled": False}},
+            "work": {"delay": 20},
+        }
+
+
+# ── applyConfigPatch_ ──────────────────────────────────────────────────────────
+
+class TestApplyConfigPatch:
+    """Test PennyApp.applyConfigPatch_ for dashboard config updates."""
+
+    def test_valid_json_patch_merges(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={"work": {"delay": 10}, "other": "value"})
+        app._write_config = MagicMock()
+        app._sync_launchd_service = MagicMock()
+        app._force_menubar_refresh = MagicMock()
+
+        patch_json = '{"work": {"delay": 20}}'
+        PennyApp.applyConfigPatch_(app, patch_json)
+        assert app.config == {"work": {"delay": 20}, "other": "value"}
+        app._write_config.assert_called_once()
+        app._force_menubar_refresh.assert_called_once()
+
+    def test_invalid_json_silently_ignored(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={"work": {"delay": 10}})
+        original_config = app.config.copy()
+        app._write_config = MagicMock()
+        app._force_menubar_refresh = MagicMock()
+
+        patch_json = "invalid json"
+        PennyApp.applyConfigPatch_(app, patch_json)
+        assert app.config == original_config  # Should be unchanged
+        app._write_config.assert_not_called()
+        app._force_menubar_refresh.assert_not_called()
+
+    def test_deep_merge_nested_dicts(self):
+        from penny.app import PennyApp
+        app = _make_fake_app(config={
+            "plugins": {"a": {"enabled": True}},
+            "work": {"delay": 10}
+        })
+        app._write_config = MagicMock()
+        app._sync_launchd_service = MagicMock()
+        app._force_menubar_refresh = MagicMock()
+
+        patch_json = '{"plugins": {"a": {"enabled": false}}}'
+        PennyApp.applyConfigPatch_(app, patch_json)
+        assert app.config["plugins"]["a"]["enabled"] is False
+        assert app.config["work"]["delay"] == 10  # Unchanged nested key
+        app._write_config.assert_called_once()
+
+
+class TestForceMenubarRefresh:
+    """Test _force_menubar_refresh bypasses animation guard."""
+
+    def test_sets_done_phase_and_calls_update(self):
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "final_bars"  # would block _update_status_title
+        app._update_status_title = MagicMock()
+        PennyApp._force_menubar_refresh(app)
+        assert app._loading_phase == "done"
+        app._update_status_title.assert_called_once()
+
+    def test_bypasses_animation_guard(self):
+        """_update_status_title normally skips during animation; force_refresh overcomes it."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "loading"  # would block _update_status_title
+        app._update_status_title = MagicMock()
+        PennyApp._force_menubar_refresh(app)
+        assert app._loading_phase == "done"
+        app._update_status_title.assert_called_once()
+
+
+class TestAnimationTimerGuard:
+    """Test _loadingAnimTick_ is a no-op when not in an active loading phase."""
+
+    def test_noop_when_done(self):
+        """Timer tick does nothing when phase is 'done'."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "done"
+        btn = app._status_item.button()
+        btn.setImage_.reset_mock()
+        PennyApp._loadingAnimTick_(app, None)
+        btn.setImage_.assert_not_called()
+
+    def test_noop_when_idle(self):
+        """Timer tick does nothing when phase is 'idle'."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "idle"
+        btn = app._status_item.button()
+        btn.setImage_.reset_mock()
+        PennyApp._loadingAnimTick_(app, None)
+        btn.setImage_.assert_not_called()
+
+    def test_runs_during_loading(self):
+        """Timer tick proceeds during 'loading' phase (doesn't bail out)."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._loading_phase = "loading"
+        app._anim_bar_vals = [0.0, 0.0]
+        app._anim_bar_targets = [50.0, 50.0]
+        app._loading_frame = 0
+        app._data_pending = False
+        app._anim_arc_val = 0.0
+        app._anim_arc_emptying = False
+        app._CAL_BAR_TICKS = 20
+        app._CAL_CLOCK_TICKS = 20
+        # Stub the methods that would be called during animation
+        app._tick_loading_bars = MagicMock()
+        PennyApp._loadingAnimTick_(app, None)
+        app._tick_loading_bars.assert_called_once()
+
+
+# ── run_plugin_install ────────────────────────────────────────────────────────
+
+class TestRunPluginInstall:
+    """Test PennyApp.run_plugin_install for background plugin installation."""
+
+    def test_prevents_duplicate_install(self):
+        """Should return False if install already running."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._install_logs = {
+            "test-plugin": {"status": "installing", "lines": []}
+        }
+        app._plugin_mgr = MagicMock()
+
+        result = PennyApp.run_plugin_install(app, "test-plugin")
+        assert result is False
+
+    def test_returns_false_for_missing_plugin(self):
+        """Should return False if plugin not found."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._install_logs = {}
+        app._plugin_mgr = MagicMock()
+        app._plugin_mgr.all_plugins = {}
+
+        result = PennyApp.run_plugin_install(app, "nonexistent")
+        assert result is False
+
+    def test_returns_false_if_no_install_command(self):
+        """Should return False if plugin has no install_command."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._install_logs = {}
+        mock_plugin = MagicMock()
+        mock_plugin.install_command.return_value = None
+        app._plugin_mgr = MagicMock()
+        app._plugin_mgr.all_plugins = {"test-plugin": mock_plugin}
+
+        result = PennyApp.run_plugin_install(app, "test-plugin")
+        assert result is False
+
+    def test_initializes_install_log_and_starts_thread(self):
+        """Should initialize log entry and return True when starting install."""
+        from penny.app import PennyApp
+        app = _make_fake_app()
+        app._install_logs = {}
+        mock_plugin = MagicMock()
+        mock_plugin.install_command.return_value = "pip install test"
+        app._plugin_mgr = MagicMock()
+        app._plugin_mgr.all_plugins = {"test-plugin": mock_plugin}
+        app.performSelectorOnMainThread_withObject_waitUntilDone_ = MagicMock()
+
+        result = PennyApp.run_plugin_install(app, "test-plugin")
+        assert result is True
+        assert "test-plugin" in app._install_logs
+        assert app._install_logs["test-plugin"]["status"] == "installing"
+        assert app._install_logs["test-plugin"]["lines"] == []

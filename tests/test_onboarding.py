@@ -106,7 +106,9 @@ class TestCheckFullPermissionsConsent:
             result = check_full_permissions_consent(config, state)
 
         assert result is False
-        assert "agent_permissions_consent" not in state
+        # Decline is recorded so the dialog doesn't reappear on next restart
+        assert state["agent_permissions_consent"]["given"] is False
+        assert state["agent_permissions_consent"]["mode"] == "full"
 
 
 # ── _write_config_with_comments ──────────────────────────────────────────────

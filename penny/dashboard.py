@@ -151,6 +151,24 @@ class DashboardServer:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+                elif self.path == "/api/config":
+                    self._json(_config_payload(app))
+                elif self.path.startswith("/api/plugin/") and "/install-log" in self.path:
+                    # GET /api/plugin/<name>/install-log?offset=N
+                    path_part = self.path.split("?", 1)[0]
+                    parts = path_part.split("/")
+                    plugin_name = parts[3] if len(parts) >= 5 else ""
+                    # Parse ?offset=N from query string
+                    offset = 0
+                    if "?" in self.path:
+                        qs = self.path.split("?", 1)[1]
+                        for param in qs.split("&"):
+                            if param.startswith("offset="):
+                                try:
+                                    offset = int(param.split("=", 1)[1])
+                                except ValueError:
+                                    pass
+                    self._json(_install_log_payload(app, plugin_name, offset))
                 else:
                     # Route /api/plugin/<name>/... to plugin handler
                     result = _try_plugin_route(app, "GET", self.path, {})
@@ -207,6 +225,24 @@ class DashboardServer:
                     _dispatch("clearAllCompleted:", None, True)
                     self._ok({"ok": True})
 
+                elif self.path == "/api/config":
+                    error = _validate_config_patch(payload)
+                    if error:
+                        self._error(400, error)
+                        return
+                    _apply_config_patch(app, payload)
+                    self._json({"ok": True, "config": getattr(app, "config", {})})
+
+                elif self.path.startswith("/api/plugin/") and self.path.endswith("/install"):
+                    # POST /api/plugin/<name>/install
+                    parts = self.path.split("/")
+                    plugin_name = parts[3] if len(parts) >= 5 else ""
+                    started = app.run_plugin_install(plugin_name)
+                    if started:
+                        self._ok({"ok": True, "installing": True})
+                    else:
+                        self._error(400, f"Cannot install plugin '{plugin_name}'")
+
                 else:
                     # Route /api/plugin/<name>/... to plugin handler
                     result = _try_plugin_route(app, "POST", self.path, payload)
@@ -217,6 +253,14 @@ class DashboardServer:
 
             def _ok(self, data: dict) -> None:
                 self._json(data)
+
+            def _error(self, code: int, message: str) -> None:
+                body = json.dumps({"error": message}).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
             def _json(self, data: dict) -> None:
                 body = json.dumps(data, default=str).encode()
@@ -248,6 +292,8 @@ def _snapshot(app) -> dict[str, Any]:
         pred_dict["reset_label"] = format_reset_label(pred_dict["reset_label"])
     if pred_dict.get("session_reset_label"):
         pred_dict["session_reset_label"] = format_reset_label(pred_dict["session_reset_label"])
+    if pred_dict.get("reset_label_sonnet"):
+        pred_dict["reset_label_sonnet"] = format_reset_label(pred_dict["reset_label_sonnet"])
 
     # Plugin-contributed cards ({name, html} per active plugin)
     plugin_cards: list[dict[str, Any]] = []
@@ -290,6 +336,146 @@ def _meta(app) -> dict[str, Any]:
         "active_plugins": active,
         "cli_commands": cli_commands,
     }
+
+
+def _config_payload(app) -> dict[str, Any]:
+    """Build config + plugin metadata for GET /api/config."""
+    config = getattr(app, "config", {}) or {}
+    plugins_cfg = config.get("plugins", {})
+    plugin_mgr = getattr(app, "_plugin_mgr", None)
+    plugins_info: list[dict[str, Any]] = []
+    if plugin_mgr is not None:
+        for name, plugin in plugin_mgr.all_plugins.items():
+            if plugin.hidden:
+                continue
+            pcfg = plugins_cfg.get(name, {})
+            if isinstance(pcfg, (bool, str)):
+                enabled = pcfg
+            else:
+                enabled = pcfg.get("enabled", "auto")
+            install_cmd = None
+            try:
+                install_cmd = plugin.install_command()
+            except Exception:
+                pass
+            plugins_info.append({
+                "name": name,
+                "description": plugin.description,
+                "available": plugin.is_available(),
+                "enabled": enabled,
+                "install_command": install_cmd,
+                "config_schema": plugin.config_schema(),
+            })
+    return {"config": config, "plugins": plugins_info}
+
+
+def _install_log_payload(app, plugin_name: str, offset: int = 0) -> dict[str, Any]:
+    """Build install log response for GET /api/plugin/<name>/install-log."""
+    logs = getattr(app, "_install_logs", {})
+    entry = logs.get(plugin_name)
+    if entry is None:
+        return {"status": "idle", "lines": [], "offset": 0}
+    lines = entry.get("lines", [])
+    return {
+        "status": entry.get("status", "idle"),
+        "lines": lines[offset:],
+        "offset": len(lines),
+    }
+
+
+_VALID_CONFIG_KEYS = {
+    "stats_cache_path", "service", "notifications", "plugins",
+    "projects", "trigger", "work", "menubar",
+}
+
+
+def _validate_config_patch(patch: dict[str, Any]) -> str | None:
+    """Return an error message if the patch is invalid, or None if valid."""
+    unknown = set(patch.keys()) - _VALID_CONFIG_KEYS
+    if unknown:
+        return f"Unknown config keys: {', '.join(sorted(unknown))}"
+
+    svc = patch.get("service")
+    if svc is not None:
+        if not isinstance(svc, dict):
+            return "service must be a dict"
+        for key in ("keep_alive", "launch_at_login"):
+            if key in svc and not isinstance(svc[key], bool):
+                return f"service.{key} must be a boolean"
+
+    notif = patch.get("notifications")
+    if notif is not None:
+        if not isinstance(notif, dict):
+            return "notifications must be a dict"
+        for key in ("weekly_summary", "spawn", "completion"):
+            if key in notif and not isinstance(notif[key], bool):
+                return f"notifications.{key} must be a boolean"
+
+    trigger = patch.get("trigger")
+    if trigger is not None:
+        if not isinstance(trigger, dict):
+            return "trigger must be a dict"
+        if "min_capacity_percent" in trigger:
+            v = trigger["min_capacity_percent"]
+            if not isinstance(v, (int, float)) or v < 0 or v > 100:
+                return "trigger.min_capacity_percent must be a number 0-100"
+        if "max_days_remaining" in trigger:
+            v = trigger["max_days_remaining"]
+            if not isinstance(v, (int, float)) or v <= 0:
+                return "trigger.max_days_remaining must be a positive number"
+
+    work = patch.get("work")
+    if work is not None:
+        if not isinstance(work, dict):
+            return "work must be a dict"
+        if "max_agents_per_run" in work:
+            v = work["max_agents_per_run"]
+            if not isinstance(v, int) or v < 1:
+                return "work.max_agents_per_run must be an integer >= 1"
+        if "agent_permissions" in work:
+            if work["agent_permissions"] not in ("off", "scoped", "full"):
+                return "work.agent_permissions must be 'off', 'scoped', or 'full'"
+        if "allowed_tools" in work and not isinstance(work["allowed_tools"], list):
+            return "work.allowed_tools must be a list"
+
+    projects = patch.get("projects")
+    if projects is not None:
+        if not isinstance(projects, list):
+            return "projects must be a list"
+        for i, p in enumerate(projects):
+            if not isinstance(p, dict) or "path" not in p:
+                return f"projects[{i}] must have a 'path' key"
+
+    return None
+
+
+
+def _apply_config_patch(app, payload: dict[str, Any]) -> None:
+    """Apply a config patch and trigger an immediate menubar refresh.
+
+    Called from the HTTP handler thread.  Updates config in memory, persists
+    to disk, then calls _force_menubar_refresh directly.  Although AppKit UI
+    calls ideally run on the main thread, NSStatusBarButton.setImage_ is
+    thread-safe in practice and this avoids the ObjC selector dispatch issues
+    that prevented performSelectorOnMainThread from reaching our dynamically
+    defined Python methods.
+    """
+    from .app import _config_mtime, _deep_merge
+
+    app.config = _deep_merge(app.config, payload)
+    try:
+        app._write_config()
+    except Exception:
+        pass
+    app._config_mtime = _config_mtime()
+
+    # Trigger a config reload on the main thread via the existing config
+    # watcher selector.  _checkConfig: detects the mtime change from
+    # _write_config above and calls _hot_reload_config → _force_menubar_refresh
+    # on the main thread.  This is immediate — no waiting for the 5s timer.
+    app.performSelectorOnMainThread_withObject_waitUntilDone_(
+        "_checkConfig:", None, False
+    )
 
 
 def _try_plugin_route(app, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -346,11 +532,53 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .seg-bar span { display:block; transition:width .4s; }
     .sparkline-wrap { margin-top:8px; }
     @keyframes barGrowUp { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+    /* Navigation tabs */
+    .nav-tabs { display:flex; gap:0; margin-bottom:16px; border-bottom:1px solid #e5e7eb; }
+    .nav-tab { background:none; border:none; border-bottom:2px solid transparent; color:#6b7280; cursor:pointer; font-size:14px; font-weight:600; padding:8px 16px; transition:all .2s; }
+    .nav-tab:hover { color:#111827; }
+    .nav-tab.active { color:#3b82f6; border-bottom-color:#3b82f6; }
+    /* Settings page */
+    .setting-row { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f3f4f6; }
+    .setting-row:last-child { border-bottom:none; }
+    .setting-label { font-size:13px; font-weight:500; }
+    .setting-hint { font-size:11px; color:#9ca3af; margin-top:2px; }
+    .setting-label-wrap { display:flex; flex-direction:column; }
+    .toggle { position:relative; width:36px; height:20px; flex-shrink:0; }
+    .toggle input { opacity:0; width:0; height:0; }
+    .toggle .slider { position:absolute; inset:0; background:#d1d5db; border-radius:10px; cursor:pointer; transition:.2s; }
+    .toggle .slider:before { content:""; position:absolute; height:16px; width:16px; left:2px; bottom:2px; background:#fff; border-radius:50%; transition:.2s; }
+    .toggle input:checked + .slider { background:#3b82f6; }
+    .toggle input:checked + .slider:before { transform:translateX(16px); }
+    .setting-select { font-size:12px; padding:4px 8px; border:1px solid #e5e7eb; border-radius:4px; background:#fff; }
+    .setting-input { font-size:12px; padding:4px 8px; border:1px solid #e5e7eb; border-radius:4px; width:80px; }
+    .project-row { display:flex; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid #f3f4f6; }
+    .project-row input[type=text] { flex:1; font-size:12px; padding:4px 8px; border:1px solid #e5e7eb; border-radius:4px; font-family:monospace; }
+    .project-row input[type=number] { width:50px; font-size:12px; padding:4px 8px; border:1px solid #e5e7eb; border-radius:4px; }
+    .btn-sm { font-size:11px; padding:3px 10px; border:1px solid #e5e7eb; border-radius:4px; background:#fff; cursor:pointer; color:#6b7280; }
+    .btn-sm:hover { background:#f3f4f6; }
+    .btn-sm.primary { background:#3b82f6; border-color:#3b82f6; color:#fff; }
+    .btn-sm.primary:hover { background:#2563eb; }
+    .btn-sm.danger { color:#ef4444; }
+    .btn-sm.danger:hover { background:#fef2f2; }
+    .install-log { background:#1f2937; color:#d1d5db; font-family:monospace; font-size:11px; padding:8px 10px; border-radius:6px; max-height:200px; overflow-y:auto; margin-top:6px; white-space:pre-wrap; word-break:break-all; }
+    .plugin-row { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f3f4f6; }
+    .plugin-row:last-child { border-bottom:none; }
+    .plugin-info { display:flex; flex-direction:column; }
+    .plugin-name { font-size:13px; font-weight:500; }
+    .plugin-desc { font-size:11px; color:#9ca3af; }
+    .save-status { font-size:11px; color:#10b981; margin-left:8px; opacity:0; transition:opacity .3s; }
+    .save-status.visible { opacity:1; }
+    .inline-error { font-size:11px; color:#ef4444; margin-top:4px; }
   </style>
 </head>
 <body>
-<h1>Penny Dashboard</h1>
+<h1>Penny</h1>
+<div class="nav-tabs">
+  <button class="nav-tab active" onclick="showPage('dashboard')">Dashboard</button>
+  <button class="nav-tab" onclick="showPage('settings')">Settings</button>
+</div>
 
+<div id="page-dashboard">
 <div class="grid">
   <div class="card" id="card-period"><h2>Weekly Budget</h2><p>…</p></div>
   <div class="card" id="card-session"><h2>Session Budget</h2><p>…</p></div>
@@ -366,6 +594,69 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 <div class="card" id="card-weekly-history" style="margin-bottom:12px"><h2>Weekly Budget History</h2><p>…</p></div>
 <div id="plugin-cards-container"></div>
+</div><!-- /page-dashboard -->
+
+<div id="page-settings" style="display:none">
+<div class="grid">
+  <div class="card" id="settings-service">
+    <h2>Service</h2>
+    <div class="setting-row">
+      <div class="setting-label-wrap"><span class="setting-label">Keep Alive</span><span class="setting-hint">Restart Penny automatically if it crashes</span></div>
+      <label class="toggle"><input type="checkbox" id="cfg-keep-alive" onchange="saveSetting('service',{keep_alive:this.checked},this)"><span class="slider"></span></label>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label-wrap"><span class="setting-label">Launch at Login</span><span class="setting-hint">Start Penny when you log in</span></div>
+      <label class="toggle"><input type="checkbox" id="cfg-launch-at-login" onchange="saveSetting('service',{launch_at_login:this.checked},this)"><span class="slider"></span></label>
+    </div>
+  </div>
+</div>
+<div class="grid">
+  <div class="card" id="settings-plugins">
+    <h2>Plugins</h2>
+    <div id="plugin-settings-list"><p style="color:#9ca3af;font-size:12px">Loading...</p></div>
+  </div>
+  <div class="card" id="settings-notifications">
+    <h2>Notifications</h2>
+    <div class="setting-row">
+      <div class="setting-label-wrap"><span class="setting-label">Agent Spawn</span><span class="setting-hint">Notify when agents are spawned</span></div>
+      <label class="toggle"><input type="checkbox" id="cfg-notif-spawn" onchange="saveSetting('notifications',{spawn:this.checked},this)"><span class="slider"></span></label>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label-wrap"><span class="setting-label">Completion</span><span class="setting-hint">Notify when tasks complete</span></div>
+      <label class="toggle"><input type="checkbox" id="cfg-notif-completion" onchange="saveSetting('notifications',{completion:this.checked},this)"><span class="slider"></span></label>
+    </div>
+  </div>
+</div>
+<div class="grid">
+  <div class="card" id="settings-trigger">
+    <h2>Trigger Conditions</h2>
+    <p style="font-size:11px;color:#9ca3af;margin:0 0 8px">When to auto-spawn agents</p>
+    <div class="setting-row">
+      <div class="setting-label-wrap"><span class="setting-label">Min Capacity %</span><span class="setting-hint">Spawn if this much capacity remains</span></div>
+      <input type="number" class="setting-input" id="cfg-trigger-capacity" min="0" max="100" onchange="saveSetting('trigger',{min_capacity_percent:+this.value},this)">
+    </div>
+    <div class="setting-row">
+      <div class="setting-label-wrap"><span class="setting-label">Max Days Remaining</span><span class="setting-hint">...and this many days left in the week</span></div>
+      <input type="number" class="setting-input" id="cfg-trigger-days" min="0" step="0.5" onchange="saveSetting('trigger',{max_days_remaining:+this.value},this)">
+    </div>
+  </div>
+  <div class="card" id="settings-work">
+    <h2>Work</h2>
+    <div class="setting-row">
+      <div class="setting-label-wrap"><span class="setting-label">Agent Permissions</span><span class="setting-hint">off = no spawning, scoped = restricted, full = unrestricted</span></div>
+      <select class="setting-select" id="cfg-work-perms" onchange="saveSetting('work',{agent_permissions:this.value},this)"><option value="off">Off</option><option value="scoped">Scoped</option><option value="full">Full</option></select>
+    </div>
+  </div>
+</div>
+<div class="card" id="settings-projects" style="margin-bottom:12px">
+  <h2>Projects <span class="save-status" id="projects-save-status">Saved</span></h2>
+  <div id="project-list"></div>
+  <div style="margin-top:8px;display:flex;gap:8px">
+    <button class="btn-sm" onclick="addProject()">+ Add Project</button>
+    <button class="btn-sm primary" onclick="saveProjects()">Save Projects</button>
+  </div>
+</div>
+</div><!-- /page-settings -->
 
 <script>
 let lastOk = null;
@@ -425,11 +716,12 @@ function renderPeriod(pred, samples) {
   return `
     <div class="stat-row"><span>All models${tip("Total output tokens across Opus, Sonnet, and Haiku. This is the primary limit Anthropic tracks.")}</span><span><b>${pa}%</b></span></div>
     ${bar(pred.pct_all||0, barColor(pred.pct_all||0))}
-    <div class="stat-row"><span>Sonnet only${tip("Output tokens from Sonnet models only. Anthropic may apply a separate sublimit for Sonnet.")}</span><span><b>${ps}%</b></span></div>
+    <div class="stat-row" style="font-size:0.85em;color:#888"><span>Resets at</span><span>${pred.reset_label||'–'}</span></div>
+    <div class="stat-row"><span>Sonnet only${tip("Output tokens from Sonnet models only. Anthropic applies a separate sublimit for Sonnet with its own reset schedule.")}</span><span><b>${ps}%</b></span></div>
     ${bar(pred.pct_sonnet||0, barColor(pred.pct_sonnet||0))}
+    <div class="stat-row" style="font-size:0.85em;color:#888"><span>Resets at</span><span>${pred.reset_label_sonnet||pred.reset_label||'–'}</span></div>
     <div class="stat-row" style="margin-top:8px"><span>${(pred.days_remaining||0).toFixed(1)} days remaining</span></div>
     <div class="stat-row"><span>Projected token use${tip("Extrapolates your current daily burn rate to end-of-week. Red means you'll likely hit the limit before reset.")}</span><span>${proj}%</span></div>
-    <div class="stat-row"><span>Resets at</span><span>${pred.reset_label||'–'}</span></div>
     ${renderSparkline(samples)}`;
 }
 
@@ -883,6 +1175,255 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 30000);
+
+// ── Settings page ───────────────────────────────────────────────────────
+
+let settingsData = null;
+let installPollers = {};
+
+function showPage(page) {
+  document.getElementById('page-dashboard').style.display = page === 'dashboard' ? '' : 'none';
+  document.getElementById('page-settings').style.display = page === 'settings' ? '' : 'none';
+  document.querySelectorAll('.nav-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.textContent.trim().toLowerCase() === page);
+  });
+  if (page === 'settings') loadSettings();
+}
+
+async function loadSettings() {
+  try {
+    const resp = await fetch('/api/config');
+    if (!resp.ok) throw new Error(resp.status);
+    settingsData = await resp.json();
+    populateSettings(settingsData.config, settingsData.plugins);
+  } catch (e) {
+    console.error('Failed to load settings:', e);
+  }
+}
+
+function populateSettings(cfg, plugins) {
+  // Service
+  const svc = cfg.service || {};
+  document.getElementById('cfg-keep-alive').checked = svc.keep_alive !== false;
+  document.getElementById('cfg-launch-at-login').checked = svc.launch_at_login !== false;
+  // Notifications
+  const notif = cfg.notifications || {};
+  document.getElementById('cfg-notif-spawn').checked = notif.spawn !== false;
+  document.getElementById('cfg-notif-completion').checked = notif.completion !== false;
+  // Trigger
+  const trig = cfg.trigger || {};
+  document.getElementById('cfg-trigger-capacity').value = trig.min_capacity_percent ?? 30;
+  document.getElementById('cfg-trigger-days').value = trig.max_days_remaining ?? 2;
+  // Work
+  const work = cfg.work || {};
+  document.getElementById('cfg-work-perms').value = work.agent_permissions || 'off';
+  // Plugins
+  renderPluginSettings(plugins, cfg.plugins || {});
+  // Projects
+  renderProjectList(cfg.projects || []);
+}
+
+function renderPluginSettings(plugins, pluginsCfg) {
+  const container = document.getElementById('plugin-settings-list');
+  if (!plugins || !plugins.length) {
+    container.innerHTML = '<p style="color:#9ca3af;font-size:12px">No plugins discovered.</p>';
+    return;
+  }
+  container.innerHTML = plugins.map(p => {
+    const pcfg = pluginsCfg[p.name] || {};
+    const isEnabled = typeof pcfg === 'boolean' ? pcfg : (typeof pcfg.enabled === 'boolean' ? pcfg.enabled : (pcfg.enabled === 'auto' ? p.available : p.available));
+    const installLog = (settingsData && settingsData._installLogs && settingsData._installLogs[p.name]) || null;
+    let action = '';
+    if (p.available) {
+      action = `<label class="toggle"><input type="checkbox" ${isEnabled?'checked':''} onchange="togglePlugin('${p.name}',this.checked,this)"><span class="slider"></span></label>`;
+    } else if (p.install_command) {
+      action = `<button class="btn-sm primary" id="install-btn-${p.name}" onclick="installPlugin('${p.name}')">Install</button>`;
+    } else {
+      action = '<span style="font-size:11px;color:#9ca3af">Not available</span>';
+    }
+    return `<div class="plugin-row" id="plugin-row-${p.name}">
+      <div class="plugin-info"><span class="plugin-name">${p.name}</span><span class="plugin-desc">${p.description}</span></div>
+      <div>${action}</div>
+    </div>
+    <div id="install-log-${p.name}" style="display:none"></div>`;
+  }).join('');
+}
+
+async function saveSetting(section, values, el) {
+  // Optimistic: UI already updated by onchange. Stash previous value for revert.
+  const prev = el ? (el.type === 'checkbox' ? el.checked : el.value) : null;
+  const patch = {};
+  patch[section] = values;
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(patch)
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || 'Save failed');
+    }
+    showSavedFlash(el);
+  } catch (e) {
+    // Revert optimistic update
+    if (el) {
+      if (el.type === 'checkbox') el.checked = !prev;
+      else el.value = prev;
+    }
+    showInlineError(el, e.message);
+  }
+}
+
+function showSavedFlash(el) {
+  if (!el) return;
+  const row = el.closest('.setting-row') || el.parentElement;
+  let flash = row.querySelector('.save-flash');
+  if (!flash) {
+    flash = document.createElement('span');
+    flash.className = 'save-flash';
+    flash.style.cssText = 'font-size:10px;color:#10b981;margin-left:6px;opacity:0;transition:opacity .2s';
+    row.appendChild(flash);
+  }
+  flash.textContent = 'Saved';
+  flash.style.opacity = '1';
+  setTimeout(() => { flash.style.opacity = '0'; }, 1500);
+}
+
+function showInlineError(el, msg) {
+  if (!el) return;
+  const row = el.closest('.setting-row') || el.parentElement;
+  let err = row.querySelector('.inline-error');
+  if (!err) {
+    err = document.createElement('div');
+    err.className = 'inline-error';
+    row.appendChild(err);
+  }
+  err.textContent = msg;
+  setTimeout(() => err.remove(), 5000);
+}
+
+async function togglePlugin(name, enabled, el) {
+  const pcfg = {};
+  pcfg[name] = {enabled: enabled};
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({plugins: pcfg})
+    });
+    if (!resp.ok) throw new Error('Failed');
+  } catch (e) {
+    if (el) el.checked = !el.checked;
+  }
+}
+
+async function installPlugin(name) {
+  const btn = document.getElementById('install-btn-' + name);
+  if (btn) { btn.textContent = 'Installing...'; btn.disabled = true; }
+  const logEl = document.getElementById('install-log-' + name);
+  if (logEl) { logEl.style.display = 'block'; logEl.innerHTML = '<pre class="install-log"></pre>'; }
+  try {
+    const resp = await fetch('/api/plugin/' + name + '/install', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}'
+    });
+    if (!resp.ok) throw new Error('Install request failed');
+    pollInstallLog(name, 0);
+  } catch (e) {
+    if (btn) { btn.textContent = 'Retry'; btn.disabled = false; }
+    if (logEl) logEl.innerHTML = '<div class="inline-error">' + e.message + '</div>';
+  }
+}
+
+function pollInstallLog(name, offset) {
+  if (installPollers[name]) clearTimeout(installPollers[name]);
+  installPollers[name] = setTimeout(async () => {
+    try {
+      const resp = await fetch('/api/plugin/' + name + '/install-log?offset=' + offset);
+      const data = await resp.json();
+      const logEl = document.getElementById('install-log-' + name);
+      if (logEl) {
+        const pre = logEl.querySelector('pre');
+        if (pre && data.lines.length) {
+          pre.textContent += data.lines.join('\\n') + '\\n';
+          pre.scrollTop = pre.scrollHeight;
+        }
+      }
+      if (data.status === 'installing') {
+        pollInstallLog(name, data.offset);
+      } else if (data.status === 'success') {
+        const row = document.getElementById('plugin-row-' + name);
+        if (row) {
+          const actionDiv = row.querySelector('div:last-child');
+          actionDiv.innerHTML = '<span style="color:#10b981;font-size:12px;font-weight:600">Installed ✓</span>';
+          setTimeout(() => loadSettings(), 2000);
+        }
+      } else if (data.status === 'failed') {
+        const btn = document.getElementById('install-btn-' + name);
+        if (btn) { btn.textContent = 'Retry'; btn.disabled = false; }
+        if (logEl) {
+          const errBanner = document.createElement('div');
+          errBanner.className = 'inline-error';
+          errBanner.textContent = 'Installation failed. Check the log above.';
+          logEl.insertBefore(errBanner, logEl.firstChild);
+        }
+      }
+    } catch (e) {
+      pollInstallLog(name, offset);
+    }
+  }, 1000);
+}
+
+// ── Projects ────────────────────────────────────────────────────────────
+
+let currentProjects = [];
+
+function renderProjectList(projects) {
+  currentProjects = projects.map(p => ({...p}));
+  const container = document.getElementById('project-list');
+  if (!projects.length) {
+    container.innerHTML = '<p style="color:#9ca3af;font-size:12px">No projects configured. Add one below.</p>';
+    return;
+  }
+  container.innerHTML = currentProjects.map((p, i) => `<div class="project-row">
+    <input type="text" value="${(p.path||'').replace(/"/g,'&quot;')}" onchange="currentProjects[${i}].path=this.value" placeholder="~/path/to/project">
+    <input type="number" value="${p.priority||1}" min="1" max="5" onchange="currentProjects[${i}].priority=+this.value" title="Priority">
+    <button class="btn-sm danger" onclick="removeProject(${i})">×</button>
+  </div>`).join('');
+}
+
+function addProject() {
+  currentProjects.push({path: '', priority: 1});
+  renderProjectList(currentProjects);
+}
+
+function removeProject(index) {
+  currentProjects.splice(index, 1);
+  renderProjectList(currentProjects);
+}
+
+async function saveProjects() {
+  const valid = currentProjects.filter(p => p.path && p.path.trim());
+  const statusEl = document.getElementById('projects-save-status');
+  statusEl.textContent = 'Saving...';
+  statusEl.classList.add('visible');
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({projects: valid})
+    });
+    if (!resp.ok) throw new Error('Save failed');
+    statusEl.textContent = 'Saved ✓';
+    setTimeout(() => statusEl.classList.remove('visible'), 2000);
+  } catch (e) {
+    statusEl.textContent = 'Error!';
+    statusEl.style.color = '#ef4444';
+    setTimeout(() => { statusEl.classList.remove('visible'); statusEl.style.color = '#10b981'; }, 3000);
+  }
+}
 </script>
 </body>
 </html>"""

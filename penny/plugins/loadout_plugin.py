@@ -206,6 +206,10 @@ class Plugin(PennyPlugin):
     def description(self) -> str:
         return "Automated skill management via loadout CLI"
 
+    @property
+    def hidden(self) -> bool:
+        return True
+
     def is_available(self) -> bool:
         return _find_loadout() is not None
 
