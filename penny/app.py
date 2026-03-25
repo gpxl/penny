@@ -1282,10 +1282,12 @@ class PennyApp(NSObject):
         self.state = load_state()
         self.state = reset_period_if_needed(self.state)
 
+        just_onboarded = False
         if needs_onboarding(config) and not self.state.get("onboarding_deferred"):
             updated = run_onboarding(CONFIG_PATH, config, plugin_manager=self._plugin_mgr)
             if updated is not None:
                 config = updated
+                just_onboarded = True
                 self.state.pop("onboarding_deferred", None)
             else:
                 self.state["onboarding_deferred"] = True
@@ -1304,8 +1306,15 @@ class PennyApp(NSObject):
 
         # One-time consent check: if agent_permissions=full was enabled without going
         # through onboarding, show a confirmation dialog and record consent in state.
+        # Skip if the user just selected "full" during onboarding — they already chose it.
         if config.get("work", {}).get("agent_permissions") == "full":
-            if not check_full_permissions_consent(config, self.state):
+            if just_onboarded:
+                self.state["agent_permissions_consent"] = {
+                    "given": True,
+                    "mode": "full",
+                    "date": datetime.now(timezone.utc).isoformat(),
+                }
+            elif not check_full_permissions_consent(config, self.state):
                 # User declined — revert to off in config so agents don't spawn
                 config.setdefault("work", {})["agent_permissions"] = "off"
                 self.config = config

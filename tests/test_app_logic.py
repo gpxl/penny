@@ -2529,6 +2529,40 @@ class TestLoadAndRefreshDirect:
         assert app.config["projects"] == [{"path": "/tmp/proj"}]
         assert "onboarding_deferred" not in app.state
 
+    def test_onboarding_full_mode_records_consent_skips_dialog(self, tmp_path):
+        """When onboarding selects full permissions, consent is recorded without showing the dialog again."""
+        from penny.app import PennyApp
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("{}\n")
+        updated_config = {
+            "projects": [{"path": "/tmp/proj"}],
+            "work": {"agent_permissions": "full"},
+        }
+        app = _make_fake_app()
+        app._show_alert = MagicMock()
+        app._has_setup_issues = False
+        mock_consent = MagicMock()
+        with (
+            patch("penny.app.CONFIG_PATH", cfg_file),
+            patch("penny.app.load_state", return_value={}),
+            patch("penny.app.reset_period_if_needed", side_effect=lambda s: s),
+            patch("penny.app.needs_onboarding", return_value=True),
+            patch("penny.app.run_onboarding", return_value=updated_config),
+            patch("penny.app.run_preflight", return_value=[]),
+            patch("penny.app.save_state") as mock_save,
+            patch("penny.app._config_mtime", return_value=12345.0),
+            patch("penny.app.check_full_permissions_consent", mock_consent),
+        ):
+            PennyApp._load_and_refresh(app)
+        # Consent dialog should NOT have been called — onboarding already chose full
+        mock_consent.assert_not_called()
+        # But consent should be recorded in state
+        consent = app.state.get("agent_permissions_consent", {})
+        assert consent["given"] is True
+        assert consent["mode"] == "full"
+        # State should have been saved (to persist consent)
+        assert mock_save.called
+
     def test_full_permissions_granted_saves_state(self, tmp_path):
         """When consent is granted for full permissions, state is saved."""
         from penny.app import PennyApp
