@@ -4,15 +4,37 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
-## [0.4.0b1] - 2026-03-23
+## [0.4.0b1] - 2026-03-25
 
 ### Added
 
-- Loadout plugin with event-driven skill coverage tracking
-- Loadout plugin PATH fix, scan endpoint, and dashboard redesign
+- Sonnet independent reset schedule tracking (separate weekly reset from all-models reset)
+- Dashboard settings page with live config API and plugin install streaming
+- Compact popover layout with inline reset labels
+- Pixel art penny icon set as application icon
+- Loadout plugin with event-driven skill coverage tracking, PATH fix, and scan endpoint
 
 ### Fixed
 
+- Auto-close popover on outside interaction via Transient behavior and watchdog
+- Skip consent dialog when onboarding already granted full access
+- Shrink popover whitespace, show reset times, hide loadout plugin row
+- Record declined full-agent consent so dialog does not reappear on restart
+- Constrain bar row height to 18pt with vertical centering
+- Dispatch config patch via `_checkConfig_` to fix show_sonnet toggle
+- Replace sleep yield with poll loop in `applyConfigPatch_` handler
+- Force `NSStatusBarButton` redraw after image dimension change
+- Avoid deadlock in dashboard config patch dispatch
+- Use `Any` type annotation on `applyConfigPatch_` to fix PyObjC selector dispatch
+- Guard animation timer against overwriting menubar in idle/done phases
+- Bypass animation guard on config changes so menubar settings apply immediately
+- Apply config patch side effects directly from in-memory config
+- Center coin icon on transparent canvas to fix NSAlert dialog size
+- Show penny icon in NSAlert dialogs for accessory-mode app
+- Use gravity-areas distribution to remove extra vertical space in root stack
+- Reduce initial frame height and relayout on load
+- Refresh menubar immediately on config hot-reload
+- Tooltip text says "Resets at" not "Resets"
 - Parse multi-line `/status` Usage tab format correctly
 
 ### Changed
