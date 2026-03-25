@@ -120,12 +120,31 @@ test function once and note issues.
 | Q5 | Tests only cover happy path — no error/exception/edge-case tests for the module | — | YES |
 | Q6 | Uses `querySelector`, `getElementsByClassName`, or tests CSS class names | — | YES |
 | Q7 | Assertions on internal state (private attrs, `_field`) when a public API could be tested instead | — | YES |
+| Q8 | Module has a validation schema, config keys, API endpoints, or CLI subcommands where not all branches are exercised by tests (behavioral completeness) | — | YES |
+
+#### Q8 — Behavioral completeness (detailed)
+
+Line coverage can be high while behavioral coverage is low. For each changed
+module, check whether the test suite exercises **all distinct behaviors**:
+
+| Module pattern | What to check |
+|----------------|---------------|
+| Validation schema (e.g., `_validate_*`) | Every validated field has ≥1 valid + ≥1 invalid test |
+| API endpoints | Every route + method pair has ≥1 test |
+| Config keys | Every settable key is tested for persistence |
+| CLI subcommands | Every subcommand has ≥1 invocation test |
+| Enum/mode switches | Every enum value is tested |
+
+If a module validates 10 config keys but tests only exercise 2, that is a Q8
+warning — even if line coverage is 86%.
 
 #### Procedure
 
 1. For each changed module's test file, scan every test function.
 2. Note any violations by check number (e.g., "Q3: `test_spawn_calls_subprocess` only checks `.called`").
-3. Collect results into a warnings list and a failures list.
+3. For Q8: read the source module to identify all validated fields, endpoints,
+   or enum values. Compare against test coverage. List any untested behaviors.
+4. Collect results into a warnings list and a failures list.
 
 ### Step 5 — Lint with ruff
 

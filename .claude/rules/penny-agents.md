@@ -36,7 +36,7 @@ When code-quality reports FAIL:
 
 ### Warning Tracking
 
-When code-quality reports PASS with test quality warnings (Q3-Q7):
+When code-quality reports PASS with test quality warnings (Q3-Q8):
 
 1. Create beads tasks for each warning (`bd create --type=task --priority=3`)
 2. Proceed to commit — warnings do not block
