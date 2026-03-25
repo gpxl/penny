@@ -826,3 +826,226 @@ class TestDashboardConfigRefresh:
         app._menubar_refreshed = False
         _post(port, "/api/config", {"service": {"keep_alive": False}})
         assert app._menubar_refreshed is True
+
+
+# ── Notification toggle settings ─────────────────────────────────────────────
+
+
+class TestNotificationSettings:
+    """Tests for notifications.spawn and notifications.completion toggles."""
+
+    def test_spawn_notification_enabled(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"notifications": {"spawn": False, "completion": False}}
+        status, data = _post(port, "/api/config", {"notifications": {"spawn": True}})
+        assert status == 200
+        assert data["ok"] is True
+        assert app.config["notifications"]["spawn"] is True
+
+    def test_spawn_notification_disabled(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"notifications": {"spawn": True, "completion": True}}
+        status, data = _post(port, "/api/config", {"notifications": {"spawn": False}})
+        assert status == 200
+        assert app.config["notifications"]["spawn"] is False
+
+    def test_completion_notification_enabled(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"notifications": {"spawn": False, "completion": False}}
+        status, data = _post(port, "/api/config", {"notifications": {"completion": True}})
+        assert status == 200
+        assert app.config["notifications"]["completion"] is True
+
+    def test_completion_notification_disabled(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"notifications": {"spawn": True, "completion": True}}
+        status, data = _post(port, "/api/config", {"notifications": {"completion": False}})
+        assert status == 200
+        assert app.config["notifications"]["completion"] is False
+
+    def test_spawn_toggle_does_not_clobber_completion(self, dashboard_app):
+        """Patching notifications.spawn must leave notifications.completion intact."""
+        app, port = dashboard_app
+        app.config = {"notifications": {"spawn": False, "completion": True}}
+        status, _ = _post(port, "/api/config", {"notifications": {"spawn": True}})
+        assert status == 200
+        assert app.config["notifications"]["completion"] is True
+
+    def test_completion_toggle_does_not_clobber_spawn(self, dashboard_app):
+        """Patching notifications.completion must leave notifications.spawn intact."""
+        app, port = dashboard_app
+        app.config = {"notifications": {"spawn": True, "completion": False}}
+        status, _ = _post(port, "/api/config", {"notifications": {"completion": True}})
+        assert status == 200
+        assert app.config["notifications"]["spawn"] is True
+
+    def test_rejects_spawn_as_non_bool(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"notifications": {"spawn": "yes"}})
+        assert status == 400
+        assert "error" in data
+
+    def test_rejects_completion_as_non_bool(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"notifications": {"completion": 1}})
+        assert status == 400
+        assert "error" in data
+
+
+# ── Trigger numeric settings ──────────────────────────────────────────────────
+
+
+class TestTriggerSettings:
+    """Tests for trigger.min_capacity_percent and trigger.max_days_remaining."""
+
+    def test_min_capacity_percent_at_boundary_zero(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"trigger": {"min_capacity_percent": 0}})
+        assert status == 200
+        assert app.config["trigger"]["min_capacity_percent"] == 0
+
+    def test_min_capacity_percent_at_boundary_100(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"trigger": {"min_capacity_percent": 100}})
+        assert status == 200
+        assert app.config["trigger"]["min_capacity_percent"] == 100
+
+    def test_min_capacity_percent_rejects_101(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"trigger": {"min_capacity_percent": 101}})
+        assert status == 400
+        assert "error" in data
+
+    def test_min_capacity_percent_rejects_negative(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"trigger": {"min_capacity_percent": -1}})
+        assert status == 400
+        assert "error" in data
+
+    def test_min_capacity_percent_rejects_string(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"trigger": {"min_capacity_percent": "50%"}})
+        assert status == 400
+        assert "error" in data
+
+    def test_max_days_remaining_accepts_positive_float(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"trigger": {"max_days_remaining": 3.5}})
+        assert status == 200
+        assert app.config["trigger"]["max_days_remaining"] == 3.5
+
+    def test_max_days_remaining_accepts_positive_int(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"trigger": {"max_days_remaining": 7}})
+        assert status == 200
+        assert app.config["trigger"]["max_days_remaining"] == 7
+
+    def test_max_days_remaining_rejects_zero(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"trigger": {"max_days_remaining": 0}})
+        assert status == 400
+        assert "error" in data
+
+    def test_max_days_remaining_rejects_negative(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"trigger": {"max_days_remaining": -2}})
+        assert status == 400
+        assert "error" in data
+
+    def test_updating_capacity_does_not_clobber_max_days(self, dashboard_app):
+        """Patching min_capacity_percent must leave max_days_remaining intact."""
+        app, port = dashboard_app
+        app.config = {"trigger": {"min_capacity_percent": 30, "max_days_remaining": 2.0}}
+        status, _ = _post(port, "/api/config", {"trigger": {"min_capacity_percent": 40}})
+        assert status == 200
+        assert app.config["trigger"]["max_days_remaining"] == 2.0
+
+
+# ── Work / agent_permissions settings ────────────────────────────────────────
+
+
+class TestWorkSettings:
+    """Tests for work.agent_permissions enum and related work settings."""
+
+    def test_agent_permissions_accepts_off(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {"work": {"agent_permissions": "full"}}
+        status, _ = _post(port, "/api/config", {"work": {"agent_permissions": "off"}})
+        assert status == 200
+        assert app.config["work"]["agent_permissions"] == "off"
+
+    def test_agent_permissions_accepts_scoped(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"work": {"agent_permissions": "scoped"}})
+        assert status == 200
+        assert app.config["work"]["agent_permissions"] == "scoped"
+
+    def test_agent_permissions_accepts_full(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"work": {"agent_permissions": "full"}})
+        assert status == 200
+        assert app.config["work"]["agent_permissions"] == "full"
+
+    def test_agent_permissions_rejects_invalid_value(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"work": {"agent_permissions": "admin"}})
+        assert status == 400
+        assert "error" in data
+
+    def test_agent_permissions_rejects_empty_string(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"work": {"agent_permissions": ""}})
+        assert status == 400
+        assert "error" in data
+
+    def test_agent_permissions_rejects_non_string(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"work": {"agent_permissions": True}})
+        assert status == 400
+        assert "error" in data
+
+    def test_max_agents_per_run_rejects_zero(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"work": {"max_agents_per_run": 0}})
+        assert status == 400
+        assert "error" in data
+
+    def test_max_agents_per_run_rejects_negative(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"work": {"max_agents_per_run": -3}})
+        assert status == 400
+        assert "error" in data
+
+    def test_max_agents_per_run_accepts_one(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"work": {"max_agents_per_run": 1}})
+        assert status == 200
+        assert app.config["work"]["max_agents_per_run"] == 1
+
+    def test_allowed_tools_rejects_string(self, dashboard_app):
+        _, port = dashboard_app
+        status, data = _post(port, "/api/config", {"work": {"allowed_tools": "Bash"}})
+        assert status == 400
+        assert "error" in data
+
+    def test_allowed_tools_accepts_list(self, dashboard_app):
+        app, port = dashboard_app
+        app.config = {}
+        status, _ = _post(port, "/api/config", {"work": {"allowed_tools": ["Bash", "Read"]}})
+        assert status == 200
+        assert app.config["work"]["allowed_tools"] == ["Bash", "Read"]
+
+    def test_updating_agent_permissions_does_not_clobber_max_agents(self, dashboard_app):
+        """Patching agent_permissions must leave max_agents_per_run intact."""
+        app, port = dashboard_app
+        app.config = {"work": {"agent_permissions": "off", "max_agents_per_run": 3}}
+        status, _ = _post(port, "/api/config", {"work": {"agent_permissions": "scoped"}})
+        assert status == 200
+        assert app.config["work"]["max_agents_per_run"] == 3
