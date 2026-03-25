@@ -35,10 +35,24 @@ _ITEM_SPACING: float = 6.0      # Horizontal gap within rows (bar rows, footer)
 
 
 def _make_separator() -> NSView:
-    from AppKit import NSBox
-    sep = NSBox.alloc().initWithFrame_(((0, 0), (_WIDTH - _PADDING * 2, 1)))
+    from AppKit import NSBox, NSLayoutConstraint, NSView
+    v_pad = 8
+    h = 1 + v_pad * 2
+    w = _WIDTH - _PADDING * 2
+    container = NSView.alloc().initWithFrame_(((0, 0), (w, h)))
+    container.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    container.heightAnchor().constraintEqualToConstant_(h).setActive_(True)
+    sep = NSBox.alloc().initWithFrame_(((0, 0), (0, 0)))
     sep.setBoxType_(2)   # NSBoxSeparator
-    return sep
+    sep.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    container.addSubview_(sep)
+    NSLayoutConstraint.activateConstraints_([
+        sep.leadingAnchor().constraintEqualToAnchor_(container.leadingAnchor()),
+        sep.trailingAnchor().constraintEqualToAnchor_(container.trailingAnchor()),
+        sep.centerYAnchor().constraintEqualToAnchor_(container.centerYAnchor()),
+        sep.heightAnchor().constraintEqualToConstant_(1),
+    ])
+    return container
 
 
 class ControlCenterViewController(NSViewController):

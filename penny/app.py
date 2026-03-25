@@ -19,7 +19,6 @@ import setproctitle
 import yaml
 from AppKit import (
     NSApplication,
-    NSEvent,
     NSPopover,
     NSStatusBar,
     NSVariableStatusItemLength,
@@ -175,7 +174,6 @@ class PennyApp(NSObject):
         self._ready_tasks: list[Any] = []
         self._has_setup_issues: bool = False
         self._last_fetch_at: datetime | None = None
-        self._event_monitor: Any = None
         self._pending_spawns: dict = {}
         self._loading_frame: int = 0
         self._loading_anim_timer: Any = None
@@ -215,7 +213,9 @@ class PennyApp(NSObject):
 
         self._popover = NSPopover.alloc().init()
         self._popover.setContentViewController_(self._vc)
-        self._popover.setBehavior_(0)   # NSPopoverBehaviorApplicationDefined — avoids click-eating on macOS 26+
+        self._popover.setBehavior_(1)   # NSPopoverBehaviorTransient — auto-close on outside interaction
+        self._popover.setDelegate_(self)
+        self._last_popover_close: float = 0
 
         # Live dashboard HTTP server (lazy-started on first "View Report")
         self._dashboard = DashboardServer(self)
@@ -260,22 +260,21 @@ class PennyApp(NSObject):
     # ── Toggle popover ────────────────────────────────────────────────────
 
     def togglePopover_(self, sender: Any) -> None:
+        import time
         if self._popover.isShown():
             self._popover.performClose_(sender)
-            self._remove_event_monitor()
-        else:
+        elif time.monotonic() - self._last_popover_close > 0.3:
+            # Guard: Transient auto-closes the popover when the status-bar
+            # button is clicked, then this action fires.  Without the time
+            # guard the popover would immediately reopen.
             btn = self._status_item.button()
             if btn:
-                # Activate so the popover renders at full opacity immediately
-                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                app = NSApplication.sharedApplication()
+                app.setActivationPolicy_(0)  # Regular — enables resign-active
+                app.activateIgnoringOtherApps_(True)
                 self._popover.showRelativeToRect_ofView_preferredEdge_(
                     btn.bounds(), btn, 3  # NSRectEdgeMaxY = bottom edge of menu bar
                 )
-                # Show cached data immediately — force-fetch only on first open
-                # (fetch_live_status spawns claude which counts against session budget).
-                # Subsequent opens do a non-force fetch: uses cached Claude status but
-                # re-runs `bd ready` so newly-added tasks appear without waiting for
-                # the 5-minute background timer.
                 self._vc.updateWithData_({
                     "prediction": self._prediction,
                     "state": self.state,
@@ -284,32 +283,30 @@ class PennyApp(NSObject):
                     "update_check": self.state.get("update_check"),
                 })
                 self._worker.fetch(force=(self._prediction is None))
-                # Global monitor to close on outside click (ApplicationDefined behavior
-                # requires manual dismissal — avoids the click-eating bug on macOS 26+).
-                self._add_event_monitor()
+                # Watchdog: poll isActive() to catch menu-bar clicks from other
+                # apps that Transient behavior alone may miss.
+                self._popover_watchdog = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.25, self, "_checkPopoverFocus:", None, True
+                )
 
-    # ── Event monitor (outside-click dismissal) ───────────────────────────
+    # ── Popover focus watchdog + delegate ─────────────────────────────────
 
-    @objc.python_method
-    def _add_event_monitor(self) -> None:
-        if self._event_monitor is not None:
+    def _checkPopoverFocus_(self, timer: Any) -> None:
+        """Close the popover when the app is no longer active."""
+        if not self._popover.isShown():
+            timer.invalidate()
             return
+        if not NSApplication.sharedApplication().isActive():
+            self._popover.performClose_(None)
+            timer.invalidate()
 
-        def _on_outside_click(event: Any) -> None:
-            if self._popover.isShown():
-                self._popover.performClose_(None)
-            self._remove_event_monitor()
-
-        # NSEventMaskLeftMouseDown = 1 << 1
-        self._event_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            1 << 1, _on_outside_click
-        )
-
-    @objc.python_method
-    def _remove_event_monitor(self) -> None:
-        if self._event_monitor is not None:
-            NSEvent.removeMonitor_(self._event_monitor)
-            self._event_monitor = None
+    def popoverDidClose_(self, notification: Any) -> None:
+        import time
+        self._last_popover_close = time.monotonic()
+        if hasattr(self, "_popover_watchdog") and self._popover_watchdog:
+            self._popover_watchdog.invalidate()
+            self._popover_watchdog = None
+        NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory
 
     # ── Timer ─────────────────────────────────────────────────────────────
 
