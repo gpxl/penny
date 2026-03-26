@@ -3197,12 +3197,13 @@ class TestTickFinalClockDirect:
         return app
 
     def test_arc_sweeps_proportionally(self):
-        from penny.app import PennyApp
+        from penny.app import PennyApp, _ease_out_cubic
         app = self._make_app(frame=10, arc_target=80.0)
         btn = MagicMock()
         PennyApp._tick_final_clock(app, btn)
-        # t = 10/20 = 0.5, descend branch starts: 100 + 0 * (80-100) = 100.0
-        assert abs(app._anim_arc_val - 100.0) < 0.01
+        # t = 10/20 = 0.5, direct ease-out: _ease_out_cubic(0.5) * 80.0 = 0.875 * 80 = 70.0
+        expected = _ease_out_cubic(0.5) * 80.0
+        assert abs(app._anim_arc_val - expected) < 0.01
         assert app._loading_frame == 11
 
     def test_arc_reaches_target_at_end(self):
@@ -3246,8 +3247,8 @@ class TestTickFinalClockDirect:
         PennyApp._tick_final_clock(app, btn)
         assert app._loading_phase == "final_clock"
         assert app._loading_frame == 6
-        # t = 5/20 = 0.25, rise branch: _ease_out_cubic(0.25/0.5) * 100
-        expected = _ease_out_cubic(0.5) * 100.0  # 87.5
+        # t = 5/20 = 0.25, direct ease-out: _ease_out_cubic(0.25) * 60.0
+        expected = _ease_out_cubic(0.25) * 60.0
         assert abs(app._anim_arc_val - expected) < 0.01
 
     def test_renders_frame(self):
@@ -3624,3 +3625,146 @@ class TestRunPluginInstall:
         assert "test-plugin" in app._install_logs
         assert app._install_logs["test-plugin"]["status"] == "installing"
         assert app._install_logs["test-plugin"]["lines"] == []
+
+
+# ── _ease_in_out_cubic ────────────────────────────────────────────────────────
+
+
+class TestEaseInOutCubic:
+    """Test both branches of the cubic ease-in-out easing function."""
+
+    def test_first_half_accelerates(self):
+        """t < 0.5 uses the accelerating branch: 4t³."""
+        from penny.app import _ease_in_out_cubic
+        # At t=0 output must be 0; at the boundary t=0 → 4*(0)³ = 0
+        assert _ease_in_out_cubic(0.0) == 0.0
+
+    def test_first_half_midpoint(self):
+        """t=0.25 sits squarely in the first-half branch."""
+        from penny.app import _ease_in_out_cubic
+        expected = 4.0 * 0.25 * 0.25 * 0.25  # = 0.0625
+        assert _ease_in_out_cubic(0.25) == pytest.approx(expected)
+
+    def test_second_half_at_one(self):
+        """t=1.0 hits the else branch and must return exactly 1.0."""
+        from penny.app import _ease_in_out_cubic
+        assert _ease_in_out_cubic(1.0) == pytest.approx(1.0)
+
+    def test_second_half_at_0_75(self):
+        """t=0.75 sits squarely in the else branch: 1 - (-2*0.75+2)³/2."""
+        from penny.app import _ease_in_out_cubic
+        expected = 1.0 - (-2.0 * 0.75 + 2.0) ** 3 / 2.0  # = 0.875
+        assert _ease_in_out_cubic(0.75) == pytest.approx(expected)
+
+    def test_continuity_at_midpoint(self):
+        """Both branches must agree at t=0.5 (no discontinuity)."""
+        from penny.app import _ease_in_out_cubic
+        # First branch at t just below 0.5, second at t=0.5 exactly
+        just_below = _ease_in_out_cubic(0.4999)
+        at_boundary = _ease_in_out_cubic(0.5)
+        assert at_boundary == pytest.approx(0.5, abs=1e-3)
+        assert at_boundary > just_below  # monotonically increasing
+
+
+# ── _load_app_icon ────────────────────────────────────────────────────────────
+
+
+class TestLoadAppIcon:
+    """Test the icon-loading helper's image-validation paths."""
+
+    def test_returns_none_when_icon_file_missing(self, tmp_path):
+        """Should return None immediately if the icon.png file does not exist."""
+        from penny.app import _load_app_icon
+        with patch("penny.app.Path") as mock_path_cls:
+            # Make the constructed path report it does not exist
+            mock_icon_path = MagicMock()
+            mock_icon_path.exists.return_value = False
+            mock_path_cls.return_value.__truediv__.return_value.__truediv__.return_value = (
+                mock_icon_path
+            )
+        # Direct approach: patch Path.exists on the specific constructed path
+        with patch("pathlib.Path.exists", return_value=False):
+            result = _load_app_icon()
+        assert result is None
+
+    def test_returns_icon_when_valid(self, tmp_path):
+        """Should return the NSImage object when it loads and isValid() is True."""
+        # Create a real file so Path.exists() passes without extra patching
+        icon_file = tmp_path / "icon.png"
+        icon_file.write_bytes(b"\x89PNG\r\n\x1a\n")  # PNG magic bytes
+
+        mock_icon = MagicMock()
+        mock_icon.isValid.return_value = True
+
+        mock_ns_image_instance = MagicMock()
+        mock_ns_image_instance.initWithContentsOfFile_.return_value = mock_icon
+
+        mock_ns_image_cls = MagicMock()
+        mock_ns_image_cls.alloc.return_value = mock_ns_image_instance
+
+        import sys
+        # Patch NSImage on the already-imported AppKit stub
+        with patch.dict(sys.modules, {}):
+            with patch("penny.app.Path") as mock_path_cls:
+                mock_path_cls.return_value.__truediv__.return_value.__truediv__.return_value = (
+                    MagicMock(exists=MagicMock(return_value=True),
+                              __str__=lambda s: str(icon_file))
+                )
+            # Simpler: patch the AppKit module's NSImage attribute
+            original = sys.modules.get("AppKit")
+            try:
+                import AppKit
+                AppKit.NSImage = mock_ns_image_cls
+                from penny.app import _load_app_icon as fn
+                # Patch path to exist
+                with patch("pathlib.Path.exists", return_value=True):
+                    result = fn()
+            finally:
+                if original is not None:
+                    sys.modules["AppKit"] = original
+
+        assert result is mock_icon
+
+    def test_returns_none_when_icon_invalid(self):
+        """Should return None when NSImage loads but isValid() returns False."""
+        mock_icon = MagicMock()
+        mock_icon.isValid.return_value = False
+
+        mock_ns_image_instance = MagicMock()
+        mock_ns_image_instance.initWithContentsOfFile_.return_value = mock_icon
+
+        mock_ns_image_cls = MagicMock()
+        mock_ns_image_cls.alloc.return_value = mock_ns_image_instance
+
+        import sys
+        original = sys.modules.get("AppKit")
+        try:
+            import AppKit
+            AppKit.NSImage = mock_ns_image_cls
+            from penny.app import _load_app_icon as fn
+            with patch("pathlib.Path.exists", return_value=True):
+                result = fn()
+        finally:
+            if original is not None:
+                sys.modules["AppKit"] = original
+
+        assert result is None
+
+    def test_returns_none_when_nsimage_raises(self):
+        """Should swallow exceptions from NSImage and return None."""
+        mock_ns_image_cls = MagicMock()
+        mock_ns_image_cls.alloc.side_effect = Exception("NSImage unavailable")
+
+        import sys
+        original = sys.modules.get("AppKit")
+        try:
+            import AppKit
+            AppKit.NSImage = mock_ns_image_cls
+            from penny.app import _load_app_icon as fn
+            with patch("pathlib.Path.exists", return_value=True):
+                result = fn()
+        finally:
+            if original is not None:
+                sys.modules["AppKit"] = original
+
+        assert result is None
