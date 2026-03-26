@@ -439,19 +439,15 @@ class PennyApp(NSObject):
 
     @objc.python_method
     def _tick_final_clock(self, btn: Any) -> None:
-        """Final cycle arc phase: arc sweeps to session time-elapsed target."""
+        """Final cycle arc phase: arc fills CW from 0 to session time-elapsed target."""
         frame = self._loading_frame
         t = frame / self._CAL_CLOCK_TICKS if self._CAL_CLOCK_TICKS > 0 else 1.0
         t = min(t, 1.0)
 
-        target = self._anim_arc_target
-        if t < 0.5:
-            # Rise 0 → 100 (ease-out: decelerates into peak)
-            self._anim_arc_val = _ease_out_cubic(t / 0.5) * 100.0
-        else:
-            # Settle 100 → target (ease-in-out: smooth landing)
-            eased = _ease_in_out_cubic((t - 0.5) / 0.5)
-            self._anim_arc_val = 100.0 + eased * (target - 100.0)
+        # Direct ease-out to target — no overshoot keeps all motion clockwise.
+        # The bars can overshoot (0→100→target) because vertical fill has no
+        # direction, but the clock's radial sweep must stay CW.
+        self._anim_arc_val = _ease_out_cubic(t) * self._anim_arc_target
         self._anim_arc_emptying = False
 
         self._loading_frame += 1
