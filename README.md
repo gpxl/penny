@@ -1,4 +1,4 @@
-# Penny
+# Penny <img src="docs/images/loading_animation.gif" width="32" alt="Penny loading animation" />
 
 macOS menu bar app that monitors your Claude Code token usage, tracks session and weekly budgets, and surfaces detailed analytics to help you stay within your plan limits.
 
