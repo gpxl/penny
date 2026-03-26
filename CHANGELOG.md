@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-26
+
+### Added
+
+- Simplified clock arc animation to direct ease-out with all radial motion clockwise
+
+### Changed
+
+- Made CLAUDE.md self-contained for OSS portability
+
 ## [0.4.0] - 2026-03-25
 
 ### Added
