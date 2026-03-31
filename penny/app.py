@@ -170,6 +170,8 @@ class PennyApp(NSObject):
         self.config: dict[str, Any] = {}
         self.state: dict[str, Any] = {}
         self._prediction: Any = None
+        self._health_warning: str | None = None  # None, "yellow", or "red"
+        self._health_alert_summary: str = ""     # tooltip text for health alerts
         self._all_ready_tasks: list[Any] = []
         self._ready_tasks: list[Any] = []
         self._has_setup_issues: bool = False
@@ -325,7 +327,34 @@ class PennyApp(NSObject):
         """Handle health check result on main thread."""
         if not isinstance(result, dict):
             return
-        # Dashboard picks up health_alerts from state on next poll
+        alerts = result.get("health_alerts", [])
+        self._apply_health_alerts(alerts)
+
+    @objc.python_method
+    def _apply_health_alerts(self, alerts: list[dict]) -> None:
+        """Update menu bar warning state from health alerts."""
+        if not alerts:
+            old = self._health_warning
+            self._health_warning = None
+            self._health_alert_summary = ""
+            if old is not None:
+                self._update_status_title()
+            return
+
+        worst = "yellow"
+        summaries: list[str] = []
+        for a in alerts:
+            if a.get("health") == "red":
+                worst = "red"
+            name = a.get("project", "?")
+            reasons = ", ".join(a.get("reasons", []))
+            summaries.append(f"{name}: {reasons}")
+
+        old = self._health_warning
+        self._health_warning = worst
+        self._health_alert_summary = "\n".join(summaries)
+        if old != worst:
+            self._update_status_title()
 
     # Bar animation constants
     _CAL_BAR_TICKS = 20            # Sequential bar calibration: 2.0s total
@@ -667,6 +696,9 @@ class PennyApp(NSObject):
         self._all_ready_tasks = [t for t in all_tasks if t.task_id not in exclude_ids]
         self._ready_tasks = self._plugin_mgr.filter_all_tasks(all_tasks, state, self.config)
 
+        # Update health warning state from full scan
+        self._apply_health_alerts(state.get("health_alerts", []))
+
         # Update status item title
         self._update_status_title()
 
@@ -845,6 +877,18 @@ class PennyApp(NSObject):
             fill.setFill()
             wedge.fill()
 
+        # ── Health warning indicator ──────────────────────────────────────
+        health = getattr(pred, "_health_warning", None) or self._health_warning
+        if health in ("red", "yellow"):
+            # Draw a small filled dot at top-right corner of the icon
+            dot_r = 2.5
+            dot_x = img_w - dot_r
+            dot_y = img_h - dot_r
+            fill.setFill()
+            NSBezierPath.bezierPathWithOvalInRect_(
+                ((dot_x - dot_r, dot_y - dot_r), (dot_r * 2, dot_r * 2))
+            ).fill()
+
         img.unlockFocus()
         img.setTemplate_(True)
         return img
@@ -854,7 +898,12 @@ class PennyApp(NSObject):
         """Return title string for the menubar (bars mode only)."""
         if pred is None:
             return f"\u2728{n_running}" if n_running > 0 else "Loading\u2026"
-        return f" \u2728{n_running}" if n_running > 0 else ""
+        parts: list[str] = []
+        if self._health_warning == "red":
+            parts.append("\u26a0")  # ⚠ warning sign
+        if n_running > 0:
+            parts.append(f"\u2728{n_running}")
+        return (" " + " ".join(parts)) if parts else ""
 
     def _refreshMenubar_(self, sender: Any) -> None:
         """ObjC-callable menubar refresh (for performSelectorOnMainThread)."""
@@ -892,7 +941,7 @@ class PennyApp(NSObject):
         if pred:
             img = self._make_status_image(pred)
             btn.setImage_(img)
-            show_title = n_running > 0
+            show_title = n_running > 0 or self._health_warning == "red"
             btn.setImagePosition_(2 if show_title else 1)   # NSImageLeft / NSImageOnly
         else:
             btn.setImage_(None)
@@ -911,11 +960,14 @@ class PennyApp(NSObject):
             pct_son = int(round(pred.pct_sonnet))
             reset_time = self._compact_reset_time(pred.session_reset_label)
             reset_label = f"resets {reset_time}" if reset_time else "—"
-            btn.setToolTip_(
+            tip = (
                 f"Session: {pct_s}%  ({reset_label})\n"
                 f"Weekly all models: {pct_all}%\n"
                 f"Weekly Sonnet: {pct_son}%"
             )
+            if self._health_alert_summary:
+                tip += f"\n\n\u26a0 Health alerts:\n{self._health_alert_summary}"
+            btn.setToolTip_(tip)
 
     # ── Task/agent actions ────────────────────────────────────────────────
 

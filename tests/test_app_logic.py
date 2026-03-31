@@ -1129,12 +1129,15 @@ def _make_fake_app(config=None, state=None, tmp_path=None):
     from unittest.mock import MagicMock
 
     class FakeApp:
-        pass
+        def _apply_health_alerts(self, alerts):
+            pass
 
     app = FakeApp()
     app.config = config if config is not None else {}
     app.state = state if state is not None else {}
     app._prediction = None
+    app._health_warning = None
+    app._health_alert_summary = ""
     app._all_ready_tasks = []
     app._ready_tasks = []
     app._last_fetch_at = None
@@ -1681,6 +1684,179 @@ class TestHotReloadConfigDirect:
         with patch("penny.app.CONFIG_PATH", cfg_file):
             PennyApp._hot_reload_config(app)
         app._vc.rebuild_plugin_sections.assert_called_once()
+
+
+# ── _apply_health_alerts / _didHealthCheck_ (direct call) ────────────────────
+
+
+class TestApplyHealthAlerts:
+    """Call PennyApp._apply_health_alerts directly to cover lines 334-357."""
+
+    def test_clears_warning_and_summary_when_no_alerts(self):
+        """Empty alert list resets _health_warning to None and summary to ''."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        app._health_warning = "yellow"
+        app._health_alert_summary = "proj: some reason"
+        PennyApp._apply_health_alerts(app, [])
+        assert app._health_warning is None
+        assert app._health_alert_summary == ""
+
+    def test_calls_update_status_title_when_clearing_existing_warning(self):
+        """Clearing a warning that was previously set must refresh the menu bar."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        app._health_warning = "red"
+        PennyApp._apply_health_alerts(app, [])
+        app._update_status_title.assert_called_once()
+
+    def test_does_not_call_update_status_title_when_already_clear(self):
+        """If warning was already None, clearing again must not refresh the menu bar."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        assert app._health_warning is None
+        PennyApp._apply_health_alerts(app, [])
+        app._update_status_title.assert_not_called()
+
+    def test_sets_yellow_warning_for_yellow_alerts(self):
+        """A list containing only yellow-health alerts results in _health_warning='yellow'."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        alerts = [{"project": "proj-a", "health": "yellow", "reasons": ["low budget"]}]
+        PennyApp._apply_health_alerts(app, alerts)
+        assert app._health_warning == "yellow"
+
+    def test_sets_red_warning_when_any_alert_is_red(self):
+        """A mix of yellow and red alerts sets _health_warning='red' (worst wins)."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        alerts = [
+            {"project": "proj-a", "health": "yellow", "reasons": ["budget low"]},
+            {"project": "proj-b", "health": "red", "reasons": ["over limit"]},
+        ]
+        PennyApp._apply_health_alerts(app, alerts)
+        assert app._health_warning == "red"
+
+    def test_red_wins_even_when_listed_first(self):
+        """Red alert listed before yellow still results in 'red'."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        alerts = [
+            {"project": "proj-x", "health": "red", "reasons": ["critical"]},
+            {"project": "proj-y", "health": "yellow", "reasons": ["warning"]},
+        ]
+        PennyApp._apply_health_alerts(app, alerts)
+        assert app._health_warning == "red"
+
+    def test_formats_summary_from_alert_reasons(self):
+        """Summary must contain project name and joined reasons for each alert."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        alerts = [
+            {"project": "proj-a", "health": "yellow", "reasons": ["low budget", "slow"]},
+        ]
+        PennyApp._apply_health_alerts(app, alerts)
+        assert "proj-a" in app._health_alert_summary
+        assert "low budget" in app._health_alert_summary
+        assert "slow" in app._health_alert_summary
+
+    def test_summary_contains_one_line_per_alert(self):
+        """Each alert becomes a separate line in the summary."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        alerts = [
+            {"project": "alpha", "health": "yellow", "reasons": ["reason-1"]},
+            {"project": "beta", "health": "red", "reasons": ["reason-2"]},
+        ]
+        PennyApp._apply_health_alerts(app, alerts)
+        lines = app._health_alert_summary.split("\n")
+        assert len(lines) == 2
+        assert any("alpha" in line for line in lines)
+        assert any("beta" in line for line in lines)
+
+    def test_calls_update_status_title_when_warning_changes(self):
+        """Transitioning from None to 'yellow' must refresh the menu bar."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        assert app._health_warning is None
+        alerts = [{"project": "p", "health": "yellow", "reasons": ["x"]}]
+        PennyApp._apply_health_alerts(app, alerts)
+        app._update_status_title.assert_called_once()
+
+    def test_does_not_call_update_status_title_when_warning_unchanged(self):
+        """If the severity level does not change, menu bar must not be refreshed."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        app._health_warning = "yellow"
+        alerts = [{"project": "p", "health": "yellow", "reasons": ["still low"]}]
+        PennyApp._apply_health_alerts(app, alerts)
+        app._update_status_title.assert_not_called()
+
+    def test_missing_project_key_uses_question_mark(self):
+        """Alert without a 'project' key falls back to '?' in the summary."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        alerts = [{"health": "yellow", "reasons": ["something"]}]
+        PennyApp._apply_health_alerts(app, alerts)
+        assert "?" in app._health_alert_summary
+
+    def test_missing_reasons_key_produces_empty_reasons_string(self):
+        """Alert without 'reasons' key produces a summary with no crash."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        alerts = [{"project": "proj-z", "health": "red"}]
+        PennyApp._apply_health_alerts(app, alerts)
+        assert "proj-z" in app._health_alert_summary
+        assert app._health_warning == "red"
+
+
+class TestDidHealthCheck:
+    """Call PennyApp._didHealthCheck_ directly to cover lines 326-331."""
+
+    def test_extracts_health_alerts_and_passes_to_apply(self):
+        """_didHealthCheck_ must forward health_alerts from result to _apply_health_alerts."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        received = []
+        app._apply_health_alerts = lambda alerts: received.append(alerts)
+        result = {"health_alerts": [{"project": "p", "health": "red", "reasons": ["x"]}]}
+        PennyApp._didHealthCheck_(app, result)
+        assert len(received) == 1
+        assert received[0][0]["project"] == "p"
+
+    def test_passes_empty_list_when_health_alerts_key_absent(self):
+        """Result dict with no 'health_alerts' key must call _apply_health_alerts([])."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        received = []
+        app._apply_health_alerts = lambda alerts: received.append(alerts)
+        PennyApp._didHealthCheck_(app, {})
+        assert received == [[]]
+
+    def test_ignores_non_dict_result(self):
+        """Non-dict result (e.g. None, string) must not call _apply_health_alerts."""
+        from penny.app import PennyApp
+
+        app = _make_fake_app()
+        called = []
+        app._apply_health_alerts = lambda alerts: called.append(alerts)
+        PennyApp._didHealthCheck_(app, None)
+        PennyApp._didHealthCheck_(app, "bad")
+        assert called == []
 
 
 # ── _compact_reset_time (direct call via PennyApp class method) ───────────────
