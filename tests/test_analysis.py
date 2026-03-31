@@ -1554,22 +1554,120 @@ class TestProjectUsage:
         proj_a = rm.project_usage[0]
         # proj-a has 2 sessions: sess-aaa (700 tokens), sess-bbb (100 tokens)
         assert len(proj_a["sessions"]) == 2
-        # sorted desc by tokens
-        assert proj_a["sessions"][0]["session_id"] == "sess-aaa"
-        assert proj_a["sessions"][0]["total_output_tokens"] == 700
-        assert proj_a["sessions"][0]["opus_tokens"] == 500
-        assert proj_a["sessions"][0]["sonnet_tokens"] == 200
-        assert proj_a["sessions"][1]["session_id"] == "sess-bbb"
-        assert proj_a["sessions"][1]["total_output_tokens"] == 100
+        # sorted desc by last_ts (sess-bbb at 12:00, sess-aaa at 11:00)
+        assert proj_a["sessions"][0]["session_id"] == "sess-bbb"
+        assert proj_a["sessions"][0]["total_output_tokens"] == 100
+        assert proj_a["sessions"][1]["session_id"] == "sess-aaa"
+        assert proj_a["sessions"][1]["total_output_tokens"] == 700
+        assert proj_a["sessions"][1]["opus_tokens"] == 500
+        assert proj_a["sessions"][1]["sonnet_tokens"] == 200
 
     def test_session_timestamps(self, multi_project_jsonl_dir):
         """first_ts and last_ts track the session's time range."""
         since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
         with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
             rm = scan_rich_metrics(since)
-        sess_aaa = rm.project_usage[0]["sessions"][0]
+        # sess-aaa is second (sorted by last_ts desc; sess-bbb at 12:00 is first)
+        sess_aaa = rm.project_usage[0]["sessions"][1]
         assert sess_aaa["first_ts"] == "2025-01-10T10:00:00"
         assert sess_aaa["last_ts"] == "2025-01-10T11:00:00"
+
+    def test_session_title_from_custom_title_entry(self, tmp_path):
+        """Sessions include title from custom-title JSONL entries."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        _write_jsonl(proj / "s.jsonl", [
+            {
+                "type": "custom-title",
+                "timestamp": "2025-01-10T09:00:00.000Z",
+                "sessionId": "sess-titled",
+                "customTitle": "refactor auth module",
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-10T10:00:00.000Z",
+                "sessionId": "sess-titled",
+                "cwd": "/projects/myapp",
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"output_tokens": 200},
+                    "content": [],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-10T11:00:00.000Z",
+                "sessionId": "sess-untitled",
+                "cwd": "/projects/myapp",
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"output_tokens": 100},
+                    "content": [],
+                },
+            },
+        ])
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            rm = scan_rich_metrics(since)
+        sessions = {s["session_id"]: s for s in rm.project_usage[0]["sessions"]}
+        assert sessions["sess-titled"]["title"] == "refactor auth module"
+        assert sessions["sess-untitled"]["title"] == ""
+
+    def test_session_title_in_flat_sessions(self, tmp_path):
+        """session_usage flat list also includes title."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        _write_jsonl(proj / "s.jsonl", [
+            {
+                "type": "custom-title",
+                "timestamp": "2025-01-10T09:00:00.000Z",
+                "sessionId": "sess-t",
+                "customTitle": "fix login bug",
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-10T10:00:00.000Z",
+                "sessionId": "sess-t",
+                "cwd": "/projects/app",
+                "message": {
+                    "model": "claude-opus-4-6",
+                    "usage": {"output_tokens": 300},
+                    "content": [],
+                },
+            },
+        ])
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            rm = scan_rich_metrics(since)
+        assert rm.session_usage[0]["title"] == "fix login bug"
+
+    def test_session_title_in_multi_window(self, tmp_path):
+        """scan_rich_metrics_multi also extracts session titles."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        _write_jsonl(proj / "s.jsonl", [
+            {
+                "type": "custom-title",
+                "timestamp": "2025-01-10T09:00:00.000Z",
+                "sessionId": "sess-m",
+                "customTitle": "add dashboard",
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-10T10:00:00.000Z",
+                "sessionId": "sess-m",
+                "cwd": "/projects/dash",
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"output_tokens": 150},
+                    "content": [],
+                },
+            },
+        ])
+        windows = {"w": datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)}
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            result = scan_rich_metrics_multi(windows)
+        assert result["w"].project_usage[0]["sessions"][0]["title"] == "add dashboard"
 
     def test_empty_cwd_excluded(self, tmp_path):
         """Entries without cwd don't create project entries."""

@@ -601,7 +601,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .proj-name { font-weight:600; min-width:100px; }
     .proj-stat { color:#6b7280; font-size:12px; }
     .tbl-sm { margin:6px 0 2px 16px; font-size:11px; }
-    .tbl-sm th { font-size:10px; padding:2px 6px; }
+    .tbl-sm th { font-size:10px; padding:2px 6px; cursor:pointer; user-select:none; white-space:nowrap; }
+    .tbl-sm th:last-child { cursor:default; }
+    .tbl-sm th:hover:not(:last-child) { color:#3b82f6; }
+    .tbl-sm th .sort-arrow { font-size:8px; margin-left:2px; opacity:0.4; }
+    .tbl-sm th.sorted .sort-arrow { opacity:1; color:#3b82f6; }
     .tbl-sm td { padding:2px 6px; }
     .btn-resume { font-size:10px; padding:2px 8px; border:1px solid #e5e7eb; border-radius:3px; background:#fff; cursor:pointer; color:#3b82f6; }
     .btn-resume:hover { background:#eff6ff; }
@@ -1172,29 +1176,62 @@ function renderWeeklyHistory_card(periodHistory) {
   return renderBarChart(history, {dateKey:'period_start', showTime:false});
 }
 
+const projSortState = {};
+function sortSessions(sessions, key, asc) {
+  const cmp = (a, b) => {
+    const va = a[key] || '', vb = b[key] || '';
+    if (typeof va === 'number') return asc ? va - vb : vb - va;
+    return asc ? (va < vb ? -1 : va > vb ? 1 : 0) : (va > vb ? -1 : va < vb ? 1 : 0);
+  };
+  return [...sessions].sort(cmp);
+}
+function onSortClick(projIdx, key) {
+  const st = projSortState[projIdx] || {key: 'last_ts', asc: false};
+  if (st.key === key) { st.asc = !st.asc; } else { st.key = key; st.asc = key === 'title'; }
+  projSortState[projIdx] = st;
+  renderMetricsCards(lastData);
+}
 function renderProjectsCard(rm) {
   const projects = (rm && rm.project_usage) || [];
   if (!projects.length) return '<p style="color:#9ca3af;font-size:12px">No project data yet.</p>';
   const grandTotal = projects.reduce((s, p) => s + p.total_output_tokens, 0) || 1;
-  return projects.map(p => {
+  const cols = [
+    {key:'title', label:'Session'},
+    {key:'total_output_tokens', label:'Tokens'},
+    {key:'_pct', label:'Share'},
+    {key:'total_turns', label:'Turns'},
+    {key:'last_ts', label:'Last Active'},
+  ];
+  return projects.map((p, pi) => {
     const pct = (p.total_output_tokens / grandTotal * 100).toFixed(1);
     const kTokens = Math.round(p.total_output_tokens / 1000);
     const sessions = (p.sessions || []);
-    const sessRows = sessions.map(s => {
+    const st = projSortState[pi] || {key: 'last_ts', asc: false};
+    const sortKey = st.key === '_pct' ? 'total_output_tokens' : st.key;
+    const sorted = sortSessions(sessions, sortKey, st.asc);
+    const headers = cols.map(c => {
+      const active = st.key === c.key;
+      const arrow = active ? (st.asc ? '&#9650;' : '&#9660;') : '&#9660;';
+      const cls = active ? ' class="sorted"' : '';
+      return `<th${cls} onclick="onSortClick(${pi},'${c.key}')">${c.label}<span class="sort-arrow">${arrow}</span></th>`;
+    }).join('') + '<th></th>';
+    const sessRows = sorted.map(s => {
       const sK = Math.round(s.total_output_tokens / 1000);
       const sPct = (s.total_output_tokens / p.total_output_tokens * 100).toFixed(0);
       const lastActive = s.last_ts ? s.last_ts.slice(5, 16).replace('T', ' ') : '';
       const sid = s.session_id || '';
-      const shortId = sid.length > 12 ? sid.slice(0, 8) + '…' : sid;
+      const shortId = sid.length > 12 ? sid.slice(0, 8) + '\u2026' : sid;
+      const label = s.title || shortId;
+      const titleAttr = s.title ? `${s.title} (${sid})` : sid;
       return `<tr>
-        <td title="${sid}" style="font-family:monospace;font-size:11px">${shortId}</td>
+        <td title="${titleAttr}" style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}</td>
         <td>${sK}k</td><td>${sPct}%</td><td>${s.total_turns}</td>
         <td>${lastActive}</td>
         <td><button class="btn-resume" onclick="resumeSession('${sid}','${(p.cwd||'').replace(/'/g,"\\'")}')">Resume</button></td>
       </tr>`;
     }).join('');
     const sessTable = sessions.length ? `<table class="tbl-sm">
-      <tr><th>Session</th><th>Tokens</th><th>Share</th><th>Turns</th><th>Last Active</th><th></th></tr>
+      <tr>${headers}</tr>
       ${sessRows}</table>` : '<p style="color:#9ca3af;font-size:11px;margin:4px 0">No session data</p>';
     return `<details class="proj-row">
       <summary>

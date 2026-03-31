@@ -403,6 +403,7 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
     branches: set[str] = set()
     sessions: set[str] = set()
     edited_files: set[str] = set()
+    session_titles: dict[str, str] = {}  # sessionId -> customTitle
     # Per-project accumulator: {cwd: {opus, sonnet, haiku, other, turns, sessions: {sid: {...}}}}
     proj_acc: dict[str, dict] = {}
 
@@ -431,6 +432,14 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
                     # Count PR link entries
                     if entry_type == "pr-link":
                         metrics.pr_count += 1
+                        continue
+
+                    # Capture session title from custom-title entries
+                    if entry_type == "custom-title":
+                        sid = obj.get("sessionId")
+                        title = obj.get("customTitle", "")
+                        if sid and title:
+                            session_titles[sid] = title
                         continue
 
                     # Extract tool results from user records
@@ -550,15 +559,17 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
     metrics.unique_branches = len(branches)
     metrics.session_count = len(sessions)
     metrics.files_edited = len(edited_files)
-    metrics.project_usage = _assemble_project_usage(proj_acc)
-    metrics.session_usage = _assemble_flat_sessions(proj_acc)
+    metrics.project_usage = _assemble_project_usage(proj_acc, session_titles=session_titles)
+    metrics.session_usage = _assemble_flat_sessions(proj_acc, session_titles=session_titles)
     return metrics
 
 
 def _assemble_project_usage(
     proj_acc: dict[str, dict], max_projects: int = 20, max_sessions: int = 20,
+    session_titles: dict[str, str] | None = None,
 ) -> list[dict]:
     """Convert raw project accumulators into sorted project_usage list."""
+    titles = session_titles or {}
     result = []
     for cwd_val, pa in proj_acc.items():
         total = pa["opus"] + pa["sonnet"] + pa["haiku"] + pa["other"]
@@ -567,6 +578,7 @@ def _assemble_project_usage(
             s_total = sa["opus"] + sa["sonnet"] + sa["haiku"] + sa["other"]
             sess_list.append({
                 "session_id": sid,
+                "title": titles.get(sid, ""),
                 "opus_tokens": sa["opus"],
                 "sonnet_tokens": sa["sonnet"],
                 "haiku_tokens": sa["haiku"],
@@ -576,7 +588,7 @@ def _assemble_project_usage(
                 "first_ts": sa["first_ts"],
                 "last_ts": sa["last_ts"],
             })
-        sess_list.sort(key=lambda s: s["total_output_tokens"], reverse=True)
+        sess_list.sort(key=lambda s: s["last_ts"], reverse=True)
         result.append({
             "cwd": cwd_val,
             "name": Path(cwd_val).name,
@@ -593,14 +605,18 @@ def _assemble_project_usage(
     return result[:max_projects]
 
 
-def _assemble_flat_sessions(proj_acc: dict[str, dict]) -> list[dict]:
-    """Build a flat list of all sessions across projects, sorted by tokens desc."""
+def _assemble_flat_sessions(
+    proj_acc: dict[str, dict], session_titles: dict[str, str] | None = None,
+) -> list[dict]:
+    """Build a flat list of all sessions across projects, sorted by last active desc."""
+    titles = session_titles or {}
     result = []
     for cwd_val, pa in proj_acc.items():
         for sid, sa in pa["sessions"].items():
             s_total = sa["opus"] + sa["sonnet"] + sa["haiku"] + sa["other"]
             result.append({
                 "session_id": sid,
+                "title": titles.get(sid, ""),
                 "cwd": cwd_val,
                 "name": Path(cwd_val).name,
                 "opus_tokens": sa["opus"],
@@ -612,7 +628,7 @@ def _assemble_flat_sessions(proj_acc: dict[str, dict]) -> list[dict]:
                 "first_ts": sa["first_ts"],
                 "last_ts": sa["last_ts"],
             })
-    result.sort(key=lambda s: s["total_output_tokens"], reverse=True)
+    result.sort(key=lambda s: s["last_ts"], reverse=True)
     return result[:30]
 
 
@@ -644,6 +660,7 @@ def scan_rich_metrics_multi(
     branches: dict[str, set[str]] = {k: set() for k in windows}
     sessions: dict[str, set[str]] = {k: set() for k in windows}
     edited_files: dict[str, set[str]] = {k: set() for k in windows}
+    session_titles: dict[str, str] = {}  # sessionId -> customTitle (shared across windows)
     proj_acc: dict[str, dict[str, dict]] = {k: {} for k in windows}
 
     for filepath in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True):
@@ -675,6 +692,14 @@ def scan_rich_metrics_multi(
                     if entry_type == "pr-link":
                         for k in matched:
                             metrics[k].pr_count += 1
+                        continue
+
+                    # Capture session title from custom-title entries
+                    if entry_type == "custom-title":
+                        sid = obj.get("sessionId")
+                        title = obj.get("customTitle", "")
+                        if sid and title:
+                            session_titles[sid] = title
                         continue
 
                     if entry_type == "user":
@@ -799,8 +824,12 @@ def scan_rich_metrics_multi(
         metrics[k].unique_branches = len(branches[k])
         metrics[k].session_count = len(sessions[k])
         metrics[k].files_edited = len(edited_files[k])
-        metrics[k].project_usage = _assemble_project_usage(proj_acc[k])
-        metrics[k].session_usage = _assemble_flat_sessions(proj_acc[k])
+        metrics[k].project_usage = _assemble_project_usage(
+            proj_acc[k], session_titles=session_titles,
+        )
+        metrics[k].session_usage = _assemble_flat_sessions(
+            proj_acc[k], session_titles=session_titles,
+        )
 
     return metrics
 
