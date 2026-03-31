@@ -245,6 +245,8 @@ class RichMetrics:
     agentic_turns: int = 0       # assistant turns with stop_reason == "tool_use"
     tool_error_count: int = 0    # user records where toolUseResult.is_error == True
     files_edited: int = 0        # unique file paths from user records' toolUseResult.filePath
+    project_usage: list = field(default_factory=list)    # per-project breakdown (sorted desc)
+    session_usage: list = field(default_factory=list)    # flat per-session breakdown (sorted desc)
 
 
 def count_tokens_since(since: datetime, until: datetime | None = None) -> TokenUsage:
@@ -328,6 +330,8 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
     branches: set[str] = set()
     sessions: set[str] = set()
     edited_files: set[str] = set()
+    # Per-project accumulator: {cwd: {opus, sonnet, haiku, other, turns, sessions: {sid: {...}}}}
+    proj_acc: dict[str, dict] = {}
 
     for filepath in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True):
         try:
@@ -440,6 +444,32 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
                     if msg.get("stop_reason") == "tool_use":
                         metrics.agentic_turns += 1
 
+                    # Per-project / per-session accumulation
+                    if cwd:
+                        model_key = (
+                            "opus" if model in OPUS_MODELS
+                            else "sonnet" if model in SONNET_MODELS
+                            else "haiku" if model in HAIKU_MODELS
+                            else "other"
+                        )
+                        pa = proj_acc.setdefault(cwd, {
+                            "opus": 0, "sonnet": 0, "haiku": 0, "other": 0,
+                            "turns": 0, "sessions": {},
+                        })
+                        pa[model_key] += out
+                        pa["turns"] += 1
+                        if session_id:
+                            sa = pa["sessions"].setdefault(session_id, {
+                                "opus": 0, "sonnet": 0, "haiku": 0, "other": 0,
+                                "turns": 0, "first_ts": ts[:19], "last_ts": ts[:19],
+                            })
+                            sa[model_key] += out
+                            sa["turns"] += 1
+                            if ts[:19] < sa["first_ts"]:
+                                sa["first_ts"] = ts[:19]
+                            if ts[:19] > sa["last_ts"]:
+                                sa["last_ts"] = ts[:19]
+
         except OSError:
             continue
 
@@ -447,7 +477,70 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
     metrics.unique_branches = len(branches)
     metrics.session_count = len(sessions)
     metrics.files_edited = len(edited_files)
+    metrics.project_usage = _assemble_project_usage(proj_acc)
+    metrics.session_usage = _assemble_flat_sessions(proj_acc)
     return metrics
+
+
+def _assemble_project_usage(
+    proj_acc: dict[str, dict], max_projects: int = 20, max_sessions: int = 20,
+) -> list[dict]:
+    """Convert raw project accumulators into sorted project_usage list."""
+    result = []
+    for cwd_val, pa in proj_acc.items():
+        total = pa["opus"] + pa["sonnet"] + pa["haiku"] + pa["other"]
+        sess_list = []
+        for sid, sa in pa["sessions"].items():
+            s_total = sa["opus"] + sa["sonnet"] + sa["haiku"] + sa["other"]
+            sess_list.append({
+                "session_id": sid,
+                "opus_tokens": sa["opus"],
+                "sonnet_tokens": sa["sonnet"],
+                "haiku_tokens": sa["haiku"],
+                "other_tokens": sa["other"],
+                "total_output_tokens": s_total,
+                "total_turns": sa["turns"],
+                "first_ts": sa["first_ts"],
+                "last_ts": sa["last_ts"],
+            })
+        sess_list.sort(key=lambda s: s["total_output_tokens"], reverse=True)
+        result.append({
+            "cwd": cwd_val,
+            "name": Path(cwd_val).name,
+            "opus_tokens": pa["opus"],
+            "sonnet_tokens": pa["sonnet"],
+            "haiku_tokens": pa["haiku"],
+            "other_tokens": pa["other"],
+            "total_output_tokens": total,
+            "total_turns": pa["turns"],
+            "session_count": len(pa["sessions"]),
+            "sessions": sess_list[:max_sessions],
+        })
+    result.sort(key=lambda p: p["total_output_tokens"], reverse=True)
+    return result[:max_projects]
+
+
+def _assemble_flat_sessions(proj_acc: dict[str, dict]) -> list[dict]:
+    """Build a flat list of all sessions across projects, sorted by tokens desc."""
+    result = []
+    for cwd_val, pa in proj_acc.items():
+        for sid, sa in pa["sessions"].items():
+            s_total = sa["opus"] + sa["sonnet"] + sa["haiku"] + sa["other"]
+            result.append({
+                "session_id": sid,
+                "cwd": cwd_val,
+                "name": Path(cwd_val).name,
+                "opus_tokens": sa["opus"],
+                "sonnet_tokens": sa["sonnet"],
+                "haiku_tokens": sa["haiku"],
+                "other_tokens": sa["other"],
+                "total_output_tokens": s_total,
+                "total_turns": sa["turns"],
+                "first_ts": sa["first_ts"],
+                "last_ts": sa["last_ts"],
+            })
+    result.sort(key=lambda s: s["total_output_tokens"], reverse=True)
+    return result[:30]
 
 
 def scan_rich_metrics_multi(
@@ -478,6 +571,7 @@ def scan_rich_metrics_multi(
     branches: dict[str, set[str]] = {k: set() for k in windows}
     sessions: dict[str, set[str]] = {k: set() for k in windows}
     edited_files: dict[str, set[str]] = {k: set() for k in windows}
+    proj_acc: dict[str, dict[str, dict]] = {k: {} for k in windows}
 
     for filepath in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True):
         try:
@@ -588,6 +682,8 @@ def scan_rich_metrics_multi(
                                     has_thinking = True
                     is_agentic = msg.get("stop_reason") == "tool_use"
 
+                    model_key = tok_attr.split("_")[0]  # "opus", "sonnet", etc.
+
                     for k in matched:
                         m = metrics[k]
                         m.cache_create_tokens += cc
@@ -602,6 +698,26 @@ def scan_rich_metrics_multi(
                         if is_agentic:
                             m.agentic_turns += 1
 
+                        # Per-project / per-session accumulation
+                        if cwd:
+                            pa = proj_acc[k].setdefault(cwd, {
+                                "opus": 0, "sonnet": 0, "haiku": 0, "other": 0,
+                                "turns": 0, "sessions": {},
+                            })
+                            pa[model_key] += out
+                            pa["turns"] += 1
+                            if session_id:
+                                sa = pa["sessions"].setdefault(session_id, {
+                                    "opus": 0, "sonnet": 0, "haiku": 0, "other": 0,
+                                    "turns": 0, "first_ts": ts19, "last_ts": ts19,
+                                })
+                                sa[model_key] += out
+                                sa["turns"] += 1
+                                if ts19 < sa["first_ts"]:
+                                    sa["first_ts"] = ts19
+                                if ts19 > sa["last_ts"]:
+                                    sa["last_ts"] = ts19
+
         except OSError:
             continue
 
@@ -610,6 +726,8 @@ def scan_rich_metrics_multi(
         metrics[k].unique_branches = len(branches[k])
         metrics[k].session_count = len(sessions[k])
         metrics[k].files_edited = len(edited_files[k])
+        metrics[k].project_usage = _assemble_project_usage(proj_acc[k])
+        metrics[k].session_usage = _assemble_flat_sessions(proj_acc[k])
 
     return metrics
 

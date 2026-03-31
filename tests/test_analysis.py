@@ -1495,3 +1495,175 @@ class TestHoursUntilDatedResetLabel:
         # Should either be 0.0 (if it can't find a future match) or > 0 (next year)
         assert isinstance(hours, float)
         assert hours >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Per-project & per-session token tracking
+# ---------------------------------------------------------------------------
+
+class TestProjectUsage:
+    """Tests for project_usage and session_usage fields on RichMetrics."""
+
+    def test_project_usage_grouped_by_cwd(self, multi_project_jsonl_dir):
+        """Projects are grouped by cwd with correct token totals, sorted desc."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            rm = scan_rich_metrics(since)
+        # proj-a: 500 opus + 200 sonnet + 100 haiku = 800 total
+        # proj-b: 300 sonnet = 300 total
+        assert len(rm.project_usage) == 2
+        assert rm.project_usage[0]["cwd"] == "/home/user/proj-a"
+        assert rm.project_usage[0]["total_output_tokens"] == 800
+        assert rm.project_usage[1]["cwd"] == "/home/user/proj-b"
+        assert rm.project_usage[1]["total_output_tokens"] == 300
+
+    def test_project_model_breakdown(self, multi_project_jsonl_dir):
+        """Per-project metrics include per-model token counts."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            rm = scan_rich_metrics(since)
+        proj_a = rm.project_usage[0]
+        assert proj_a["opus_tokens"] == 500
+        assert proj_a["sonnet_tokens"] == 200
+        assert proj_a["haiku_tokens"] == 100
+        assert proj_a["other_tokens"] == 0
+
+    def test_project_session_count(self, multi_project_jsonl_dir):
+        """session_count reflects unique sessionIds within each project."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            rm = scan_rich_metrics(since)
+        # proj-a has sess-aaa and sess-bbb
+        assert rm.project_usage[0]["session_count"] == 2
+        # proj-b has sess-ccc
+        assert rm.project_usage[1]["session_count"] == 1
+
+    def test_project_name_is_basename(self, multi_project_jsonl_dir):
+        """Friendly name is the basename of the cwd path."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            rm = scan_rich_metrics(since)
+        assert rm.project_usage[0]["name"] == "proj-a"
+        assert rm.project_usage[1]["name"] == "proj-b"
+
+    def test_project_sessions_nested(self, multi_project_jsonl_dir):
+        """Each project has a sessions list with per-session breakdowns."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            rm = scan_rich_metrics(since)
+        proj_a = rm.project_usage[0]
+        # proj-a has 2 sessions: sess-aaa (700 tokens), sess-bbb (100 tokens)
+        assert len(proj_a["sessions"]) == 2
+        # sorted desc by tokens
+        assert proj_a["sessions"][0]["session_id"] == "sess-aaa"
+        assert proj_a["sessions"][0]["total_output_tokens"] == 700
+        assert proj_a["sessions"][0]["opus_tokens"] == 500
+        assert proj_a["sessions"][0]["sonnet_tokens"] == 200
+        assert proj_a["sessions"][1]["session_id"] == "sess-bbb"
+        assert proj_a["sessions"][1]["total_output_tokens"] == 100
+
+    def test_session_timestamps(self, multi_project_jsonl_dir):
+        """first_ts and last_ts track the session's time range."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            rm = scan_rich_metrics(since)
+        sess_aaa = rm.project_usage[0]["sessions"][0]
+        assert sess_aaa["first_ts"] == "2025-01-10T10:00:00"
+        assert sess_aaa["last_ts"] == "2025-01-10T11:00:00"
+
+    def test_empty_cwd_excluded(self, tmp_path):
+        """Entries without cwd don't create project entries."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        _write_jsonl(proj / "s.jsonl", [
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-10T10:00:00.000Z",
+                "sessionId": "sess-x",
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"output_tokens": 100},
+                    "content": [],
+                },
+            },
+        ])
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            rm = scan_rich_metrics(since)
+        assert rm.project_usage == []
+
+    def test_project_usage_truncated_to_20(self, tmp_path):
+        """At most 20 projects are returned."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        entries = []
+        for i in range(25):
+            entries.append({
+                "type": "assistant",
+                "timestamp": "2025-01-10T10:00:00.000Z",
+                "sessionId": f"sess-{i}",
+                "cwd": f"/projects/p{i:02d}",
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"output_tokens": 100 + i},
+                    "content": [],
+                },
+            })
+        _write_jsonl(proj / "s.jsonl", entries)
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            rm = scan_rich_metrics(since)
+        assert len(rm.project_usage) == 20
+
+    def test_multi_window_project_usage(self, tmp_path):
+        """project_usage respects window boundaries in scan_rich_metrics_multi."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        entries = [
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-05T10:00:00.000Z",
+                "sessionId": "sess-old",
+                "cwd": "/projects/old",
+                "message": {
+                    "model": "claude-opus-4-6",
+                    "usage": {"output_tokens": 100},
+                    "content": [],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-15T10:00:00.000Z",
+                "sessionId": "sess-new",
+                "cwd": "/projects/new",
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"output_tokens": 200},
+                    "content": [],
+                },
+            },
+        ]
+        _write_jsonl(proj / "s.jsonl", entries)
+        windows = {
+            "all": datetime(2025, 1, 1, tzinfo=timezone.utc),
+            "recent": datetime(2025, 1, 10, tzinfo=timezone.utc),
+        }
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            result = scan_rich_metrics_multi(windows)
+        # "all" window should have both projects
+        assert len(result["all"].project_usage) == 2
+        # "recent" window should only have the new project
+        assert len(result["recent"].project_usage) == 1
+        assert result["recent"].project_usage[0]["cwd"] == "/projects/new"
+
+    def test_single_window_multi_matches_single(self, multi_project_jsonl_dir):
+        """scan_rich_metrics_multi with one window matches scan_rich_metrics."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            single = scan_rich_metrics(since)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            multi = scan_rich_metrics_multi({"all": since})
+        assert len(multi["all"].project_usage) == len(single.project_usage)
+        for sp, mp in zip(single.project_usage, multi["all"].project_usage):
+            assert sp["cwd"] == mp["cwd"]
+            assert sp["total_output_tokens"] == mp["total_output_tokens"]

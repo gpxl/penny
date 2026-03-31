@@ -225,6 +225,15 @@ class DashboardServer:
                     _dispatch("clearAllCompleted:", None, True)
                     self._ok({"ok": True})
 
+                elif self.path == "/api/resume-session":
+                    session_id = payload.get("session_id", "")
+                    cwd = payload.get("cwd", "")
+                    if not session_id:
+                        self._error(400, "session_id required")
+                        return
+                    _resume_session(session_id, cwd)
+                    self._ok({"ok": True})
+
                 elif self.path == "/api/config":
                     error = _validate_config_patch(payload)
                     if error:
@@ -274,6 +283,19 @@ class DashboardServer:
                 pass  # Suppress request logs
 
         return Handler
+
+
+def _resume_session(session_id: str, cwd: str) -> None:
+    """Open a Terminal.app window resuming a Claude session."""
+    import shlex
+
+    from .spawner import _open_in_terminal
+
+    parts = []
+    if cwd:
+        parts.append(f"cd {shlex.quote(cwd)}")
+    parts.append(f"claude --resume {shlex.quote(session_id)}")
+    _open_in_terminal(" && ".join(parts))
 
 
 def _snapshot(app) -> dict[str, Any]:
@@ -569,6 +591,20 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .save-status { font-size:11px; color:#10b981; margin-left:8px; opacity:0; transition:opacity .3s; }
     .save-status.visible { opacity:1; }
     .inline-error { font-size:11px; color:#ef4444; margin-top:4px; }
+    /* Project accordion */
+    .proj-row { border-bottom:1px solid #f3f4f6; padding:6px 0; }
+    .proj-row:last-child { border-bottom:none; }
+    .proj-row summary { display:flex; align-items:center; gap:12px; cursor:pointer; list-style:none; font-size:13px; }
+    .proj-row summary::-webkit-details-marker { display:none; }
+    .proj-row summary::before { content:'▸'; color:#9ca3af; font-size:11px; transition:transform .15s; }
+    .proj-row[open] summary::before { transform:rotate(90deg); }
+    .proj-name { font-weight:600; min-width:100px; }
+    .proj-stat { color:#6b7280; font-size:12px; }
+    .tbl-sm { margin:6px 0 2px 16px; font-size:11px; }
+    .tbl-sm th { font-size:10px; padding:2px 6px; }
+    .tbl-sm td { padding:2px 6px; }
+    .btn-resume { font-size:10px; padding:2px 8px; border:1px solid #e5e7eb; border-radius:3px; background:#fff; cursor:pointer; color:#3b82f6; }
+    .btn-resume:hover { background:#eff6ff; }
   </style>
 </head>
 <body>
@@ -593,6 +629,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card" id="card-activity-hour"><h2>Activity by Hour</h2><p>…</p></div>
 </div>
 <div class="card" id="card-weekly-history" style="margin-bottom:12px"><h2>Weekly Budget History</h2><p>…</p></div>
+<div class="card" id="card-projects" style="margin-bottom:12px"><h2>Projects</h2><p>…</p></div>
 <div id="plugin-cards-container"></div>
 </div><!-- /page-dashboard -->
 
@@ -1135,6 +1172,53 @@ function renderWeeklyHistory_card(periodHistory) {
   return renderBarChart(history, {dateKey:'period_start', showTime:false});
 }
 
+function renderProjectsCard(rm) {
+  const projects = (rm && rm.project_usage) || [];
+  if (!projects.length) return '<p style="color:#9ca3af;font-size:12px">No project data yet.</p>';
+  const grandTotal = projects.reduce((s, p) => s + p.total_output_tokens, 0) || 1;
+  return projects.map(p => {
+    const pct = (p.total_output_tokens / grandTotal * 100).toFixed(1);
+    const kTokens = Math.round(p.total_output_tokens / 1000);
+    const sessions = (p.sessions || []);
+    const sessRows = sessions.map(s => {
+      const sK = Math.round(s.total_output_tokens / 1000);
+      const sPct = (s.total_output_tokens / p.total_output_tokens * 100).toFixed(0);
+      const lastActive = s.last_ts ? s.last_ts.slice(5, 16).replace('T', ' ') : '';
+      const sid = s.session_id || '';
+      const shortId = sid.length > 12 ? sid.slice(0, 8) + '…' : sid;
+      return `<tr>
+        <td title="${sid}" style="font-family:monospace;font-size:11px">${shortId}</td>
+        <td>${sK}k</td><td>${sPct}%</td><td>${s.total_turns}</td>
+        <td>${lastActive}</td>
+        <td><button class="btn-resume" onclick="resumeSession('${sid}','${(p.cwd||'').replace(/'/g,"\\'")}')">Resume</button></td>
+      </tr>`;
+    }).join('');
+    const sessTable = sessions.length ? `<table class="tbl-sm">
+      <tr><th>Session</th><th>Tokens</th><th>Share</th><th>Turns</th><th>Last Active</th><th></th></tr>
+      ${sessRows}</table>` : '<p style="color:#9ca3af;font-size:11px;margin:4px 0">No session data</p>';
+    return `<details class="proj-row">
+      <summary>
+        <span class="proj-name" title="${p.cwd||''}">${p.name}</span>
+        <span class="proj-stat">${kTokens}k tokens</span>
+        <span class="proj-stat">${pct}%</span>
+        <span class="proj-stat">${p.total_turns} turns</span>
+        <span class="proj-stat">${p.session_count} sessions</span>
+      </summary>
+      ${sessTable}
+    </details>`;
+  }).join('');
+}
+
+async function resumeSession(sessionId, cwd) {
+  try {
+    await fetch('/api/resume-session', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: sessionId, cwd: cwd}),
+    });
+  } catch (e) { /* ignore */ }
+}
+
 function renderPluginCards(cards) {
   const container = document.getElementById('plugin-cards-container');
   if (!container) return;
@@ -1158,6 +1242,11 @@ function render(data) {
   if (hasWeeklyHistory) weeklyHistoryEl.innerHTML = `<h2>Weekly Budget History${tip("Output token totals for each past billing week. Color: green < 60%, yellow 60–80%, red ≥ 80% of the highest observed week.")}</h2>` + renderWeeklyHistory_card(data.period_history);
   autoSelectHistoryFilter(data.session_history);
   document.getElementById('card-history').innerHTML = `<h2>Session History${tip("Output tokens per sub-session (each ~5h block between rate-limit resets). Useful for spotting heavy coding sessions.")}</h2>` + renderHistory_card(data.session_history);
+  const projectsEl = document.getElementById('card-projects');
+  const rm = getMetricsForWindow(data);
+  const hasProjects = rm && (rm.project_usage || []).length > 0;
+  projectsEl.style.display = hasProjects ? '' : 'none';
+  if (hasProjects) projectsEl.innerHTML = `<h2>Projects${tip("Token usage breakdown by project (working directory). Click a project to see its individual sessions.")}</h2>` + renderProjectsCard(rm);
   renderPluginCards(data.plugin_cards);
 }
 
