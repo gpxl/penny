@@ -312,6 +312,79 @@ def count_tokens_since(since: datetime, until: datetime | None = None) -> TokenU
     return usage
 
 
+def count_tokens_by_window(
+    windows: dict[str, tuple[datetime, datetime]],
+) -> dict[str, TokenUsage]:
+    """Count tokens for multiple (since, until) time windows in a single JSONL pass.
+
+    *windows* maps label → (since, until) pair.  Returns a dict with the same keys,
+    each holding the TokenUsage for that window.  Much faster than calling
+    count_tokens_since() once per window.
+    """
+    if not windows:
+        return {}
+
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.exists():
+        return {k: TokenUsage() for k in windows}
+
+    # Pre-compute string cutoffs
+    ranges = {
+        k: (s.strftime("%Y-%m-%dT%H:%M:%S"), e.strftime("%Y-%m-%dT%H:%M:%S"))
+        for k, (s, e) in windows.items()
+    }
+    earliest_ts = min(s.timestamp() for s, _ in windows.values())
+    usage: dict[str, TokenUsage] = {k: TokenUsage() for k in windows}
+
+    for filepath in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True):
+        try:
+            if Path(filepath).stat().st_mtime < earliest_ts:
+                continue
+            with open(filepath, errors="ignore") as fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        obj = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    ts = obj.get("timestamp", "")
+                    if not ts:
+                        continue
+                    ts19 = ts[:19]
+                    if obj.get("type") != "assistant":
+                        continue
+
+                    msg = obj.get("message", {})
+                    u = msg.get("usage")
+                    if not u:
+                        continue
+
+                    out = u.get("output_tokens", 0)
+                    inp = u.get("input_tokens", 0)
+                    cc = u.get("cache_creation_input_tokens", 0)
+                    cr = u.get("cache_read_input_tokens", 0)
+                    model = msg.get("model", "")
+
+                    for k, (since_s, until_s) in ranges.items():
+                        if ts19 >= since_s and ts19 < until_s:
+                            w = usage[k]
+                            w.output_all += out
+                            w.input_all += inp
+                            w.cache_create += cc
+                            w.cache_read += cr
+                            w.turns += 1
+                            if model in SONNET_MODELS:
+                                w.output_sonnet += out
+
+        except OSError:
+            continue
+
+    return usage
+
+
 def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMetrics:
     """
     Scan JSONL files since a given UTC datetime and return rich behavioral metrics.
