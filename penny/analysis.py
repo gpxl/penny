@@ -247,6 +247,7 @@ class RichMetrics:
     files_edited: int = 0        # unique file paths from user records' toolUseResult.filePath
     project_usage: list = field(default_factory=list)    # per-project breakdown (sorted desc)
     session_usage: list = field(default_factory=list)    # flat per-session breakdown (sorted desc)
+    health_alerts: list = field(default_factory=list)    # [{project, cwd, health, reasons}]
 
 
 def count_tokens_since(since: datetime, until: datetime | None = None) -> TokenUsage:
@@ -448,6 +449,24 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
                         if isinstance(result, dict):
                             if result.get("is_error"):
                                 metrics.tool_error_count += 1
+                                # Per-project/session error counting
+                                u_cwd = obj.get("cwd")
+                                u_sid = obj.get("sessionId")
+                                if u_cwd:
+                                    pa = proj_acc.setdefault(u_cwd, {
+                                        "opus": 0, "sonnet": 0, "haiku": 0,
+                                        "other": 0, "turns": 0,
+                                        "tool_errors": 0, "sessions": {},
+                                    })
+                                    pa["tool_errors"] = pa.get("tool_errors", 0) + 1
+                                    if u_sid:
+                                        sa = pa["sessions"].setdefault(u_sid, {
+                                            "opus": 0, "sonnet": 0, "haiku": 0,
+                                            "other": 0, "turns": 0,
+                                            "tool_errors": 0,
+                                            "first_ts": ts[:19], "last_ts": ts[:19],
+                                        })
+                                        sa["tool_errors"] = sa.get("tool_errors", 0) + 1
                             fp = result.get("filePath")
                             if fp:
                                 edited_files.add(fp)
@@ -536,14 +555,15 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
                         )
                         pa = proj_acc.setdefault(cwd, {
                             "opus": 0, "sonnet": 0, "haiku": 0, "other": 0,
-                            "turns": 0, "sessions": {},
+                            "turns": 0, "tool_errors": 0, "sessions": {},
                         })
                         pa[model_key] += out
                         pa["turns"] += 1
                         if session_id:
                             sa = pa["sessions"].setdefault(session_id, {
                                 "opus": 0, "sonnet": 0, "haiku": 0, "other": 0,
-                                "turns": 0, "first_ts": ts[:19], "last_ts": ts[:19],
+                                "turns": 0, "tool_errors": 0,
+                                "first_ts": ts[:19], "last_ts": ts[:19],
                             })
                             sa[model_key] += out
                             sa["turns"] += 1
@@ -559,16 +579,233 @@ def scan_rich_metrics(since: datetime, until: datetime | None = None) -> RichMet
     metrics.unique_branches = len(branches)
     metrics.session_count = len(sessions)
     metrics.files_edited = len(edited_files)
-    metrics.project_usage = _assemble_project_usage(proj_acc, session_titles=session_titles)
+    metrics.project_usage, metrics.health_alerts = _assemble_project_usage(
+        proj_acc, session_titles=session_titles,
+    )
     metrics.session_usage = _assemble_flat_sessions(proj_acc, session_titles=session_titles)
     return metrics
+
+
+def _compute_session_anomalies(sessions: list[dict]) -> None:
+    """Flag anomalous sessions in-place based on duration, error rate, and cost."""
+    for s in sessions:
+        first = s.get("first_ts", "")
+        last = s.get("last_ts", "")
+        turns = s.get("total_turns", 0)
+        tokens = s.get("total_output_tokens", 0)
+        errors = s.get("tool_errors", 0)
+        reasons: list[str] = []
+
+        # Compute duration in minutes
+        duration_m = 0.0
+        if first and last:
+            try:
+                t0 = datetime.fromisoformat(first)
+                t1 = datetime.fromisoformat(last)
+                duration_m = max((t1 - t0).total_seconds() / 60, 0)
+            except (ValueError, TypeError):
+                pass
+        s["duration_m"] = round(duration_m, 1)
+
+        # Tokens per turn
+        tpt = tokens / turns if turns > 0 else 0.0
+        s["tokens_per_turn"] = round(tpt, 1)
+
+        # Anomaly checks
+        if duration_m < 1 and tokens > 1000:
+            reasons.append(f"Short session ({duration_m:.0f}m) with {tokens} tokens")
+        if errors > 0 and turns > 0:
+            err_rate = errors / (errors + turns) * 100
+            if err_rate > 50:
+                reasons.append(f"High error rate ({err_rate:.0f}%)")
+        if tpt > 5000:
+            reasons.append(f"High cost per turn ({tpt:.0f} tok/turn)")
+
+        s["anomaly"] = len(reasons) > 0
+        s["anomaly_reasons"] = reasons
+
+
+def _compute_project_health(
+    projects: list[dict],
+    recent_projects: list[dict] | None = None,
+) -> list[dict]:
+    """Compute health signals for each project and return alerts for unhealthy ones.
+
+    Three detection layers:
+    1. Absolute thresholds (works with 1 project)
+    2. Relative outlier (2+ projects, median comparison)
+    3. Spike detection (recent vs week burn rate)
+    """
+    alerts: list[dict] = []
+    if not projects:
+        return alerts
+
+    # Build recent lookup: cwd -> burn_rate
+    recent_rates: dict[str, float] = {}
+    if recent_projects:
+        for rp in recent_projects:
+            cwd = rp.get("cwd", "")
+            if cwd and rp.get("total_output_tokens", 0) > 0:
+                # Recent window is 1 hour, so burn_rate = tokens directly
+                recent_rates[cwd] = float(rp["total_output_tokens"])
+
+    # Compute rate metrics for each project
+    for p in projects:
+        turns = p.get("total_turns", 0)
+        tokens = p.get("total_output_tokens", 0)
+        errors = p.get("tool_errors", 0)
+        sessions = p.get("sessions", [])
+
+        # Compute time span from earliest to latest session activity
+        all_first: list[str] = []
+        all_last: list[str] = []
+        for s in sessions:
+            if s.get("first_ts"):
+                all_first.append(s["first_ts"])
+            if s.get("last_ts"):
+                all_last.append(s["last_ts"])
+
+        hours_active = 0.0
+        if all_first and all_last:
+            try:
+                t0 = datetime.fromisoformat(min(all_first))
+                t1 = datetime.fromisoformat(max(all_last))
+                hours_active = max((t1 - t0).total_seconds() / 3600, 0.01)
+            except (ValueError, TypeError):
+                hours_active = 0.01
+
+        burn_rate = tokens / hours_active if hours_active > 0 else 0.0
+        error_rate = errors / (errors + turns) * 100 if (errors + turns) > 0 else 0.0
+        n_sessions = len(sessions)
+        session_velocity = n_sessions / hours_active if hours_active > 0 else 0.0
+
+        # Compute session anomalies first — sets duration_m on each session
+        _compute_session_anomalies(sessions)
+
+        # Average session duration (uses duration_m set by anomaly detection)
+        durations = [s.get("duration_m", 0) for s in sessions if s.get("duration_m", 0) > 0]
+        avg_duration = sum(durations) / len(durations) if durations else 0.0
+
+        p["burn_rate"] = round(burn_rate, 1)
+        p["error_rate"] = round(error_rate, 1)
+        p["session_velocity"] = round(session_velocity, 2)
+        p["avg_session_duration_m"] = round(avg_duration, 1)
+
+    # Layer 1: Absolute thresholds
+    for p in projects:
+        reasons: list[str] = []
+        level = "green"
+
+        er = p["error_rate"]
+        if er > 50:
+            level = "red"
+            reasons.append(f"High error rate ({er:.0f}%)")
+        elif er > 20:
+            level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
+            reasons.append(f"Elevated error rate ({er:.0f}%)")
+
+        br = p["burn_rate"]
+        if br > 50_000:
+            level = "red"
+            reasons.append(f"Very high burn rate ({br/1000:.0f}k tok/h)")
+        elif br > 20_000:
+            level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
+            reasons.append(f"High burn rate ({br/1000:.0f}k tok/h)")
+
+        sv = p["session_velocity"]
+        if sv > 10:
+            level = "red"
+            reasons.append(f"Very high session velocity ({sv:.1f}/h)")
+        elif sv > 5:
+            level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
+            reasons.append(f"High session velocity ({sv:.1f}/h)")
+
+        avg_d = p["avg_session_duration_m"]
+        n_sess = len(p.get("sessions", []))
+        if n_sess > 5 and avg_d > 0:
+            if avg_d < 1:
+                level = "red"
+                reasons.append(f"Very short sessions (avg {avg_d:.1f}m)")
+            elif avg_d < 2:
+                level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
+                reasons.append(f"Short sessions (avg {avg_d:.1f}m)")
+
+        p["health"] = level
+        p["health_reasons"] = reasons
+
+    # Layer 2: Relative outlier detection (2+ projects)
+    if len(projects) >= 2:
+        burn_rates = sorted(p["burn_rate"] for p in projects)
+        error_rates = sorted(p["error_rate"] for p in projects)
+        n = len(burn_rates)
+        median_br = (burn_rates[n // 2] + burn_rates[(n - 1) // 2]) / 2
+        median_er = (error_rates[n // 2] + error_rates[(n - 1) // 2]) / 2
+
+        for p in projects:
+            if median_br > 0 and p["burn_rate"] > 5 * median_br:
+                if p["health"] != "red":
+                    p["health"] = "red"
+                    p["health_reasons"].append(
+                        f"Burn rate {p['burn_rate']/median_br:.1f}x other projects"
+                    )
+            elif median_br > 0 and p["burn_rate"] > 3 * median_br:
+                if p["health"] == "green":
+                    p["health"] = "yellow"
+                    p["health_reasons"].append(
+                        f"Burn rate {p['burn_rate']/median_br:.1f}x other projects"
+                    )
+
+            if median_er > 0 and p["error_rate"] > 5 * median_er:
+                if p["health"] != "red":
+                    p["health"] = "red"
+                    p["health_reasons"].append(
+                        f"Error rate {p['error_rate']/median_er:.1f}x other projects"
+                    )
+            elif median_er > 0 and p["error_rate"] > 3 * median_er:
+                if p["health"] == "green":
+                    p["health"] = "yellow"
+                    p["health_reasons"].append(
+                        f"Error rate {p['error_rate']/median_er:.1f}x other projects"
+                    )
+
+    # Layer 3: Spike detection (recent 1h vs longer-term average)
+    for p in projects:
+        cwd = p.get("cwd", "")
+        recent_br = recent_rates.get(cwd, 0)
+        avg_br = p["burn_rate"]
+        if recent_br > 0 and avg_br > 0:
+            spike = recent_br / avg_br
+            if spike > 5:
+                if p["health"] != "red":
+                    p["health"] = "red"
+                p["health_reasons"].append(f"Burn rate spike ({spike:.1f}x normal)")
+            elif spike > 3:
+                if p["health"] == "green":
+                    p["health"] = "yellow"
+                p["health_reasons"].append(f"Burn rate spike ({spike:.1f}x normal)")
+
+    # Collect alerts for unhealthy projects
+    for p in projects:
+        if p["health"] != "green":
+            alerts.append({
+                "project": p.get("name", ""),
+                "cwd": p.get("cwd", ""),
+                "health": p["health"],
+                "reasons": p["health_reasons"],
+            })
+
+    return alerts
 
 
 def _assemble_project_usage(
     proj_acc: dict[str, dict], max_projects: int = 20, max_sessions: int = 20,
     session_titles: dict[str, str] | None = None,
-) -> list[dict]:
-    """Convert raw project accumulators into sorted project_usage list."""
+    recent_proj_acc: dict[str, dict] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Convert raw project accumulators into sorted project_usage list.
+
+    Returns (project_usage, health_alerts).
+    """
     titles = session_titles or {}
     result = []
     for cwd_val, pa in proj_acc.items():
@@ -585,6 +822,7 @@ def _assemble_project_usage(
                 "other_tokens": sa["other"],
                 "total_output_tokens": s_total,
                 "total_turns": sa["turns"],
+                "tool_errors": sa.get("tool_errors", 0),
                 "first_ts": sa["first_ts"],
                 "last_ts": sa["last_ts"],
             })
@@ -598,11 +836,26 @@ def _assemble_project_usage(
             "other_tokens": pa["other"],
             "total_output_tokens": total,
             "total_turns": pa["turns"],
+            "tool_errors": pa.get("tool_errors", 0),
             "session_count": len(pa["sessions"]),
             "sessions": sess_list[:max_sessions],
         })
     result.sort(key=lambda p: p["total_output_tokens"], reverse=True)
-    return result[:max_projects]
+    result = result[:max_projects]
+
+    # Build recent project list for spike detection
+    recent_projects: list[dict] | None = None
+    if recent_proj_acc is not None:
+        recent_projects = []
+        for cwd_val, rpa in recent_proj_acc.items():
+            r_total = rpa["opus"] + rpa["sonnet"] + rpa["haiku"] + rpa["other"]
+            recent_projects.append({
+                "cwd": cwd_val,
+                "total_output_tokens": r_total,
+            })
+
+    alerts = _compute_project_health(result, recent_projects=recent_projects)
+    return result, alerts
 
 
 def _assemble_flat_sessions(
@@ -625,6 +878,7 @@ def _assemble_flat_sessions(
                 "other_tokens": sa["other"],
                 "total_output_tokens": s_total,
                 "total_turns": sa["turns"],
+                "tool_errors": sa.get("tool_errors", 0),
                 "first_ts": sa["first_ts"],
                 "last_ts": sa["last_ts"],
             })
@@ -705,9 +959,29 @@ def scan_rich_metrics_multi(
                     if entry_type == "user":
                         result = obj.get("toolUseResult")
                         if isinstance(result, dict):
-                            if result.get("is_error"):
+                            is_err = result.get("is_error")
+                            if is_err:
                                 for k in matched:
                                     metrics[k].tool_error_count += 1
+                                # Per-project/session error counting
+                                u_cwd = obj.get("cwd")
+                                u_sid = obj.get("sessionId")
+                                if u_cwd:
+                                    for k in matched:
+                                        pa = proj_acc[k].setdefault(u_cwd, {
+                                            "opus": 0, "sonnet": 0, "haiku": 0,
+                                            "other": 0, "turns": 0,
+                                            "tool_errors": 0, "sessions": {},
+                                        })
+                                        pa["tool_errors"] = pa.get("tool_errors", 0) + 1
+                                        if u_sid:
+                                            sa = pa["sessions"].setdefault(u_sid, {
+                                                "opus": 0, "sonnet": 0, "haiku": 0,
+                                                "other": 0, "turns": 0,
+                                                "tool_errors": 0,
+                                                "first_ts": ts19, "last_ts": ts19,
+                                            })
+                                            sa["tool_errors"] = sa.get("tool_errors", 0) + 1
                             fp = result.get("filePath")
                             if fp:
                                 for k in matched:
@@ -800,14 +1074,15 @@ def scan_rich_metrics_multi(
                         if cwd:
                             pa = proj_acc[k].setdefault(cwd, {
                                 "opus": 0, "sonnet": 0, "haiku": 0, "other": 0,
-                                "turns": 0, "sessions": {},
+                                "turns": 0, "tool_errors": 0, "sessions": {},
                             })
                             pa[model_key] += out
                             pa["turns"] += 1
                             if session_id:
                                 sa = pa["sessions"].setdefault(session_id, {
                                     "opus": 0, "sonnet": 0, "haiku": 0, "other": 0,
-                                    "turns": 0, "first_ts": ts19, "last_ts": ts19,
+                                    "turns": 0, "tool_errors": 0,
+                                    "first_ts": ts19, "last_ts": ts19,
                                 })
                                 sa[model_key] += out
                                 sa["turns"] += 1
@@ -819,13 +1094,17 @@ def scan_rich_metrics_multi(
         except OSError:
             continue
 
+    # Use "recent" window's proj_acc for spike detection if available
+    recent_pa = proj_acc.get("recent") if "recent" in windows else None
+
     for k in windows:
         metrics[k].unique_projects = len(cwds[k])
         metrics[k].unique_branches = len(branches[k])
         metrics[k].session_count = len(sessions[k])
         metrics[k].files_edited = len(edited_files[k])
-        metrics[k].project_usage = _assemble_project_usage(
+        metrics[k].project_usage, metrics[k].health_alerts = _assemble_project_usage(
             proj_acc[k], session_titles=session_titles,
+            recent_proj_acc=recent_pa if k != "recent" else None,
         )
         metrics[k].session_usage = _assemble_flat_sessions(
             proj_acc[k], session_titles=session_titles,
@@ -1315,3 +1594,122 @@ def get_usage_bar(pct_used: float, width: int = 8) -> str:
     else:
         block = "🟥"
     return block * filled + "⬜" * (width - filled)
+
+
+# ---------------------------------------------------------------------------
+# Lightweight health check (1-minute interval)
+# ---------------------------------------------------------------------------
+
+def quick_health_scan(
+    file_offsets: dict[str, int],
+    baselines: dict[str, dict] | None = None,
+) -> tuple[list[dict], dict[str, int]]:
+    """Fast incremental JSONL scan for health alerts.
+
+    Reads only new lines since last scan (tracked by byte offset).
+    Returns (alerts, updated_offsets).
+    """
+    projects_dir = Path.home() / ".claude" / "projects"
+    new_offsets: dict[str, int] = dict(file_offsets)
+    baselines = baselines or {}
+
+    # Per-project accumulators for this delta
+    delta: dict[str, dict] = {}  # cwd -> {tokens, errors, turns, sessions}
+
+    if not projects_dir.exists():
+        return [], new_offsets
+
+    for filepath in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True):
+        try:
+            size = Path(filepath).stat().st_size
+            prev_offset = file_offsets.get(filepath, 0)
+            if size <= prev_offset:
+                new_offsets[filepath] = size
+                continue
+
+            with open(filepath, "rb") as fh:
+                fh.seek(prev_offset)
+                raw_bytes = fh.read()
+                new_offsets[filepath] = prev_offset + len(raw_bytes)
+
+            for raw_line in raw_bytes.decode("utf-8", errors="ignore").splitlines():
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    obj = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                entry_type = obj.get("type")
+                cwd = obj.get("cwd")
+                if not cwd:
+                    continue
+
+                d = delta.setdefault(cwd, {
+                    "tokens": 0, "errors": 0, "turns": 0, "sessions": set(),
+                })
+
+                if entry_type == "assistant":
+                    msg = obj.get("message", {})
+                    out = msg.get("usage", {}).get("output_tokens", 0)
+                    d["tokens"] += out
+                    d["turns"] += 1
+                    sid = obj.get("sessionId")
+                    if sid:
+                        d["sessions"].add(sid)
+                elif entry_type == "user":
+                    result = obj.get("toolUseResult")
+                    if isinstance(result, dict) and result.get("is_error"):
+                        d["errors"] += 1
+
+        except OSError:
+            continue
+
+    # Evaluate deltas against baselines
+    alerts: list[dict] = []
+    for cwd, d in delta.items():
+        turns = d["turns"]
+        errors = d["errors"]
+        tokens = d["tokens"]
+        name = Path(cwd).name
+
+        # Error rate in this 1-min window
+        total_events = errors + turns
+        error_rate = errors / total_events * 100 if total_events > 0 else 0
+
+        # Compare against baseline
+        bl = baselines.get(cwd, {})
+        avg_rate = bl.get("avg_tokens_per_hour", 0)
+        reasons: list[str] = []
+        level = "green"
+
+        # Absolute: high error rate in the delta
+        if error_rate > 50 and errors >= 3:
+            level = "red"
+            reasons.append(f"High error rate ({error_rate:.0f}%) in last minute")
+        elif error_rate > 20 and errors >= 2:
+            level = "yellow"
+            reasons.append(f"Elevated error rate ({error_rate:.0f}%) in last minute")
+
+        # Spike: tokens in 1 min extrapolated to hourly rate vs baseline
+        if avg_rate > 0 and tokens > 0:
+            hourly_rate = tokens * 60  # extrapolate 1 min to 1 hour
+            spike = hourly_rate / avg_rate
+            if spike > 5:
+                level = "red"
+                reasons.append(f"Burn rate spike ({spike:.1f}x baseline)")
+            elif spike > 3:
+                if level == "green":
+                    level = "yellow"
+                reasons.append(f"Burn rate spike ({spike:.1f}x baseline)")
+
+        if level != "green":
+            alerts.append({
+                "project": name,
+                "cwd": cwd,
+                "health": level,
+                "reasons": reasons,
+            })
+
+    return alerts, new_offsets

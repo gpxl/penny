@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 from penny.analysis import (
     Prediction,
     SessionInfo,
+    _compute_project_health,
+    _compute_session_anomalies,
     _hours_until_dated_reset_label,
     _hours_until_reset_label,
     count_tokens_since,
@@ -20,6 +22,7 @@ from penny.analysis import (
     get_usage_bar,
     load_stats_cache,
     past_billing_periods,
+    quick_health_scan,
     reset_label,
     scan_rich_metrics,
     scan_rich_metrics_multi,
@@ -1765,3 +1768,444 @@ class TestProjectUsage:
         for sp, mp in zip(single.project_usage, multi["all"].project_usage):
             assert sp["cwd"] == mp["cwd"]
             assert sp["total_output_tokens"] == mp["total_output_tokens"]
+
+    def test_per_project_tool_errors(self, multi_project_jsonl_dir):
+        """Tool errors from user records are counted per-project and per-session."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            rm = scan_rich_metrics(since)
+        # proj-a has 2 errors (sess-aaa: 1, sess-bbb: 1), proj-b has 1 error
+        proj_a = rm.project_usage[0]
+        proj_b = rm.project_usage[1]
+        assert proj_a["tool_errors"] == 2
+        assert proj_b["tool_errors"] == 1
+        # Per-session errors
+        sess_by_id = {s["session_id"]: s for s in proj_a["sessions"]}
+        assert sess_by_id["sess-aaa"]["tool_errors"] == 1
+        assert sess_by_id["sess-bbb"]["tool_errors"] == 1
+        # Global tool_error_count still correct
+        assert rm.tool_error_count == 3
+
+    def test_per_project_tool_errors_multi_window(self, multi_project_jsonl_dir):
+        """Per-project errors work correctly with scan_rich_metrics_multi."""
+        windows = {"all": datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)}
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            result = scan_rich_metrics_multi(windows)
+        proj_a = result["all"].project_usage[0]
+        assert proj_a["tool_errors"] == 2
+        assert result["all"].tool_error_count == 3
+
+    def test_tool_errors_in_flat_sessions(self, multi_project_jsonl_dir):
+        """session_usage flat list includes tool_errors per session."""
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=multi_project_jsonl_dir):
+            rm = scan_rich_metrics(since)
+        sess_by_id = {s["session_id"]: s for s in rm.session_usage}
+        assert sess_by_id["sess-aaa"]["tool_errors"] == 1
+        assert sess_by_id["sess-ccc"]["tool_errors"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Health Signals
+# ---------------------------------------------------------------------------
+
+
+def _make_project(**overrides):
+    """Helper to build a project dict for health testing."""
+    defaults = {
+        "cwd": "/projects/test",
+        "name": "test",
+        "total_output_tokens": 5000,
+        "total_turns": 50,
+        "tool_errors": 0,
+        "session_count": 3,
+        "sessions": [
+            {
+                "session_id": "s1",
+                "total_output_tokens": 3000,
+                "total_turns": 30,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T10:00:00",
+                "last_ts": "2025-01-10T11:00:00",
+            },
+            {
+                "session_id": "s2",
+                "total_output_tokens": 2000,
+                "total_turns": 20,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T12:00:00",
+                "last_ts": "2025-01-10T13:00:00",
+            },
+        ],
+    }
+    defaults.update(overrides)
+    return defaults
+
+
+class TestSessionAnomalies:
+    """Tests for _compute_session_anomalies."""
+
+    def test_normal_session_not_flagged(self):
+        """A normal session with reasonable metrics is not anomalous."""
+        sessions = [{
+            "total_output_tokens": 2000,
+            "total_turns": 20,
+            "tool_errors": 0,
+            "first_ts": "2025-01-10T10:00:00",
+            "last_ts": "2025-01-10T11:00:00",
+        }]
+        _compute_session_anomalies(sessions)
+        assert sessions[0]["anomaly"] is False
+        assert sessions[0]["duration_m"] == 60.0
+        assert sessions[0]["tokens_per_turn"] == 100.0
+
+    def test_short_expensive_session_flagged(self):
+        """Session < 1 min with > 1000 tokens is anomalous."""
+        sessions = [{
+            "total_output_tokens": 5000,
+            "total_turns": 5,
+            "tool_errors": 0,
+            "first_ts": "2025-01-10T10:00:00",
+            "last_ts": "2025-01-10T10:00:30",
+        }]
+        _compute_session_anomalies(sessions)
+        assert sessions[0]["anomaly"] is True
+        assert any("Short session" in r for r in sessions[0]["anomaly_reasons"])
+
+    def test_high_error_rate_flagged(self):
+        """Session with >50% error rate is anomalous."""
+        sessions = [{
+            "total_output_tokens": 1000,
+            "total_turns": 2,
+            "tool_errors": 5,
+            "first_ts": "2025-01-10T10:00:00",
+            "last_ts": "2025-01-10T11:00:00",
+        }]
+        _compute_session_anomalies(sessions)
+        assert sessions[0]["anomaly"] is True
+        assert any("error rate" in r for r in sessions[0]["anomaly_reasons"])
+
+    def test_high_cost_per_turn_flagged(self):
+        """Session with >5000 tokens per turn is anomalous."""
+        sessions = [{
+            "total_output_tokens": 20000,
+            "total_turns": 2,
+            "tool_errors": 0,
+            "first_ts": "2025-01-10T10:00:00",
+            "last_ts": "2025-01-10T11:00:00",
+        }]
+        _compute_session_anomalies(sessions)
+        assert sessions[0]["anomaly"] is True
+        assert any("cost per turn" in r for r in sessions[0]["anomaly_reasons"])
+
+
+class TestProjectHealth:
+    """Tests for _compute_project_health."""
+
+    def test_healthy_project_is_green(self):
+        """Normal project with low error rate and moderate burn rate is green."""
+        projects = [_make_project()]
+        alerts = _compute_project_health(projects)
+        assert projects[0]["health"] == "green"
+        assert alerts == []
+
+    def test_high_error_rate_yellow(self):
+        """Error rate >20% triggers yellow."""
+        projects = [_make_project(tool_errors=15, total_turns=50)]
+        alerts = _compute_project_health(projects)
+        assert projects[0]["health"] == "yellow"
+        assert len(alerts) == 1
+        assert any("error rate" in r.lower() for r in alerts[0]["reasons"])
+
+    def test_very_high_error_rate_red(self):
+        """Error rate >50% triggers red."""
+        projects = [_make_project(tool_errors=60, total_turns=50)]
+        _compute_project_health(projects)
+        assert projects[0]["health"] == "red"
+
+    def test_high_burn_rate_yellow(self):
+        """Burn rate >20k tok/h triggers yellow."""
+        # 30k tokens over 1h (sessions span 10:00-11:00)
+        projects = [_make_project(
+            total_output_tokens=30000,
+            sessions=[{
+                "session_id": "s1",
+                "total_output_tokens": 30000,
+                "total_turns": 100,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T10:00:00",
+                "last_ts": "2025-01-10T11:00:00",
+            }],
+        )]
+        _compute_project_health(projects)
+        assert projects[0]["health"] == "yellow"
+        assert any("burn rate" in r.lower() for r in projects[0]["health_reasons"])
+
+    def test_very_high_burn_rate_red(self):
+        """Burn rate >50k tok/h triggers red."""
+        projects = [_make_project(
+            total_output_tokens=60000,
+            sessions=[{
+                "session_id": "s1",
+                "total_output_tokens": 60000,
+                "total_turns": 200,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T10:00:00",
+                "last_ts": "2025-01-10T11:00:00",
+            }],
+        )]
+        _compute_project_health(projects)
+        assert projects[0]["health"] == "red"
+
+    def test_high_session_velocity_yellow(self):
+        """Session velocity >5/h triggers yellow."""
+        # 8 sessions over 1 hour
+        sessions = [
+            {"session_id": f"s{i}", "total_output_tokens": 500, "total_turns": 5,
+             "tool_errors": 0,
+             "first_ts": f"2025-01-10T10:{i*7:02d}:00",
+             "last_ts": f"2025-01-10T10:{i*7+5:02d}:00"}
+            for i in range(8)
+        ]
+        projects = [_make_project(sessions=sessions, total_output_tokens=4000)]
+        _compute_project_health(projects)
+        assert projects[0]["health"] == "yellow"
+        assert any("session velocity" in r.lower() for r in projects[0]["health_reasons"])
+
+    def test_short_sessions_red(self):
+        """Avg session <1 min with >5 sessions triggers red."""
+        sessions = [
+            {"session_id": f"s{i}", "total_output_tokens": 500, "total_turns": 5,
+             "tool_errors": 0,
+             "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T10:00:30"}
+            for i in range(6)
+        ]
+        projects = [_make_project(sessions=sessions, total_output_tokens=3000)]
+        _compute_project_health(projects)
+        assert projects[0]["health"] == "red"
+        assert any("short sessions" in r.lower() for r in projects[0]["health_reasons"])
+
+    def test_relative_outlier_detection(self):
+        """Project with burn rate far above median is flagged."""
+        # 3 projects: two normal (1k/h) and one outlier (19k/h)
+        # median ≈ 1000, outlier = 19x median → red
+        normal1 = _make_project(
+            cwd="/projects/normal1", name="normal1",
+            total_output_tokens=1000,
+            sessions=[{
+                "session_id": "s1", "total_output_tokens": 1000, "total_turns": 50,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
+            }],
+        )
+        normal2 = _make_project(
+            cwd="/projects/normal2", name="normal2",
+            total_output_tokens=1000,
+            sessions=[{
+                "session_id": "s1", "total_output_tokens": 1000, "total_turns": 50,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
+            }],
+        )
+        outlier = _make_project(
+            cwd="/projects/outlier", name="outlier",
+            total_output_tokens=19000,
+            sessions=[{
+                "session_id": "s1", "total_output_tokens": 19000, "total_turns": 50,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
+            }],
+        )
+        projects = [outlier, normal1, normal2]
+        _compute_project_health(projects)
+        assert outlier["health"] in ("yellow", "red")
+        assert any("other projects" in r for r in outlier["health_reasons"])
+        assert normal1["health"] == "green"
+
+    def test_spike_detection(self):
+        """Project with recent burn rate 5x normal triggers spike alert."""
+        # Normal project: 5k tokens over 3h = ~1.7k/h
+        projects = [_make_project(
+            total_output_tokens=5000,
+            sessions=[{
+                "session_id": "s1", "total_output_tokens": 5000, "total_turns": 50,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T13:00:00",
+            }],
+        )]
+        # Recent 1h: 10k tokens (6x the 1.7k/h average)
+        recent = [{"cwd": "/projects/test", "total_output_tokens": 10000}]
+        _compute_project_health(projects, recent_projects=recent)
+        assert any("spike" in r.lower() for r in projects[0]["health_reasons"])
+
+    def test_empty_projects_no_crash(self):
+        """Empty project list doesn't crash."""
+        alerts = _compute_project_health([])
+        assert alerts == []
+
+    def test_temper_trap_scenario(self, tmp_path):
+        """Simulate the Temper Trap incident: many short failed sessions, high burn rate.
+
+        This is the end-to-end regression test for the specific incident that
+        motivated this feature.
+        """
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        entries = []
+        # Simulate 4 hours of tight retry loop: 5 parallel sessions every ~2 min
+        # Each session: short (30s), ~2k tokens, fails (high error rate)
+        for batch in range(120):  # 120 batches over 4 hours
+            minute = batch * 2
+            hour = 10 + minute // 60
+            minute_in_hour = minute % 60
+            ts_start = f"2025-01-10T{hour:02d}:{minute_in_hour:02d}:00.000Z"
+            ts_end = f"2025-01-10T{hour:02d}:{minute_in_hour:02d}:30.000Z"
+            for proc in range(5):
+                sid = f"batch-{batch}-{proc}"
+                # Assistant turn (tokens consumed)
+                entries.append({
+                    "type": "assistant",
+                    "timestamp": ts_start,
+                    "sessionId": sid,
+                    "cwd": "/projects/temper-trap",
+                    "message": {
+                        "model": "claude-haiku-4-5-20251001",
+                        "usage": {"output_tokens": 2000},
+                        "content": [],
+                    },
+                })
+                # Error result
+                entries.append({
+                    "type": "user",
+                    "timestamp": ts_end,
+                    "sessionId": sid,
+                    "cwd": "/projects/temper-trap",
+                    "toolUseResult": {"is_error": True},
+                })
+
+        _write_jsonl(proj / "temper-trap.jsonl", entries)
+        since = datetime(2025, 1, 10, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            rm = scan_rich_metrics(since)
+
+        assert len(rm.project_usage) == 1
+        proj_data = rm.project_usage[0]
+        assert proj_data["health"] == "red"
+        assert proj_data["tool_errors"] == 600
+        assert len(rm.health_alerts) == 1
+        assert rm.health_alerts[0]["health"] == "red"
+        # Should flag multiple issues
+        reasons = proj_data["health_reasons"]
+        assert len(reasons) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Quick Health Scan
+# ---------------------------------------------------------------------------
+
+class TestQuickHealthScan:
+    """Tests for quick_health_scan incremental JSONL tail."""
+
+    def test_reads_new_lines_only(self, tmp_path):
+        """Only processes lines added after the last offset."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        jsonl = proj / "s.jsonl"
+
+        # Write initial data
+        initial = json.dumps({
+            "type": "assistant", "timestamp": "2025-01-10T10:00:00.000Z",
+            "sessionId": "s1", "cwd": "/projects/foo",
+            "message": {"usage": {"output_tokens": 100}, "content": []},
+        })
+        jsonl.write_text(initial + "\n")
+
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            alerts1, offsets1 = quick_health_scan({})
+
+        # Append more data
+        new_line = json.dumps({
+            "type": "assistant", "timestamp": "2025-01-10T10:01:00.000Z",
+            "sessionId": "s2", "cwd": "/projects/foo",
+            "message": {"usage": {"output_tokens": 200}, "content": []},
+        })
+        with open(jsonl, "a") as f:
+            f.write(new_line + "\n")
+
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            alerts2, offsets2 = quick_health_scan(offsets1)
+
+        # Second scan should see only the new data
+        assert offsets2[str(jsonl)] > offsets1[str(jsonl)]
+
+    def test_detects_high_error_rate(self, tmp_path):
+        """Flags projects with high error rate in new data."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        jsonl = proj / "s.jsonl"
+
+        lines = []
+        # 1 turn, 5 errors → 83% error rate
+        lines.append(json.dumps({
+            "type": "assistant", "timestamp": "2025-01-10T10:00:00.000Z",
+            "sessionId": "s1", "cwd": "/projects/broken",
+            "message": {"usage": {"output_tokens": 1000}, "content": []},
+        }))
+        for _ in range(5):
+            lines.append(json.dumps({
+                "type": "user", "timestamp": "2025-01-10T10:00:01.000Z",
+                "sessionId": "s1", "cwd": "/projects/broken",
+                "toolUseResult": {"is_error": True},
+            }))
+        jsonl.write_text("\n".join(lines) + "\n")
+
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            alerts, _ = quick_health_scan({})
+
+        assert len(alerts) == 1
+        assert alerts[0]["health"] == "red"
+        assert alerts[0]["project"] == "broken"
+
+    def test_detects_burn_rate_spike(self, tmp_path):
+        """Flags projects with burn rate far above baseline."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        jsonl = proj / "s.jsonl"
+
+        # Lots of tokens in one minute
+        lines = []
+        for i in range(10):
+            lines.append(json.dumps({
+                "type": "assistant", "timestamp": "2025-01-10T10:00:00.000Z",
+                "sessionId": f"s{i}", "cwd": "/projects/spiking",
+                "message": {"usage": {"output_tokens": 5000}, "content": []},
+            }))
+        jsonl.write_text("\n".join(lines) + "\n")
+
+        # Baseline: 1000 tok/h (spiking at 50k tokens → extrapolated 3M/h = 3000x)
+        baselines = {"/projects/spiking": {"avg_tokens_per_hour": 1000}}
+
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            alerts, _ = quick_health_scan({}, baselines=baselines)
+
+        assert len(alerts) == 1
+        assert alerts[0]["health"] == "red"
+        assert any("spike" in r.lower() for r in alerts[0]["reasons"])
+
+    def test_no_alert_for_normal_activity(self, tmp_path):
+        """Normal activity with low error rate produces no alerts."""
+        proj = tmp_path / ".claude" / "projects" / "proj"
+        proj.mkdir(parents=True)
+        jsonl = proj / "s.jsonl"
+
+        lines = [json.dumps({
+            "type": "assistant", "timestamp": "2025-01-10T10:00:00.000Z",
+            "sessionId": "s1", "cwd": "/projects/healthy",
+            "message": {"usage": {"output_tokens": 500}, "content": []},
+        })]
+        jsonl.write_text("\n".join(lines) + "\n")
+
+        with patch("penny.analysis.Path.home", return_value=tmp_path):
+            alerts, _ = quick_health_scan({})
+
+        assert alerts == []

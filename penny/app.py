@@ -228,6 +228,11 @@ class PennyApp(NSObject):
             300.0, self, "_timerFired:", None, True
         )
 
+        # Health check timer: 1 minute (lightweight JSONL tail)
+        self._health_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            60.0, self, "_healthCheckFired:", None, True
+        )
+
         # Config watcher: poll mtime every 5s (single stat() syscall, ~1μs)
         self._config_mtime: float | None = None
         self._config_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -312,6 +317,15 @@ class PennyApp(NSObject):
 
     def _timerFired_(self, timer: Any) -> None:
         self._worker.fetch()
+
+    def _healthCheckFired_(self, timer: Any) -> None:
+        self._worker.health_check()
+
+    def _didHealthCheck_(self, result: Any) -> None:
+        """Handle health check result on main thread."""
+        if not isinstance(result, dict):
+            return
+        # Dashboard picks up health_alerts from state on next poll
 
     # Bar animation constants
     _CAL_BAR_TICKS = 20            # Sequential bar calibration: 2.0s total

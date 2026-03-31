@@ -277,6 +277,30 @@ def multi_project_jsonl_dir(tmp_path):
                 "content": [],
             },
         }),
+        # Tool error in proj-a, sess-aaa
+        json.dumps({
+            "type": "user",
+            "timestamp": "2025-01-10T10:30:00.000Z",
+            "sessionId": "sess-aaa",
+            "cwd": "/home/user/proj-a",
+            "toolUseResult": {"is_error": True},
+        }),
+        # Tool error in proj-a, sess-bbb
+        json.dumps({
+            "type": "user",
+            "timestamp": "2025-01-10T12:30:00.000Z",
+            "sessionId": "sess-bbb",
+            "cwd": "/home/user/proj-a",
+            "toolUseResult": {"is_error": True},
+        }),
+        # Tool error in proj-b, sess-ccc
+        json.dumps({
+            "type": "user",
+            "timestamp": "2025-01-10T14:30:00.000Z",
+            "sessionId": "sess-ccc",
+            "cwd": "/home/user/proj-b",
+            "toolUseResult": {"is_error": True},
+        }),
     ]
     convo.write_text("\n".join(lines), encoding="utf-8")
     os.utime(convo, None)

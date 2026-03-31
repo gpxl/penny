@@ -609,6 +609,19 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .tbl-sm td { padding:2px 6px; }
     .btn-resume { font-size:10px; padding:2px 8px; border:1px solid #e5e7eb; border-radius:3px; background:#fff; cursor:pointer; color:#3b82f6; }
     .btn-resume:hover { background:#eff6ff; }
+    /* Health indicators */
+    .health-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; flex-shrink:0; }
+    .health-yellow { background:#eab308; }
+    .health-red { background:#ef4444; animation:healthPulse 1.5s infinite; }
+    @keyframes healthPulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+    .health-banner { padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:12px; display:flex; align-items:center; gap:8px; }
+    .health-banner.banner-red { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
+    .health-banner.banner-yellow { background:#fefce8; border:1px solid #fef08a; color:#854d0e; }
+    .health-banner .dismiss { cursor:pointer; margin-left:auto; opacity:0.5; font-size:16px; line-height:1; }
+    .health-banner .dismiss:hover { opacity:1; }
+    .anomaly-row { background:#fef2f2; border-left:3px solid #ef4444; }
+    .anomaly-row-yellow { background:#fefce8; border-left:3px solid #eab308; }
+    .proj-rate { color:#9ca3af; font-size:11px; }
   </style>
 </head>
 <body>
@@ -618,6 +631,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <button class="nav-tab" onclick="showPage('settings')">Settings</button>
 </div>
 
+<div id="health-banner"></div>
 <div id="page-dashboard">
 <div class="grid">
   <div class="card" id="card-period"><h2>Weekly Budget</h2><p>…</p></div>
@@ -1200,6 +1214,9 @@ function renderProjectsCard(rm) {
     {key:'total_output_tokens', label:'Tokens'},
     {key:'_pct', label:'Share'},
     {key:'total_turns', label:'Turns'},
+    {key:'duration_m', label:'Duration'},
+    {key:'tool_errors', label:'Errors'},
+    {key:'tokens_per_turn', label:'Tok/Turn'},
     {key:'last_ts', label:'Last Active'},
   ];
   return projects.map((p, pi) => {
@@ -1223,9 +1240,19 @@ function renderProjectsCard(rm) {
       const shortId = sid.length > 12 ? sid.slice(0, 8) + '\u2026' : sid;
       const label = s.title || shortId;
       const titleAttr = s.title ? `${s.title} (${sid})` : sid;
-      return `<tr>
+      const durM = s.duration_m != null ? (s.duration_m < 60 ? s.duration_m.toFixed(0) + 'm' : (s.duration_m / 60).toFixed(1) + 'h') : '';
+      const errs = s.tool_errors || 0;
+      const tpt = s.tokens_per_turn != null ? Math.round(s.tokens_per_turn) : '';
+      const isAnomaly = s.anomaly === true;
+      const anomalyReasons = (s.anomaly_reasons || []).join('; ');
+      const rowCls = isAnomaly ? ' class="anomaly-row"' : '';
+      const rowTitle = isAnomaly ? ` title="${anomalyReasons}"` : '';
+      return `<tr${rowCls}${rowTitle}>
         <td title="${titleAttr}" style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}</td>
         <td>${sK}k</td><td>${sPct}%</td><td>${s.total_turns}</td>
+        <td>${durM}</td>
+        <td${errs > 0 ? ' style="color:#ef4444;font-weight:600"' : ''}>${errs || ''}</td>
+        <td${isAnomaly ? ' style="color:#ef4444"' : ''}>${tpt}</td>
         <td>${lastActive}</td>
         <td><button class="btn-resume" onclick="resumeSession('${sid}','${(p.cwd||'').replace(/'/g,"\\'")}')">Resume</button></td>
       </tr>`;
@@ -1233,13 +1260,23 @@ function renderProjectsCard(rm) {
     const sessTable = sessions.length ? `<table class="tbl-sm">
       <tr>${headers}</tr>
       ${sessRows}</table>` : '<p style="color:#9ca3af;font-size:11px;margin:4px 0">No session data</p>';
-    return `<details class="proj-row">
+    // Health dot
+    const healthDot = p.health && p.health !== 'green'
+      ? `<span class="health-dot health-${p.health}" title="${(p.health_reasons||[]).join('; ')}"></span>`
+      : '';
+    // Rate stats
+    const burnRate = p.burn_rate > 0 ? Math.round(p.burn_rate / 1000) + 'k/h' : '';
+    const errRate = p.error_rate > 0 ? p.error_rate.toFixed(0) + '% err' : '';
+    return `<details class="proj-row"${p.health === 'red' ? ' open' : ''}>
       <summary>
+        ${healthDot}
         <span class="proj-name" title="${p.cwd||''}">${p.name}</span>
         <span class="proj-stat">${kTokens}k tokens</span>
         <span class="proj-stat">${pct}%</span>
         <span class="proj-stat">${p.total_turns} turns</span>
         <span class="proj-stat">${p.session_count} sessions</span>
+        ${burnRate ? `<span class="proj-rate">${burnRate}</span>` : ''}
+        ${errRate ? `<span class="proj-rate" style="color:#ef4444">${errRate}</span>` : ''}
       </summary>
       ${sessTable}
     </details>`;
@@ -1264,11 +1301,43 @@ function renderPluginCards(cards) {
   ).join('');
 }
 
+const dismissedAlerts = new Set();
+function renderHealthBanner(data) {
+  const el = document.getElementById('health-banner');
+  const state = data.state || {};
+  const rm = getMetricsForWindow(data);
+  // Merge alerts from state (quick scan) and rich_metrics (full scan)
+  const stateAlerts = state.health_alerts || [];
+  const rmAlerts = (rm && rm.health_alerts) || [];
+  // Deduplicate by cwd, prefer most severe
+  const byProject = {};
+  [...stateAlerts, ...rmAlerts].forEach(a => {
+    const existing = byProject[a.cwd];
+    if (!existing || (a.health === 'red' && existing.health !== 'red')) {
+      byProject[a.cwd] = a;
+    }
+  });
+  const alerts = Object.values(byProject)
+    .filter(a => !dismissedAlerts.has(a.cwd))
+    .sort((a, b) => (a.health === 'red' ? 0 : 1) - (b.health === 'red' ? 0 : 1));
+  if (!alerts.length) { el.innerHTML = ''; return; }
+  el.innerHTML = alerts.map(a => {
+    const icon = a.health === 'red' ? '&#9888;' : '&#9888;';
+    const reasons = (a.reasons || []).join(', ');
+    return `<div class="health-banner banner-${a.health}">
+      <span>${icon}</span>
+      <span><strong>${a.project}</strong> &mdash; ${reasons}</span>
+      <span class="dismiss" onclick="dismissedAlerts.add('${a.cwd.replace(/'/g,"\\'")}');renderHealthBanner(lastData)">&times;</span>
+    </div>`;
+  }).join('');
+}
+
 function render(data) {
   lastData = data;
   const pred = data.prediction || {};
   const state = data.state || {};
   const samples = data.intraday_samples || [];
+  renderHealthBanner(data);
   document.getElementById('card-period').innerHTML = `<h2>Weekly Budget${tip("Your cumulative output token usage this billing week. Resets every 7 days (Fri 20:00 UTC). Tracked against Anthropic Claude Pro or Max plan limits.")}</h2>` + renderPeriod(pred, samples);
   document.getElementById('card-session').innerHTML = `<h2>Session Budget${tip("Output token usage since your last rate-limit boundary (~5h windows). Resets independently of the weekly budget.")}</h2>` + renderSession(pred);
   renderMetricsFilterBar();
