@@ -1959,15 +1959,15 @@ class TestProjectHealth:
 
     def test_high_session_velocity_yellow(self):
         """Session velocity >5/h triggers yellow."""
-        # 8 sessions over 1 hour
+        # 8 sessions over 1 hour (needs ≥5k tokens to pass minimum sample gate)
         sessions = [
-            {"session_id": f"s{i}", "total_output_tokens": 500, "total_turns": 5,
+            {"session_id": f"s{i}", "total_output_tokens": 1000, "total_turns": 5,
              "tool_errors": 0,
              "first_ts": f"2025-01-10T10:{i*7:02d}:00",
              "last_ts": f"2025-01-10T10:{i*7+5:02d}:00"}
             for i in range(8)
         ]
-        projects = [_make_project(sessions=sessions, total_output_tokens=4000)]
+        projects = [_make_project(sessions=sessions, total_output_tokens=8000)]
         _compute_project_health(projects)
         assert projects[0]["health"] == "yellow"
         assert any("session velocity" in r.lower() for r in projects[0]["health_reasons"])
@@ -1987,31 +1987,31 @@ class TestProjectHealth:
 
     def test_relative_outlier_detection(self):
         """Project with burn rate far above median is flagged."""
-        # 3 projects: two normal (1k/h) and one outlier (19k/h)
-        # median ≈ 1000, outlier = 19x median → red
+        # 3 projects: two normal (6k/h) and one outlier (40k/h)
+        # All above 5k minimum; outlier below 50k absolute threshold but >5x median
         normal1 = _make_project(
             cwd="/projects/normal1", name="normal1",
-            total_output_tokens=1000,
+            total_output_tokens=6000,
             sessions=[{
-                "session_id": "s1", "total_output_tokens": 1000, "total_turns": 50,
+                "session_id": "s1", "total_output_tokens": 6000, "total_turns": 50,
                 "tool_errors": 0,
                 "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
             }],
         )
         normal2 = _make_project(
             cwd="/projects/normal2", name="normal2",
-            total_output_tokens=1000,
+            total_output_tokens=6000,
             sessions=[{
-                "session_id": "s1", "total_output_tokens": 1000, "total_turns": 50,
+                "session_id": "s1", "total_output_tokens": 6000, "total_turns": 50,
                 "tool_errors": 0,
                 "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
             }],
         )
         outlier = _make_project(
             cwd="/projects/outlier", name="outlier",
-            total_output_tokens=19000,
+            total_output_tokens=40000,
             sessions=[{
-                "session_id": "s1", "total_output_tokens": 19000, "total_turns": 50,
+                "session_id": "s1", "total_output_tokens": 40000, "total_turns": 50,
                 "tool_errors": 0,
                 "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
             }],
@@ -2037,6 +2037,23 @@ class TestProjectHealth:
         recent = [{"cwd": "/projects/test", "total_output_tokens": 10000}]
         _compute_project_health(projects, recent_projects=recent)
         assert any("spike" in r.lower() for r in projects[0]["health_reasons"])
+
+    def test_tiny_sample_not_alerted(self):
+        """Projects with very few tokens should not trigger burn rate or velocity alerts."""
+        # 540 tokens in a very short session = extreme extrapolated rate,
+        # but should be suppressed by minimum sample threshold.
+        projects = [_make_project(
+            total_output_tokens=540,
+            sessions=[{
+                "session_id": "s1", "total_output_tokens": 540, "total_turns": 5,
+                "tool_errors": 0,
+                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T10:00:36",
+            }],
+        )]
+        _compute_project_health(projects)
+        assert projects[0]["health"] == "green"
+        assert not any("burn rate" in r.lower() for r in projects[0]["health_reasons"])
+        assert not any("velocity" in r.lower() for r in projects[0]["health_reasons"])
 
     def test_empty_projects_no_crash(self):
         """Empty project list doesn't crash."""

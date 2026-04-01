@@ -691,10 +691,14 @@ def _compute_project_health(
         p["session_velocity"] = round(session_velocity, 2)
         p["avg_session_duration_m"] = round(avg_duration, 1)
 
+    # Minimum tokens to avoid noisy alerts from tiny samples
+    _MIN_TOKENS_FOR_ALERT = 5_000
+
     # Layer 1: Absolute thresholds
     for p in projects:
         reasons: list[str] = []
         level = "green"
+        tokens = p.get("total_output_tokens", 0)
 
         er = p["error_rate"]
         if er > 50:
@@ -705,20 +709,22 @@ def _compute_project_health(
             reasons.append(f"Elevated error rate ({er:.0f}%)")
 
         br = p["burn_rate"]
-        if br > 50_000:
-            level = "red"
-            reasons.append(f"Very high burn rate ({br/1000:.0f}k tok/h)")
-        elif br > 20_000:
-            level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
-            reasons.append(f"High burn rate ({br/1000:.0f}k tok/h)")
+        if tokens >= _MIN_TOKENS_FOR_ALERT:
+            if br > 50_000:
+                level = "red"
+                reasons.append(f"Very high burn rate ({br/1000:.0f}k tok/h)")
+            elif br > 20_000:
+                level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
+                reasons.append(f"High burn rate ({br/1000:.0f}k tok/h)")
 
         sv = p["session_velocity"]
-        if sv > 10:
-            level = "red"
-            reasons.append(f"Very high session velocity ({sv:.1f}/h)")
-        elif sv > 5:
-            level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
-            reasons.append(f"High session velocity ({sv:.1f}/h)")
+        if tokens >= _MIN_TOKENS_FOR_ALERT:
+            if sv > 10:
+                level = "red"
+                reasons.append(f"Very high session velocity ({sv:.1f}/h)")
+            elif sv > 5:
+                level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
+                reasons.append(f"High session velocity ({sv:.1f}/h)")
 
         avg_d = p["avg_session_duration_m"]
         n_sess = len(p.get("sessions", []))
@@ -733,15 +739,16 @@ def _compute_project_health(
         p["health"] = level
         p["health_reasons"] = reasons
 
-    # Layer 2: Relative outlier detection (2+ projects)
-    if len(projects) >= 2:
-        burn_rates = sorted(p["burn_rate"] for p in projects)
-        error_rates = sorted(p["error_rate"] for p in projects)
+    # Layer 2: Relative outlier detection (2+ projects, only with enough data)
+    significant = [p for p in projects if p.get("total_output_tokens", 0) >= _MIN_TOKENS_FOR_ALERT]
+    if len(significant) >= 2:
+        burn_rates = sorted(p["burn_rate"] for p in significant)
+        error_rates = sorted(p["error_rate"] for p in significant)
         n = len(burn_rates)
         median_br = (burn_rates[n // 2] + burn_rates[(n - 1) // 2]) / 2
         median_er = (error_rates[n // 2] + error_rates[(n - 1) // 2]) / 2
 
-        for p in projects:
+        for p in significant:
             if median_br > 0 and p["burn_rate"] > 5 * median_br:
                 if p["health"] != "red":
                     p["health"] = "red"

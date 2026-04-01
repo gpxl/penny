@@ -1305,19 +1305,9 @@ const dismissedAlerts = new Set();
 function renderHealthBanner(data) {
   const el = document.getElementById('health-banner');
   const state = data.state || {};
-  const rm = getMetricsForWindow(data);
-  // Merge alerts from state (quick scan) and rich_metrics (full scan)
-  const stateAlerts = state.health_alerts || [];
-  const rmAlerts = (rm && rm.health_alerts) || [];
-  // Deduplicate by cwd, prefer most severe
-  const byProject = {};
-  [...stateAlerts, ...rmAlerts].forEach(a => {
-    const existing = byProject[a.cwd];
-    if (!existing || (a.health === 'red' && existing.health !== 'red')) {
-      byProject[a.cwd] = a;
-    }
-  });
-  const alerts = Object.values(byProject)
+  // Use only billing-period-scoped alerts (state.health_alerts), not
+  // window-dependent rich_metrics alerts which reflect historical data.
+  const alerts = (state.health_alerts || [])
     .filter(a => !dismissedAlerts.has(a.cwd))
     .sort((a, b) => (a.health === 'red' ? 0 : 1) - (b.health === 'red' ? 0 : 1));
   if (!alerts.length) { el.innerHTML = ''; return; }
