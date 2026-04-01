@@ -131,7 +131,7 @@ class BackgroundWorker:
         windows = {
             "recent": now_utc - timedelta(hours=1),
             "session": session_dt,
-            "week": now_utc - timedelta(days=7),
+            "week": start,  # current billing period — baselines scoped here
             "month": now_utc - timedelta(days=28),
             "all": datetime(2024, 1, 1, tzinfo=timezone.utc),
         }
@@ -142,10 +142,11 @@ class BackgroundWorker:
             k: dataclasses.asdict(v) for k, v in multi.items()
         }
 
-        # Update health baselines + alerts from full scan
-        state["health_alerts"] = primary.health_alerts
+        # Update health baselines + alerts from current billing period
+        week_metrics = multi.get("week", primary)
+        state["health_alerts"] = week_metrics.health_alerts
         baselines: dict[str, dict] = {}
-        for p in primary.project_usage:
+        for p in week_metrics.project_usage:
             baselines[p["cwd"]] = {
                 "avg_tokens_per_hour": p.get("burn_rate", 0),
                 "avg_error_rate": p.get("error_rate", 0),

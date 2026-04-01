@@ -318,6 +318,81 @@ class TestHealthCheck:
         call_args = mock_scan.call_args
         assert call_args.args[0] == {}
 
+    def test_fetch_data_baselines_from_billing_period(self):
+        """_fetch_data derives health baselines from current billing period, not month."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        fake_state = {
+            "agents_running": [],
+            "session_history": [],
+            "last_session_scan": None,
+            "plugin_state": {},
+        }
+        fake_period_start = datetime(2024, 1, 5, 20, 0, 0, tzinfo=timezone.utc)
+
+        fake_prediction = MagicMock()
+        fake_prediction.session_start = datetime(
+            2024, 1, 5, 12, 30, 0, tzinfo=timezone.utc
+        ).isoformat()
+
+        # Week metrics have a different burn rate than month metrics
+        week_project = {
+            "cwd": "/projects/penny",
+            "burn_rate": 15000,
+            "error_rate": 1.0,
+        }
+        month_project = {
+            "cwd": "/projects/penny",
+            "burn_rate": 50000,
+            "error_rate": 5.0,
+        }
+
+        mock_week = MagicMock()
+        mock_week.project_usage = [week_project]
+        mock_week.health_alerts = [{"project": "penny", "health": "green"}]
+
+        mock_month = MagicMock()
+        mock_month.project_usage = [month_project]
+        mock_month.health_alerts = [{"project": "penny", "health": "red"}]
+
+        saved_states = []
+
+        def capture_save(s):
+            saved_states.append(dict(s))
+
+        with (
+            patch("penny.state.load_state", return_value=fake_state),
+            patch("penny.state.reset_period_if_needed", return_value=fake_state),
+            patch(
+                "penny.analysis.current_billing_period",
+                return_value=(fake_period_start, None),
+            ),
+            patch(
+                "penny.state.detect_new_sessions", return_value=(fake_state, [])
+            ),
+            patch("penny.state.save_state", side_effect=capture_save),
+            patch("penny.spawner.check_running_agents", return_value=[]),
+            patch("penny.analysis.build_prediction", return_value=fake_prediction),
+            patch(
+                "penny.analysis.scan_rich_metrics_multi",
+                return_value={"month": mock_month, "week": mock_week},
+            ),
+            patch("penny.status_fetcher.get_cached_status", return_value=None),
+            patch("penny.update_checker.should_check", return_value=False),
+            patch("dataclasses.asdict", side_effect=lambda x: {"mocked": True}),
+        ):
+            BackgroundWorker._fetch_data(force=False)
+
+        # Baselines must come from week (billing period), not month
+        final = saved_states[-1]
+        bl = final["_health_baselines"]["/projects/penny"]
+        assert bl["avg_tokens_per_hour"] == 15000  # week, not 50000
+        assert bl["avg_error_rate"] == 1.0  # week, not 5.0
+
+        # Health alerts should also come from week window
+        assert final["health_alerts"] == [{"project": "penny", "health": "green"}]
+
     # ------------------------------------------------------------------
     # health_check – public entry point (threading behaviour)
     # ------------------------------------------------------------------
