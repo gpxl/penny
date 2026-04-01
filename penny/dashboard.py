@@ -1205,9 +1205,14 @@ function onSortClick(projIdx, key) {
   projSortState[projIdx] = st;
   renderMetricsCards(lastData);
 }
-function renderProjectsCard(rm) {
+function renderProjectsCard(rm, data) {
   const projects = (rm && rm.project_usage) || [];
   if (!projects.length) return '<p style="color:#9ca3af;font-size:12px">No project data yet.</p>';
+  // Build billing-period health lookup from state.health_alerts (not window-dependent)
+  const billingHealth = {};
+  ((data && data.state && data.state.health_alerts) || []).forEach(a => {
+    billingHealth[a.cwd] = a;
+  });
   const grandTotal = projects.reduce((s, p) => s + p.total_output_tokens, 0) || 1;
   const cols = [
     {key:'title', label:'Session'},
@@ -1260,9 +1265,12 @@ function renderProjectsCard(rm) {
     const sessTable = sessions.length ? `<table class="tbl-sm">
       <tr>${headers}</tr>
       ${sessRows}</table>` : '<p style="color:#9ca3af;font-size:11px;margin:4px 0">No session data</p>';
-    // Health dot
-    const healthDot = p.health && p.health !== 'green'
-      ? `<span class="health-dot health-${p.health}" title="${(p.health_reasons||[]).join('; ')}"></span>`
+    // Health dot — use billing-period health for summary row, not window-dependent
+    const bh = billingHealth[p.cwd];
+    const dotHealth = bh ? bh.health : 'green';
+    const dotReasons = bh ? (bh.reasons || []).join('; ') : '';
+    const healthDot = dotHealth !== 'green'
+      ? `<span class="health-dot health-${dotHealth}" title="${dotReasons}"></span>`
       : '';
     // Rate stats
     const burnRate = p.burn_rate > 0 ? Math.round(p.burn_rate / 1000) + 'k/h' : '';
@@ -1342,7 +1350,7 @@ function render(data) {
   const rm = getMetricsForWindow(data);
   const hasProjects = rm && (rm.project_usage || []).length > 0;
   projectsEl.style.display = hasProjects ? '' : 'none';
-  if (hasProjects) projectsEl.innerHTML = `<h2>Projects${tip("Token usage breakdown by project (working directory). Click a project to see its individual sessions.")}</h2>` + renderProjectsCard(rm);
+  if (hasProjects) projectsEl.innerHTML = `<h2>Projects${tip("Token usage breakdown by project (working directory). Click a project to see its individual sessions.")}</h2>` + renderProjectsCard(rm, data);
   renderPluginCards(data.plugin_cards);
 }
 
