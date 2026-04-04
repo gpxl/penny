@@ -14,11 +14,13 @@ Always consult documentation index and project files rather than relying on trai
 |commands.md: All dev/test/lint commands
 |testing.md: Testing philosophy, conftest fixtures, quality checklist
 
-[Agents]|root: .claude/agents/
-|code-quality.md: Evaluates tests/coverage/lint — does NOT write tests (haiku)
-|test-writer.md: Writes behavioral tests for coverage gaps (sonnet)
-|commit.md: Gates on quality PASS, commits, opens PR (sonnet)
-|release.md: Version bump, changelog, tag, GitHub Release (sonnet)
+[Agents]|global: ~/.claude/agents/ (config-driven, read Agent Config below)
+|code-quality: Evaluates tests/coverage/lint — does NOT write tests (haiku)
+|test-writer: Writes behavioral tests for coverage gaps (sonnet)
+|commit: Gates on quality PASS, commits, opens PR (sonnet)
+|release: Version bump, changelog, tag, GitHub Release (sonnet)
+|verification: Adversarial verification before reporting done (sonnet)
+|pr-monitor: Watch CI, merge on green (sonnet)
 ```
 
 ## Project Overview
@@ -101,3 +103,34 @@ tests/
 ## Git Workflow (CRITICAL)
 
 **NEVER push directly to main.** All changes must go through PRs. See `.claude/rules/branching.md`.
+
+## Agent Config
+
+| Key | Value |
+|-----|-------|
+| language | Python 3.9+ |
+| framework | PyObjC (AppKit/Foundation) |
+| package_dir | penny/ |
+| test_dir | tests/ |
+| test_cmd | python3 -m pytest tests/ -v --cov=penny --cov-report=term-missing --cov-fail-under=50 |
+| coverage_cmd | python3 -m pytest tests/ --cov=penny --cov-report=term-missing --cov-fail-under=50 -v |
+| coverage_overall | 50 |
+| coverage_per_module | 80 |
+| coverage_tiers | (none) |
+| lint_cmd | ruff check penny/ tests/ |
+| lint_fix_cmd | ruff check penny/ tests/ --fix |
+| build_cmd | (none) |
+| test_pattern | penny/foo.py -> tests/test_foo.py |
+| test_framework | pytest |
+| test_fixtures | conftest.py: tmp_state, sample_jsonl_dir, mock_subprocess, sample_config; macOS stubs: objc, AppKit, Foundation, setproctitle |
+| exclusions | penny/popover_vc.py, penny/ui_components.py, penny/onboarding.py |
+| exclusion_reason | Require live AppKit event loop |
+| version_files | penny/__init__.py (__version__), pyproject.toml (version), Penny.app/Contents/Info.plist (CFBundleVersion + CFBundleShortVersionString) |
+| version_strategy | semver-beta |
+| branch_pattern | <type>/<description> |
+| deploy_model | discrete |
+| pr_merge_strategy | merge |
+| release_merge_strategy | squash |
+| browser_validation | (none) |
+| quality_gate_pattern | penny/*.py |
+| co_author | Claude <noreply@anthropic.com> |

@@ -13,6 +13,13 @@ Penny has four agents for automated workflows:
 
 ## Enforcement Rules (CRITICAL)
 
+### Manual Git Operations Are Prohibited
+
+**NEVER run `git add`, `git commit`, or `git push` directly.** All commits
+must go through the agent pipeline. When the user says "commit", "push",
+"yes", "ship it", or confirms a commit — invoke the code-quality agent,
+then delegate to the commit agent. Never bypass this with manual git commands.
+
 ### Code-Quality Gate
 
 The code-quality agent **must** run before the commit agent for any change
