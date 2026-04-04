@@ -144,6 +144,11 @@ class TestBackgroundWorker:
         # Mock prediction with a session_start without timezone info
         fake_prediction = MagicMock()
         fake_prediction.session_start = datetime(2024, 1, 5, 12, 30, 0).isoformat()
+        fake_prediction.projected_pct_all = 50.0
+        fake_prediction.pct_all = 30.0
+        fake_prediction.budget_all = 1_000_000
+        fake_prediction.days_remaining = 5.0
+        fake_prediction.reset_label = "Jan 12 at 8pm"
 
         # Mock a dataclass-like object for metrics
         mock_metrics = MagicMock()
@@ -180,6 +185,11 @@ class TestBackgroundWorker:
         # Mock prediction with valid session_start
         fake_prediction = MagicMock()
         fake_prediction.session_start = datetime(2024, 1, 5, 12, 30, 0, tzinfo=timezone.utc).isoformat()
+        fake_prediction.projected_pct_all = 50.0
+        fake_prediction.pct_all = 30.0
+        fake_prediction.budget_all = 1_000_000
+        fake_prediction.days_remaining = 5.0
+        fake_prediction.reset_label = "Jan 12 at 8pm"
 
         # Mock live status with no outage
         fake_live = MagicMock()
@@ -219,14 +229,11 @@ class TestHealthCheck:
     # _do_health_check – static method, testable in isolation
     # ------------------------------------------------------------------
 
-    def test_do_health_check_passes_offsets_and_baselines_to_scan(self):
-        """_do_health_check forwards _health_scan_offsets and _health_baselines
-        from state as positional/keyword args to quick_health_scan."""
+    def test_do_health_check_passes_offsets_to_scan(self):
+        """_do_health_check forwards _health_scan_offsets from state to quick_health_scan."""
         saved_offsets = {"/tmp/project/session.jsonl": 128}
-        saved_baselines = {"/tmp/project": {"avg_tokens_per_hour": 50}}
         fake_state = {
             "_health_scan_offsets": saved_offsets,
-            "_health_baselines": saved_baselines,
         }
 
         with (
@@ -236,13 +243,13 @@ class TestHealthCheck:
         ):
             BackgroundWorker._do_health_check()
 
-        mock_scan.assert_called_once_with(saved_offsets, baselines=saved_baselines)
+        mock_scan.assert_called_once_with(saved_offsets)
 
     def test_do_health_check_saves_updated_offsets_to_state(self):
         """_do_health_check must persist the new offsets returned by quick_health_scan."""
         old_offsets = {"/tmp/a.jsonl": 0}
         new_offsets = {"/tmp/a.jsonl": 512}
-        fake_state = {"_health_scan_offsets": old_offsets, "_health_baselines": {}}
+        fake_state = {"_health_scan_offsets": old_offsets}
 
         saved_states = []
         with (
@@ -258,7 +265,7 @@ class TestHealthCheck:
     def test_do_health_check_writes_alerts_to_state_when_present(self):
         """When quick_health_scan returns alerts, they must be stored in state['health_alerts']."""
         alerts = [{"type": "high_burn", "project": "/tmp/proj"}]
-        fake_state = {"_health_scan_offsets": {}, "_health_baselines": {}}
+        fake_state = {"_health_scan_offsets": {}}
 
         saved_states = []
         with (
@@ -274,7 +281,6 @@ class TestHealthCheck:
         """When quick_health_scan returns no alerts, state['health_alerts'] must not be set."""
         fake_state = {
             "_health_scan_offsets": {},
-            "_health_baselines": {},
             "health_alerts": [{"type": "pre-existing"}],
         }
 
@@ -292,7 +298,7 @@ class TestHealthCheck:
     def test_do_health_check_returns_health_alerts_dict(self):
         """_do_health_check must return {'health_alerts': <list>}."""
         alerts = [{"type": "error_spike", "project": "/tmp/proj"}]
-        fake_state = {"_health_scan_offsets": {}, "_health_baselines": {}}
+        fake_state = {"_health_scan_offsets": {}}
 
         with (
             patch("penny.state.load_state", return_value=fake_state),
@@ -318,8 +324,8 @@ class TestHealthCheck:
         call_args = mock_scan.call_args
         assert call_args.args[0] == {}
 
-    def test_fetch_data_baselines_from_billing_period(self):
-        """_fetch_data derives health baselines from current billing period, not month."""
+    def test_fetch_data_health_alerts_use_week_projects(self):
+        """_fetch_data passes week project data (not month) to compute_health_alerts."""
         from datetime import datetime, timezone
         from unittest.mock import MagicMock
 
@@ -335,26 +341,26 @@ class TestHealthCheck:
         fake_prediction.session_start = datetime(
             2024, 1, 5, 12, 30, 0, tzinfo=timezone.utc
         ).isoformat()
+        fake_prediction.projected_pct_all = 50.0
+        fake_prediction.pct_all = 30.0
+        fake_prediction.budget_all = 1_000_000
+        fake_prediction.days_remaining = 5.0
+        fake_prediction.reset_label = "Jan 12 at 8pm"
 
-        # Week metrics have a different burn rate than month metrics
         week_project = {
             "cwd": "/projects/penny",
-            "burn_rate": 15000,
-            "error_rate": 1.0,
+            "name": "penny",
+            "health": "green",
+            "health_reasons": [],
         }
-        month_project = {
-            "cwd": "/projects/penny",
-            "burn_rate": 50000,
-            "error_rate": 5.0,
-        }
-
         mock_week = MagicMock()
         mock_week.project_usage = [week_project]
-        mock_week.health_alerts = [{"project": "penny", "health": "green"}]
 
         mock_month = MagicMock()
-        mock_month.project_usage = [month_project]
-        mock_month.health_alerts = [{"project": "penny", "health": "red"}]
+        mock_month.project_usage = []
+
+        mock_session = MagicMock()
+        mock_session.project_usage = []
 
         saved_states = []
 
@@ -376,7 +382,11 @@ class TestHealthCheck:
             patch("penny.analysis.build_prediction", return_value=fake_prediction),
             patch(
                 "penny.analysis.scan_rich_metrics_multi",
-                return_value={"month": mock_month, "week": mock_week},
+                return_value={
+                    "month": mock_month,
+                    "week": mock_week,
+                    "session": mock_session,
+                },
             ),
             patch("penny.status_fetcher.get_cached_status", return_value=None),
             patch("penny.update_checker.should_check", return_value=False),
@@ -384,14 +394,9 @@ class TestHealthCheck:
         ):
             BackgroundWorker._fetch_data(force=False)
 
-        # Baselines must come from week (billing period), not month
+        # Health alerts should be a list (computed by compute_health_alerts)
         final = saved_states[-1]
-        bl = final["_health_baselines"]["/projects/penny"]
-        assert bl["avg_tokens_per_hour"] == 15000  # week, not 50000
-        assert bl["avg_error_rate"] == 1.0  # week, not 5.0
-
-        # Health alerts should also come from week window
-        assert final["health_alerts"] == [{"project": "penny", "health": "green"}]
+        assert isinstance(final["health_alerts"], list)
 
     # ------------------------------------------------------------------
     # health_check – public entry point (threading behaviour)

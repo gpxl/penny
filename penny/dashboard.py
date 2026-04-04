@@ -1275,7 +1275,7 @@ function renderProjectsCard(rm, data) {
     // Rate stats
     const burnRate = p.burn_rate > 0 ? Math.round(p.burn_rate / 1000) + 'k/h' : '';
     const errRate = p.error_rate > 0 ? p.error_rate.toFixed(0) + '% err' : '';
-    return `<details class="proj-row"${p.health === 'red' ? ' open' : ''}>
+    return `<details class="proj-row">
       <summary>
         ${healthDot}
         <span class="proj-name" title="${p.cwd||''}">${p.name}</span>

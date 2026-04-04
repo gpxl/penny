@@ -9,10 +9,12 @@ from unittest.mock import MagicMock, patch
 from penny.analysis import (
     Prediction,
     SessionInfo,
+    _compute_active_hours,
     _compute_project_health,
     _compute_session_anomalies,
     _hours_until_dated_reset_label,
     _hours_until_reset_label,
+    compute_health_alerts,
     count_tokens_since,
     current_billing_period,
     days_until_reset,
@@ -1900,22 +1902,24 @@ class TestSessionAnomalies:
 
 
 class TestProjectHealth:
-    """Tests for _compute_project_health."""
+    """Tests for _compute_project_health (error-rate only) and compute_health_alerts."""
 
     def test_healthy_project_is_green(self):
-        """Normal project with low error rate and moderate burn rate is green."""
+        """Normal project with low error rate is green."""
         projects = [_make_project()]
         alerts = _compute_project_health(projects)
         assert projects[0]["health"] == "green"
         assert alerts == []
 
     def test_high_error_rate_yellow(self):
-        """Error rate >20% triggers yellow."""
+        """Error rate >20% triggers yellow with counts in message."""
         projects = [_make_project(tool_errors=15, total_turns=50)]
         alerts = _compute_project_health(projects)
         assert projects[0]["health"] == "yellow"
         assert len(alerts) == 1
-        assert any("error rate" in r.lower() for r in alerts[0]["reasons"])
+        reason = alerts[0]["reasons"][0]
+        assert "error rate" in reason.lower()
+        assert "15 of 65" in reason  # errors / (errors + turns)
 
     def test_very_high_error_rate_red(self):
         """Error rate >50% triggers red."""
@@ -1923,26 +1927,8 @@ class TestProjectHealth:
         _compute_project_health(projects)
         assert projects[0]["health"] == "red"
 
-    def test_high_burn_rate_yellow(self):
-        """Burn rate >20k tok/h triggers yellow."""
-        # 30k tokens over 1h (sessions span 10:00-11:00)
-        projects = [_make_project(
-            total_output_tokens=30000,
-            sessions=[{
-                "session_id": "s1",
-                "total_output_tokens": 30000,
-                "total_turns": 100,
-                "tool_errors": 0,
-                "first_ts": "2025-01-10T10:00:00",
-                "last_ts": "2025-01-10T11:00:00",
-            }],
-        )]
-        _compute_project_health(projects)
-        assert projects[0]["health"] == "yellow"
-        assert any("burn rate" in r.lower() for r in projects[0]["health_reasons"])
-
-    def test_very_high_burn_rate_red(self):
-        """Burn rate >50k tok/h triggers red."""
+    def test_high_burn_rate_no_longer_alerts(self):
+        """High burn rate alone does NOT trigger alerts (removed feature)."""
         projects = [_make_project(
             total_output_tokens=60000,
             sessions=[{
@@ -1955,93 +1941,12 @@ class TestProjectHealth:
             }],
         )]
         _compute_project_health(projects)
-        assert projects[0]["health"] == "red"
-
-    def test_high_session_velocity_yellow(self):
-        """Session velocity >5/h triggers yellow."""
-        # 8 sessions over 1 hour (needs ≥5k tokens to pass minimum sample gate)
-        sessions = [
-            {"session_id": f"s{i}", "total_output_tokens": 1000, "total_turns": 5,
-             "tool_errors": 0,
-             "first_ts": f"2025-01-10T10:{i*7:02d}:00",
-             "last_ts": f"2025-01-10T10:{i*7+5:02d}:00"}
-            for i in range(8)
-        ]
-        projects = [_make_project(sessions=sessions, total_output_tokens=8000)]
-        _compute_project_health(projects)
-        assert projects[0]["health"] == "yellow"
-        assert any("session velocity" in r.lower() for r in projects[0]["health_reasons"])
-
-    def test_short_sessions_red(self):
-        """Avg session <1 min with >5 sessions triggers red."""
-        sessions = [
-            {"session_id": f"s{i}", "total_output_tokens": 500, "total_turns": 5,
-             "tool_errors": 0,
-             "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T10:00:30"}
-            for i in range(6)
-        ]
-        projects = [_make_project(sessions=sessions, total_output_tokens=3000)]
-        _compute_project_health(projects)
-        assert projects[0]["health"] == "red"
-        assert any("short sessions" in r.lower() for r in projects[0]["health_reasons"])
-
-    def test_relative_outlier_detection(self):
-        """Project with burn rate far above median is flagged."""
-        # 3 projects: two normal (6k/h) and one outlier (40k/h)
-        # All above 5k minimum; outlier below 50k absolute threshold but >5x median
-        normal1 = _make_project(
-            cwd="/projects/normal1", name="normal1",
-            total_output_tokens=6000,
-            sessions=[{
-                "session_id": "s1", "total_output_tokens": 6000, "total_turns": 50,
-                "tool_errors": 0,
-                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
-            }],
-        )
-        normal2 = _make_project(
-            cwd="/projects/normal2", name="normal2",
-            total_output_tokens=6000,
-            sessions=[{
-                "session_id": "s1", "total_output_tokens": 6000, "total_turns": 50,
-                "tool_errors": 0,
-                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
-            }],
-        )
-        outlier = _make_project(
-            cwd="/projects/outlier", name="outlier",
-            total_output_tokens=40000,
-            sessions=[{
-                "session_id": "s1", "total_output_tokens": 40000, "total_turns": 50,
-                "tool_errors": 0,
-                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00",
-            }],
-        )
-        projects = [outlier, normal1, normal2]
-        _compute_project_health(projects)
-        assert outlier["health"] in ("yellow", "red")
-        assert any("other projects" in r for r in outlier["health_reasons"])
-        assert normal1["health"] == "green"
-
-    def test_spike_detection(self):
-        """Project with recent burn rate 5x normal triggers spike alert."""
-        # Normal project: 5k tokens over 3h = ~1.7k/h
-        projects = [_make_project(
-            total_output_tokens=5000,
-            sessions=[{
-                "session_id": "s1", "total_output_tokens": 5000, "total_turns": 50,
-                "tool_errors": 0,
-                "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T13:00:00",
-            }],
-        )]
-        # Recent 1h: 10k tokens (6x the 1.7k/h average)
-        recent = [{"cwd": "/projects/test", "total_output_tokens": 10000}]
-        _compute_project_health(projects, recent_projects=recent)
-        assert any("spike" in r.lower() for r in projects[0]["health_reasons"])
+        assert projects[0]["health"] == "green"
+        # burn_rate is still computed for display
+        assert projects[0]["burn_rate"] > 0
 
     def test_tiny_sample_not_alerted(self):
-        """Projects with very few tokens should not trigger burn rate or velocity alerts."""
-        # 540 tokens in a very short session = extreme extrapolated rate,
-        # but should be suppressed by minimum sample threshold.
+        """Projects with very few tokens remain green."""
         projects = [_make_project(
             total_output_tokens=540,
             sessions=[{
@@ -2052,8 +1957,6 @@ class TestProjectHealth:
         )]
         _compute_project_health(projects)
         assert projects[0]["health"] == "green"
-        assert not any("burn rate" in r.lower() for r in projects[0]["health_reasons"])
-        assert not any("velocity" in r.lower() for r in projects[0]["health_reasons"])
 
     def test_empty_projects_no_crash(self):
         """Empty project list doesn't crash."""
@@ -2061,17 +1964,14 @@ class TestProjectHealth:
         assert alerts == []
 
     def test_temper_trap_scenario(self, tmp_path):
-        """Simulate the Temper Trap incident: many short failed sessions, high burn rate.
+        """Simulate the Temper Trap incident: many short failed sessions.
 
-        This is the end-to-end regression test for the specific incident that
-        motivated this feature.
+        The error rate (50%) triggers red. Burn rate/velocity no longer alert.
         """
         proj = tmp_path / ".claude" / "projects" / "proj"
         proj.mkdir(parents=True)
         entries = []
-        # Simulate 4 hours of tight retry loop: 5 parallel sessions every ~2 min
-        # Each session: short (30s), ~2k tokens, fails (high error rate)
-        for batch in range(120):  # 120 batches over 4 hours
+        for batch in range(120):
             minute = batch * 2
             hour = 10 + minute // 60
             minute_in_hour = minute % 60
@@ -2079,7 +1979,6 @@ class TestProjectHealth:
             ts_end = f"2025-01-10T{hour:02d}:{minute_in_hour:02d}:30.000Z"
             for proc in range(5):
                 sid = f"batch-{batch}-{proc}"
-                # Assistant turn (tokens consumed)
                 entries.append({
                     "type": "assistant",
                     "timestamp": ts_start,
@@ -2091,7 +1990,6 @@ class TestProjectHealth:
                         "content": [],
                     },
                 })
-                # Error result
                 entries.append({
                     "type": "user",
                     "timestamp": ts_end,
@@ -2107,13 +2005,13 @@ class TestProjectHealth:
 
         assert len(rm.project_usage) == 1
         proj_data = rm.project_usage[0]
-        assert proj_data["health"] == "red"
+        # 600 errors / (600 turns + 600 errors) = 50% → yellow (> 20% threshold)
+        # Previously hit red via burn rate thresholds, now only error rate alerts
+        assert proj_data["health"] == "yellow"
         assert proj_data["tool_errors"] == 600
         assert len(rm.health_alerts) == 1
-        assert rm.health_alerts[0]["health"] == "red"
-        # Should flag multiple issues
-        reasons = proj_data["health_reasons"]
-        assert len(reasons) >= 1
+        assert rm.health_alerts[0]["health"] == "yellow"
+        assert any("error rate" in r.lower() for r in proj_data["health_reasons"])
 
 
 # ---------------------------------------------------------------------------
@@ -2183,13 +2081,13 @@ class TestQuickHealthScan:
         assert alerts[0]["health"] == "red"
         assert alerts[0]["project"] == "broken"
 
-    def test_detects_burn_rate_spike(self, tmp_path):
-        """Flags projects with burn rate far above baseline."""
+    def test_high_tokens_no_spike_alert(self, tmp_path):
+        """High token count does NOT trigger spike alert (spike detection removed)."""
         proj = tmp_path / ".claude" / "projects" / "proj"
         proj.mkdir(parents=True)
         jsonl = proj / "s.jsonl"
 
-        # Lots of tokens in one minute
+        # Lots of tokens but no errors → should produce no alerts
         lines = []
         for i in range(10):
             lines.append(json.dumps({
@@ -2199,15 +2097,10 @@ class TestQuickHealthScan:
             }))
         jsonl.write_text("\n".join(lines) + "\n")
 
-        # Baseline: 1000 tok/h (spiking at 50k tokens → extrapolated 3M/h = 3000x)
-        baselines = {"/projects/spiking": {"avg_tokens_per_hour": 1000}}
-
         with patch("penny.analysis.Path.home", return_value=tmp_path):
-            alerts, _ = quick_health_scan({}, baselines=baselines)
+            alerts, _ = quick_health_scan({})
 
-        assert len(alerts) == 1
-        assert alerts[0]["health"] == "red"
-        assert any("spike" in r.lower() for r in alerts[0]["reasons"])
+        assert alerts == []
 
     def test_no_alert_for_normal_activity(self, tmp_path):
         """Normal activity with low error rate produces no alerts."""
@@ -2226,3 +2119,335 @@ class TestQuickHealthScan:
             alerts, _ = quick_health_scan({})
 
         assert alerts == []
+
+
+# ---------------------------------------------------------------------------
+# Active Hours Computation
+# ---------------------------------------------------------------------------
+
+
+class TestComputeActiveHours:
+    """Tests for _compute_active_hours helper."""
+
+    def test_sums_individual_session_durations(self):
+        """Active hours = sum of per-session durations, not wall-clock span."""
+        sessions = [
+            {"first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00"},  # 1h
+            {"first_ts": "2025-01-10T14:00:00", "last_ts": "2025-01-10T15:00:00"},  # 1h
+        ]
+        # Wall-clock span = 5h, but active time = 2h
+        assert abs(_compute_active_hours(sessions) - 2.0) < 0.01
+
+    def test_empty_sessions_returns_minimum(self):
+        """Empty session list returns 0.01 (avoids division by zero)."""
+        assert _compute_active_hours([]) == 0.01
+
+    def test_missing_timestamps_skipped(self):
+        """Sessions without timestamps are ignored."""
+        sessions = [
+            {"first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00"},
+            {"first_ts": "", "last_ts": ""},  # missing
+        ]
+        assert abs(_compute_active_hours(sessions) - 1.0) < 0.01
+
+    def test_zero_duration_session(self):
+        """Session with same start/end contributes 0 hours."""
+        sessions = [
+            {"first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T10:00:00"},
+        ]
+        assert _compute_active_hours(sessions) == 0.01  # minimum
+
+
+# ---------------------------------------------------------------------------
+# compute_health_alerts (budget-aware)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeHealthAlerts:
+    """Tests for compute_health_alerts — budget projection + sustained anomaly + error rate."""
+
+    # --- Budget projection ---
+
+    def test_budget_projection_red(self):
+        """Projected >=95% of budget triggers red alert."""
+        alerts = compute_health_alerts(
+            week_projects=[],
+            budget_ctx={
+                "projected_pct_all": 105.0,
+                "pct_all": 72.0,
+                "budget_all": 1_000_000,
+                "days_remaining": 2.0,
+            },
+        )
+        budget_alerts = [a for a in alerts if a["project"] == "Weekly Budget"]
+        assert len(budget_alerts) == 1
+        assert budget_alerts[0]["health"] == "red"
+        assert "105%" in budget_alerts[0]["reasons"][0]
+        assert "72%" in budget_alerts[0]["reasons"][0]
+
+    def test_budget_projection_yellow(self):
+        """Projected >=85% but <95% triggers yellow alert."""
+        alerts = compute_health_alerts(
+            week_projects=[],
+            budget_ctx={
+                "projected_pct_all": 90.0,
+                "pct_all": 60.0,
+                "budget_all": 1_000_000,
+                "days_remaining": 3.0,
+            },
+        )
+        budget_alerts = [a for a in alerts if a["project"] == "Weekly Budget"]
+        assert len(budget_alerts) == 1
+        assert budget_alerts[0]["health"] == "yellow"
+
+    def test_budget_projection_no_alert_below_threshold(self):
+        """Projected <85% produces no budget alert."""
+        alerts = compute_health_alerts(
+            week_projects=[],
+            budget_ctx={
+                "projected_pct_all": 70.0,
+                "pct_all": 40.0,
+                "budget_all": 1_000_000,
+                "days_remaining": 4.0,
+            },
+        )
+        budget_alerts = [a for a in alerts if a["project"] == "Weekly Budget"]
+        assert budget_alerts == []
+
+    def test_budget_projection_no_alert_unknown_budget(self):
+        """Unknown budget (None) suppresses budget alert."""
+        alerts = compute_health_alerts(
+            week_projects=[],
+            budget_ctx={
+                "projected_pct_all": 99.0,
+                "pct_all": 80.0,
+                "budget_all": None,
+                "days_remaining": 1.0,
+            },
+        )
+        budget_alerts = [a for a in alerts if a["project"] == "Weekly Budget"]
+        assert budget_alerts == []
+
+    def test_budget_projection_no_alert_near_reset(self):
+        """Near-zero days remaining suppresses budget alert."""
+        alerts = compute_health_alerts(
+            week_projects=[],
+            budget_ctx={
+                "projected_pct_all": 99.0,
+                "pct_all": 95.0,
+                "budget_all": 1_000_000,
+                "days_remaining": 0.05,
+            },
+        )
+        budget_alerts = [a for a in alerts if a["project"] == "Weekly Budget"]
+        assert budget_alerts == []
+
+    # --- Sustained session anomaly ---
+
+    def _week_and_session_projects(self, week_rate_factor=1, session_rate_factor=1):
+        """Build week and session project data for anomaly tests.
+
+        week: 2h active, 20k tokens (10k/h baseline)
+        session: 1h active, tokens scaled by session_rate_factor
+        """
+        week = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=20000 * week_rate_factor,
+            sessions=[
+                {"session_id": "w1", "total_output_tokens": 10000 * week_rate_factor,
+                 "total_turns": 50, "tool_errors": 0,
+                 "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00"},
+                {"session_id": "w2", "total_output_tokens": 10000 * week_rate_factor,
+                 "total_turns": 50, "tool_errors": 0,
+                 "first_ts": "2025-01-10T14:00:00", "last_ts": "2025-01-10T15:00:00"},
+            ],
+        )]
+        # Run _compute_project_health to set health/health_reasons on week projects
+        _compute_project_health(week)
+
+        session = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=10000 * session_rate_factor,
+            sessions=[
+                {"session_id": "s1",
+                 "total_output_tokens": 10000 * session_rate_factor,
+                 "total_turns": 50, "tool_errors": 0,
+                 "first_ts": "2025-01-10T16:00:00", "last_ts": "2025-01-10T17:00:00"},
+            ],
+        )]
+        return week, session
+
+    def test_sustained_anomaly_red(self):
+        """Session burn rate >5x active-hour baseline triggers red."""
+        week, session = self._week_and_session_projects(session_rate_factor=6)
+        alerts = compute_health_alerts(week, session_projects=session)
+        anomaly_alerts = [a for a in alerts if "runaway" in str(a.get("reasons", []))]
+        assert len(anomaly_alerts) == 1
+        assert anomaly_alerts[0]["health"] == "red"
+        assert "6" in anomaly_alerts[0]["reasons"][0]  # 6x ratio
+
+    def test_sustained_anomaly_yellow(self):
+        """Session burn rate >3x but <=5x baseline triggers yellow."""
+        week, session = self._week_and_session_projects(session_rate_factor=4)
+        alerts = compute_health_alerts(week, session_projects=session)
+        anomaly_alerts = [a for a in alerts if "runaway" in str(a.get("reasons", []))]
+        assert len(anomaly_alerts) == 1
+        assert anomaly_alerts[0]["health"] == "yellow"
+
+    def test_sustained_anomaly_normal_heavy_coding(self):
+        """High burn rate that matches baseline does NOT trigger."""
+        # Both week and session are high but consistent
+        week, session = self._week_and_session_projects(
+            week_rate_factor=5, session_rate_factor=5,
+        )
+        alerts = compute_health_alerts(week, session_projects=session)
+        anomaly_alerts = [a for a in alerts if "runaway" in str(a.get("reasons", []))]
+        assert anomaly_alerts == []
+
+    def test_sustained_anomaly_requires_minimum_session_time(self):
+        """Short session (<30min active) does not trigger anomaly."""
+        week = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=20000,
+            sessions=[
+                {"session_id": "w1", "total_output_tokens": 10000, "total_turns": 50,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00"},
+                {"session_id": "w2", "total_output_tokens": 10000, "total_turns": 50,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T14:00:00", "last_ts": "2025-01-10T15:00:00"},
+            ],
+        )]
+        _compute_project_health(week)
+
+        # Session: only 15 min active, but extremely high rate
+        session = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=50000,
+            sessions=[
+                {"session_id": "s1", "total_output_tokens": 50000, "total_turns": 50,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T16:00:00", "last_ts": "2025-01-10T16:15:00"},
+            ],
+        )]
+        alerts = compute_health_alerts(week, session_projects=session)
+        anomaly_alerts = [a for a in alerts if "runaway" in str(a.get("reasons", []))]
+        assert anomaly_alerts == []
+
+    def test_sustained_anomaly_requires_minimum_baseline(self):
+        """Project with <2h week history does not trigger anomaly."""
+        week = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=5000,
+            sessions=[
+                {"session_id": "w1", "total_output_tokens": 5000, "total_turns": 50,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T10:30:00"},
+            ],
+        )]
+        _compute_project_health(week)
+
+        session = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=50000,
+            sessions=[
+                {"session_id": "s1", "total_output_tokens": 50000, "total_turns": 50,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T14:00:00", "last_ts": "2025-01-10T15:00:00"},
+            ],
+        )]
+        alerts = compute_health_alerts(week, session_projects=session)
+        anomaly_alerts = [a for a in alerts if "runaway" in str(a.get("reasons", []))]
+        assert anomaly_alerts == []
+
+    def test_sustained_anomaly_requires_minimum_tokens(self):
+        """Session with <10k tokens does not trigger anomaly even at high ratio."""
+        week, _ = self._week_and_session_projects()
+        session = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=9000,
+            sessions=[
+                {"session_id": "s1", "total_output_tokens": 9000, "total_turns": 5,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T16:00:00", "last_ts": "2025-01-10T17:00:00"},
+            ],
+        )]
+        alerts = compute_health_alerts(week, session_projects=session)
+        anomaly_alerts = [a for a in alerts if "runaway" in str(a.get("reasons", []))]
+        assert anomaly_alerts == []
+
+    # --- Error rate passthrough ---
+
+    def test_error_rate_passed_through(self):
+        """Error rate alerts from _compute_project_health are included."""
+        week = [_make_project(tool_errors=60, total_turns=50)]
+        _compute_project_health(week)
+        alerts = compute_health_alerts(week)
+        error_alerts = [a for a in alerts if "error rate" in str(a.get("reasons", [])).lower()]
+        assert len(error_alerts) == 1
+        assert error_alerts[0]["health"] == "red"
+
+    # --- Combined ---
+
+    def test_all_categories_can_coexist(self):
+        """Budget, sustained anomaly, and error alerts can all appear together."""
+        week = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=20000,
+            tool_errors=60, total_turns=50,
+            sessions=[
+                {"session_id": "w1", "total_output_tokens": 10000, "total_turns": 50,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T10:00:00", "last_ts": "2025-01-10T11:00:00"},
+                {"session_id": "w2", "total_output_tokens": 10000, "total_turns": 50,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T14:00:00", "last_ts": "2025-01-10T15:00:00"},
+            ],
+        )]
+        _compute_project_health(week)
+
+        session = [_make_project(
+            cwd="/projects/proj", name="proj",
+            total_output_tokens=60000,
+            sessions=[
+                {"session_id": "s1", "total_output_tokens": 60000, "total_turns": 50,
+                 "tool_errors": 0,
+                 "first_ts": "2025-01-10T16:00:00", "last_ts": "2025-01-10T17:00:00"},
+            ],
+        )]
+
+        alerts = compute_health_alerts(
+            week, session_projects=session,
+            budget_ctx={
+                "projected_pct_all": 99.0,
+                "pct_all": 80.0,
+                "budget_all": 1_000_000,
+                "days_remaining": 1.0,
+            },
+        )
+        projects = {a["project"] for a in alerts}
+        assert "Weekly Budget" in projects  # budget alert
+        assert "proj" in projects  # error + anomaly alerts
+        assert len(alerts) >= 3  # at least budget + anomaly + error
+
+    def test_alert_messages_include_context(self):
+        """Alert reason strings contain contextual information."""
+        week, session = self._week_and_session_projects(session_rate_factor=6)
+        alerts = compute_health_alerts(
+            week, session_projects=session,
+            budget_ctx={
+                "projected_pct_all": 95.0,
+                "pct_all": 70.0,
+                "budget_all": 1_000_000,
+                "days_remaining": 2.5,
+            },
+        )
+        budget_alert = next(a for a in alerts if a["project"] == "Weekly Budget")
+        assert "95%" in budget_alert["reasons"][0]
+        assert "70%" in budget_alert["reasons"][0]
+        assert "2.5d" in budget_alert["reasons"][0]
+
+        anomaly_alert = next(
+            a for a in alerts if "active-hour average" in str(a.get("reasons", []))
+        )
+        assert "tok/h" in anomaly_alert["reasons"][0]

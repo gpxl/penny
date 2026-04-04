@@ -76,9 +76,8 @@ class BackgroundWorker:
 
         state = load_state()
         offsets = state.get("_health_scan_offsets", {})
-        baselines = state.get("_health_baselines", {})
 
-        alerts, new_offsets = quick_health_scan(offsets, baselines=baselines)
+        alerts, new_offsets = quick_health_scan(offsets)
 
         state["_health_scan_offsets"] = new_offsets
         if alerts:
@@ -95,7 +94,12 @@ class BackgroundWorker:
         from datetime import timedelta, timezone
         from pathlib import Path
 
-        from .analysis import build_prediction, current_billing_period, scan_rich_metrics_multi
+        from .analysis import (
+            build_prediction,
+            compute_health_alerts,
+            current_billing_period,
+            scan_rich_metrics_multi,
+        )
         from .spawner import check_running_agents
         from .state import detect_new_sessions, load_state, reset_period_if_needed, save_state
         from .status_fetcher import get_cached_status
@@ -142,16 +146,23 @@ class BackgroundWorker:
             k: dataclasses.asdict(v) for k, v in multi.items()
         }
 
-        # Update health baselines + alerts from current billing period
+        # Compute budget-aware health alerts
         week_metrics = multi.get("week", primary)
-        state["health_alerts"] = week_metrics.health_alerts
-        baselines: dict[str, dict] = {}
-        for p in week_metrics.project_usage:
-            baselines[p["cwd"]] = {
-                "avg_tokens_per_hour": p.get("burn_rate", 0),
-                "avg_error_rate": p.get("error_rate", 0),
+        session_metrics = multi.get("session")
+        budget_ctx = None
+        if prediction is not None:
+            budget_ctx = {
+                "projected_pct_all": prediction.projected_pct_all,
+                "pct_all": prediction.pct_all,
+                "budget_all": prediction.budget_all,
+                "days_remaining": prediction.days_remaining,
+                "reset_label": getattr(prediction, "reset_label", ""),
             }
-        state["_health_baselines"] = baselines
+        state["health_alerts"] = compute_health_alerts(
+            week_projects=week_metrics.project_usage,
+            session_projects=session_metrics.project_usage if session_metrics else None,
+            budget_ctx=budget_ctx,
+        )
 
         # Reset health scan offsets — full scan already processed everything
         import os

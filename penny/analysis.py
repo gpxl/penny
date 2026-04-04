@@ -625,31 +625,36 @@ def _compute_session_anomalies(sessions: list[dict]) -> None:
         s["anomaly_reasons"] = reasons
 
 
-def _compute_project_health(
-    projects: list[dict],
-    recent_projects: list[dict] | None = None,
-) -> list[dict]:
-    """Compute health signals for each project and return alerts for unhealthy ones.
+def _compute_active_hours(sessions: list[dict]) -> float:
+    """Sum individual session durations (not wall-clock span).
 
-    Three detection layers:
-    1. Absolute thresholds (works with 1 project)
-    2. Relative outlier (2+ projects, median comparison)
-    3. Spike detection (recent vs week burn rate)
+    This avoids diluting the baseline with idle time between sessions.
+    """
+    total_seconds = 0.0
+    for s in sessions:
+        first = s.get("first_ts", "")
+        last = s.get("last_ts", "")
+        if first and last:
+            try:
+                t0 = datetime.fromisoformat(first)
+                t1 = datetime.fromisoformat(last)
+                total_seconds += max((t1 - t0).total_seconds(), 0)
+            except (ValueError, TypeError):
+                pass
+    return max(total_seconds / 3600, 0.01)
+
+
+def _compute_project_health(projects: list[dict]) -> list[dict]:
+    """Compute display metrics and error-rate alerts for each project.
+
+    Only error rate triggers alerts here. Budget projection and sustained
+    session anomaly alerts are computed separately in compute_health_alerts().
     """
     alerts: list[dict] = []
     if not projects:
         return alerts
 
-    # Build recent lookup: cwd -> burn_rate
-    recent_rates: dict[str, float] = {}
-    if recent_projects:
-        for rp in recent_projects:
-            cwd = rp.get("cwd", "")
-            if cwd and rp.get("total_output_tokens", 0) > 0:
-                # Recent window is 1 hour, so burn_rate = tokens directly
-                recent_rates[cwd] = float(rp["total_output_tokens"])
-
-    # Compute rate metrics for each project
+    # Compute rate metrics for each project (used for display in project cards)
     for p in projects:
         turns = p.get("total_turns", 0)
         tokens = p.get("total_output_tokens", 0)
@@ -691,105 +696,28 @@ def _compute_project_health(
         p["session_velocity"] = round(session_velocity, 2)
         p["avg_session_duration_m"] = round(avg_duration, 1)
 
-    # Minimum tokens to avoid noisy alerts from tiny samples
-    _MIN_TOKENS_FOR_ALERT = 5_000
-
-    # Layer 1: Absolute thresholds
+    # Error rate alerts only
     for p in projects:
         reasons: list[str] = []
         level = "green"
-        tokens = p.get("total_output_tokens", 0)
 
         er = p["error_rate"]
+        errors = p.get("tool_errors", 0)
+        turns = p.get("total_turns", 0)
+        total_events = errors + turns
         if er > 50:
             level = "red"
-            reasons.append(f"High error rate ({er:.0f}%)")
+            reasons.append(
+                f"High error rate: {errors} of {total_events} tool calls failed ({er:.0f}%)"
+            )
         elif er > 20:
-            level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
-            reasons.append(f"Elevated error rate ({er:.0f}%)")
-
-        br = p["burn_rate"]
-        if tokens >= _MIN_TOKENS_FOR_ALERT:
-            if br > 50_000:
-                level = "red"
-                reasons.append(f"Very high burn rate ({br/1000:.0f}k tok/h)")
-            elif br > 20_000:
-                level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
-                reasons.append(f"High burn rate ({br/1000:.0f}k tok/h)")
-
-        sv = p["session_velocity"]
-        if tokens >= _MIN_TOKENS_FOR_ALERT:
-            if sv > 10:
-                level = "red"
-                reasons.append(f"Very high session velocity ({sv:.1f}/h)")
-            elif sv > 5:
-                level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
-                reasons.append(f"High session velocity ({sv:.1f}/h)")
-
-        avg_d = p["avg_session_duration_m"]
-        n_sess = len(p.get("sessions", []))
-        if n_sess > 5 and avg_d > 0:
-            if avg_d < 1:
-                level = "red"
-                reasons.append(f"Very short sessions (avg {avg_d:.1f}m)")
-            elif avg_d < 2:
-                level = max(level, "yellow", key=lambda x: ["green", "yellow", "red"].index(x))
-                reasons.append(f"Short sessions (avg {avg_d:.1f}m)")
+            level = "yellow"
+            reasons.append(
+                f"Elevated error rate: {errors} of {total_events} tool calls failed ({er:.0f}%)"
+            )
 
         p["health"] = level
         p["health_reasons"] = reasons
-
-    # Layer 2: Relative outlier detection (2+ projects, only with enough data)
-    significant = [p for p in projects if p.get("total_output_tokens", 0) >= _MIN_TOKENS_FOR_ALERT]
-    if len(significant) >= 2:
-        burn_rates = sorted(p["burn_rate"] for p in significant)
-        error_rates = sorted(p["error_rate"] for p in significant)
-        n = len(burn_rates)
-        median_br = (burn_rates[n // 2] + burn_rates[(n - 1) // 2]) / 2
-        median_er = (error_rates[n // 2] + error_rates[(n - 1) // 2]) / 2
-
-        for p in significant:
-            if median_br > 0 and p["burn_rate"] > 5 * median_br:
-                if p["health"] != "red":
-                    p["health"] = "red"
-                    p["health_reasons"].append(
-                        f"Burn rate {p['burn_rate']/median_br:.1f}x other projects"
-                    )
-            elif median_br > 0 and p["burn_rate"] > 3 * median_br:
-                if p["health"] == "green":
-                    p["health"] = "yellow"
-                    p["health_reasons"].append(
-                        f"Burn rate {p['burn_rate']/median_br:.1f}x other projects"
-                    )
-
-            if median_er > 0 and p["error_rate"] > 5 * median_er:
-                if p["health"] != "red":
-                    p["health"] = "red"
-                    p["health_reasons"].append(
-                        f"Error rate {p['error_rate']/median_er:.1f}x other projects"
-                    )
-            elif median_er > 0 and p["error_rate"] > 3 * median_er:
-                if p["health"] == "green":
-                    p["health"] = "yellow"
-                    p["health_reasons"].append(
-                        f"Error rate {p['error_rate']/median_er:.1f}x other projects"
-                    )
-
-    # Layer 3: Spike detection (recent 1h vs longer-term average)
-    for p in projects:
-        cwd = p.get("cwd", "")
-        recent_br = recent_rates.get(cwd, 0)
-        avg_br = p["burn_rate"]
-        if recent_br > 0 and avg_br > 0:
-            spike = recent_br / avg_br
-            if spike > 5:
-                if p["health"] != "red":
-                    p["health"] = "red"
-                p["health_reasons"].append(f"Burn rate spike ({spike:.1f}x normal)")
-            elif spike > 3:
-                if p["health"] == "green":
-                    p["health"] = "yellow"
-                p["health_reasons"].append(f"Burn rate spike ({spike:.1f}x normal)")
 
     # Collect alerts for unhealthy projects
     for p in projects:
@@ -804,14 +732,141 @@ def _compute_project_health(
     return alerts
 
 
+def compute_health_alerts(
+    week_projects: list[dict],
+    session_projects: list[dict] | None = None,
+    budget_ctx: dict[str, Any] | None = None,
+) -> list[dict]:
+    """Compute actionable health alerts from budget, session, and error data.
+
+    Called from bg_worker._fetch_data() after build_prediction() and
+    scan_rich_metrics_multi() complete. No CLI invocations — uses only
+    pre-computed data.
+
+    Three alert categories:
+    1. Budget projection — will current rate exhaust the weekly budget?
+    2. Sustained session anomaly — is a project burning tokens at an unusual
+       rate relative to its own active-hour history?
+    3. Error rate — collected from per-project health (already computed).
+    """
+    alerts: list[dict] = []
+    budget = budget_ctx or {}
+
+    # Category 1: Budget projection (global, not per-project)
+    projected = budget.get("projected_pct_all", 0)
+    current_pct = budget.get("pct_all", 0)
+    days_rem = budget.get("days_remaining", 0)
+    budget_known = budget.get("budget_all") is not None
+
+    if budget_known and days_rem > 0.1:
+        if projected >= 95:
+            alerts.append({
+                "project": "Weekly Budget",
+                "cwd": "",
+                "health": "red",
+                "reasons": [
+                    f"Projected to use {projected:.0f}% of weekly budget by reset "
+                    f"({days_rem:.1f}d remaining). Currently at {current_pct:.0f}%."
+                ],
+            })
+        elif projected >= 85:
+            alerts.append({
+                "project": "Weekly Budget",
+                "cwd": "",
+                "health": "yellow",
+                "reasons": [
+                    f"Projected to use {projected:.0f}% of weekly budget by reset "
+                    f"({days_rem:.1f}d remaining). Currently at {current_pct:.0f}%."
+                ],
+            })
+
+    # Category 2: Sustained session anomaly (per-project)
+    _MIN_SESSION_ACTIVE_H = 0.5   # 30 minutes active time in session
+    _MIN_BASELINE_ACTIVE_H = 2.0  # 2 hours active time for meaningful baseline
+    _MIN_SESSION_TOKENS = 10_000
+
+    if session_projects:
+        # Build lookup: cwd -> session project data
+        session_lookup: dict[str, dict] = {}
+        for sp in session_projects:
+            cwd = sp.get("cwd", "")
+            if cwd:
+                session_lookup[cwd] = sp
+
+        for wp in week_projects:
+            cwd = wp.get("cwd", "")
+            sp = session_lookup.get(cwd)
+            if not sp:
+                continue
+
+            sess_tokens = sp.get("total_output_tokens", 0)
+            if sess_tokens < _MIN_SESSION_TOKENS:
+                continue
+
+            # Active hours for session and week
+            sess_active_h = _compute_active_hours(sp.get("sessions", []))
+            week_active_h = _compute_active_hours(wp.get("sessions", []))
+
+            if sess_active_h < _MIN_SESSION_ACTIVE_H:
+                continue
+            if week_active_h < _MIN_BASELINE_ACTIVE_H:
+                continue
+
+            sess_rate = sess_tokens / sess_active_h
+            week_tokens = wp.get("total_output_tokens", 0)
+            baseline_rate = week_tokens / week_active_h
+
+            if baseline_rate <= 0:
+                continue
+
+            ratio = sess_rate / baseline_rate
+            if ratio > 5:
+                alerts.append({
+                    "project": wp.get("name", ""),
+                    "cwd": cwd,
+                    "health": "red",
+                    "reasons": [
+                        f"Burn rate {sess_rate/1000:.0f}k tok/h this session is "
+                        f"{ratio:.1f}x the project's active-hour average "
+                        f"({baseline_rate/1000:.0f}k tok/h). "
+                        f"May indicate a runaway process."
+                    ],
+                })
+            elif ratio > 3:
+                alerts.append({
+                    "project": wp.get("name", ""),
+                    "cwd": cwd,
+                    "health": "yellow",
+                    "reasons": [
+                        f"Burn rate {sess_rate/1000:.0f}k tok/h this session is "
+                        f"{ratio:.1f}x the project's active-hour average "
+                        f"({baseline_rate/1000:.0f}k tok/h). "
+                        f"May indicate a runaway process."
+                    ],
+                })
+
+    # Category 3: Error rate alerts (already computed on week_projects)
+    for wp in week_projects:
+        if wp.get("health", "green") != "green":
+            alerts.append({
+                "project": wp.get("name", ""),
+                "cwd": wp.get("cwd", ""),
+                "health": wp["health"],
+                "reasons": wp.get("health_reasons", []),
+            })
+
+    return alerts
+
+
 def _assemble_project_usage(
     proj_acc: dict[str, dict], max_projects: int = 20, max_sessions: int = 20,
     session_titles: dict[str, str] | None = None,
-    recent_proj_acc: dict[str, dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Convert raw project accumulators into sorted project_usage list.
 
     Returns (project_usage, health_alerts).
+    Health alerts here contain only error-rate alerts. Budget projection and
+    sustained session anomaly alerts are added by compute_health_alerts().
     """
     titles = session_titles or {}
     result = []
@@ -850,18 +905,7 @@ def _assemble_project_usage(
     result.sort(key=lambda p: p["total_output_tokens"], reverse=True)
     result = result[:max_projects]
 
-    # Build recent project list for spike detection
-    recent_projects: list[dict] | None = None
-    if recent_proj_acc is not None:
-        recent_projects = []
-        for cwd_val, rpa in recent_proj_acc.items():
-            r_total = rpa["opus"] + rpa["sonnet"] + rpa["haiku"] + rpa["other"]
-            recent_projects.append({
-                "cwd": cwd_val,
-                "total_output_tokens": r_total,
-            })
-
-    alerts = _compute_project_health(result, recent_projects=recent_projects)
+    alerts = _compute_project_health(result)
     return result, alerts
 
 
@@ -1101,9 +1145,6 @@ def scan_rich_metrics_multi(
         except OSError:
             continue
 
-    # Use "recent" window's proj_acc for spike detection if available
-    recent_pa = proj_acc.get("recent") if "recent" in windows else None
-
     for k in windows:
         metrics[k].unique_projects = len(cwds[k])
         metrics[k].unique_branches = len(branches[k])
@@ -1111,7 +1152,6 @@ def scan_rich_metrics_multi(
         metrics[k].files_edited = len(edited_files[k])
         metrics[k].project_usage, metrics[k].health_alerts = _assemble_project_usage(
             proj_acc[k], session_titles=session_titles,
-            recent_proj_acc=recent_pa if k != "recent" else None,
         )
         metrics[k].session_usage = _assemble_flat_sessions(
             proj_acc[k], session_titles=session_titles,
@@ -1609,16 +1649,17 @@ def get_usage_bar(pct_used: float, width: int = 8) -> str:
 
 def quick_health_scan(
     file_offsets: dict[str, int],
-    baselines: dict[str, dict] | None = None,
 ) -> tuple[list[dict], dict[str, int]]:
-    """Fast incremental JSONL scan for health alerts.
+    """Fast incremental JSONL scan for error-rate alerts.
 
     Reads only new lines since last scan (tracked by byte offset).
     Returns (alerts, updated_offsets).
+
+    Only detects error-rate anomalies. Budget projection and sustained session
+    anomaly alerts are handled by compute_health_alerts() during full scans.
     """
     projects_dir = Path.home() / ".claude" / "projects"
     new_offsets: dict[str, int] = dict(file_offsets)
-    baselines = baselines or {}
 
     # Per-project accumulators for this delta
     delta: dict[str, dict] = {}  # cwd -> {tokens, errors, turns, sessions}
@@ -1678,38 +1719,27 @@ def quick_health_scan(
     for cwd, d in delta.items():
         turns = d["turns"]
         errors = d["errors"]
-        tokens = d["tokens"]
         name = Path(cwd).name
 
         # Error rate in this 1-min window
         total_events = errors + turns
         error_rate = errors / total_events * 100 if total_events > 0 else 0
 
-        # Compare against baseline
-        bl = baselines.get(cwd, {})
-        avg_rate = bl.get("avg_tokens_per_hour", 0)
         reasons: list[str] = []
         level = "green"
 
-        # Absolute: high error rate in the delta
         if error_rate > 50 and errors >= 3:
             level = "red"
-            reasons.append(f"High error rate ({error_rate:.0f}%) in last minute")
+            reasons.append(
+                f"High error rate: {errors} of {total_events} tool calls failed "
+                f"({error_rate:.0f}%) in last minute"
+            )
         elif error_rate > 20 and errors >= 2:
             level = "yellow"
-            reasons.append(f"Elevated error rate ({error_rate:.0f}%) in last minute")
-
-        # Spike: tokens in 1 min extrapolated to hourly rate vs baseline
-        if avg_rate > 0 and tokens > 0:
-            hourly_rate = tokens * 60  # extrapolate 1 min to 1 hour
-            spike = hourly_rate / avg_rate
-            if spike > 5:
-                level = "red"
-                reasons.append(f"Burn rate spike ({spike:.1f}x baseline)")
-            elif spike > 3:
-                if level == "green":
-                    level = "yellow"
-                reasons.append(f"Burn rate spike ({spike:.1f}x baseline)")
+            reasons.append(
+                f"Elevated error rate: {errors} of {total_events} tool calls failed "
+                f"({error_rate:.0f}%) in last minute"
+            )
 
         if level != "green":
             alerts.append({
