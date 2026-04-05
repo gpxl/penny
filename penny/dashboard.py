@@ -716,23 +716,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 let lastOk = null;
 let lastData = null;
-let historyFilter = 'week';
 let metricsFilter = 'month';
-let historyFilterAutoSet = false;
-
-function autoSelectHistoryFilter(history) {
-  if (historyFilterAutoSet) return;
-  historyFilterAutoSet = true;
-  const now = Date.now();
-  const weekCutoff = new Date(now - 7 * 86400000).toISOString();
-  const fourWeekCutoff = new Date(now - 28 * 86400000).toISOString();
-  const weekData = (history || []).filter(h => (h.start || '') >= weekCutoff);
-  if (weekData.length > 0) { historyFilter = 'week'; return; }
-  const fourWeekData = (history || []).filter(h => (h.start || '') >= fourWeekCutoff);
-  if (fourWeekData.length > 0) { historyFilter = '4w'; return; }
-  if ((history || []).length > 0) { historyFilter = 'all'; return; }
-  historyFilter = 'week';
-}
 
 function tip(text) {
   return `<span class="info-tip">ⓘ<span class="tip-text">${text}</span></span>`;
@@ -1018,29 +1002,45 @@ function renderSession(pred) {
     <div class="stat-row"><span>${(pred.session_hours_remaining||0).toFixed(1)} hours remaining</span></div>`;
 }
 
-function filterHistory(history) {
-  if (historyFilter === 'week') {
-    const cutoff = new Date(Date.now() - 7 * 86400000).toISOString();
-    return history.filter(h => (h.start || '') >= cutoff);
+function filterHistoryByWindow(history, data) {
+  if (!history || !history.length) return [];
+  const pred = data && data.prediction || {};
+  if (metricsFilter === 'session') {
+    const cutoff = pred.session_start || '';
+    return cutoff ? history.filter(h => (h.start || '') >= cutoff) : history;
   }
-  if (historyFilter === '4w') {
+  if (metricsFilter === 'week') {
+    const cutoff = pred.period_start || '';
+    return cutoff ? history.filter(h => (h.start || '') >= cutoff) : history;
+  }
+  if (metricsFilter === 'month') {
     const cutoff = new Date(Date.now() - 28 * 86400000).toISOString();
     return history.filter(h => (h.start || '') >= cutoff);
   }
   return history; // 'all'
 }
 
-function setFilter(f) {
-  historyFilter = f;
-  if (lastData) {
-    document.getElementById('card-history').innerHTML = '<h2>Session History</h2>' + renderHistory_card(lastData.session_history);
-  }
-}
-
 function setMetricsFilter(f) {
   metricsFilter = f;
   renderMetricsFilterBar();
-  if (lastData) renderMetricsCards(lastData);
+  if (lastData) {
+    renderMetricsCards(lastData);
+    renderFilteredCards(lastData);
+  }
+}
+
+function renderFilteredCards(data) {
+  // Session history — filtered by global metricsFilter
+  const historyEl = document.getElementById('card-history');
+  const wl = metricsWindowLabel();
+  updateSessionHistory(data.session_history, data, wl);
+
+  // Projects — filtered by global metricsFilter
+  const projectsEl = document.getElementById('card-projects');
+  const rm = getMetricsForWindow(data);
+  const hasProjects = rm && (rm.project_usage || []).length > 0;
+  projectsEl.style.display = hasProjects ? '' : 'none';
+  if (hasProjects) projectsEl.innerHTML = `<h2>Projects${tip("Token usage breakdown by project (working directory). Click a project to see its individual sessions.")}</h2>` + renderProjectsCard(rm, data);
 }
 
 function renderMetricsFilterBar() {
@@ -1125,6 +1125,7 @@ function renderMetricsCards(data) {
 function renderBarChart(data, opts) {
   const dateKey = opts.dateKey || 'start';
   const showTime = opts.showTime || false;
+  const chartId = opts.chartId || '';
   const PAD_L = 40, PAD_T = 5, PAD_B = 20;
   const max = Math.max(...data.map(d => d.output_all||0), 1);
   const W = 480, H = 80, n = data.length;
@@ -1137,7 +1138,7 @@ function renderBarChart(data, opts) {
     const y = PAD_T + yOff;
     const kVal = Math.round(frac * maxK);
     yAxis += `<line x1="${PAD_L}" y1="${y}" x2="${W}" y2="${y}" stroke="#f3f4f6" stroke-width="1"/>`;
-    yAxis += `<text x="${PAD_L - 4}" y="${y + 3}" text-anchor="end">${kVal}k</text>`;
+    yAxis += `<text x="${PAD_L - 4}" y="${y + 3}" text-anchor="end" data-axis-frac="${frac}">${kVal}k</text>`;
   });
   const tipW = showTime ? 90 : 80;
   const tipH = 28;
@@ -1158,7 +1159,7 @@ function renderBarChart(data, opts) {
     const tipY = Math.max(y - tipH - 4, PAD_T);
     bars += `<g class="bar-g">`;
     bars += `<rect x="${x}" y="${PAD_T}" width="${bw}" height="${H}" fill="transparent"/>`;
-    bars += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${fill}" rx="2" style="transform-origin:${x + bw/2}px ${PAD_T + H}px; animation: barGrowUp 0.3s ease-out ${(i * 0.02).toFixed(2)}s both"/>`;
+    bars += `<rect data-bar="${i}" x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${fill}" rx="2" style="transform-origin:${x + bw/2}px ${PAD_T + H}px; animation: barGrowUp 0.3s ease-out ${(i * 0.02).toFixed(2)}s both"/>`;
     if (n <= 8 || i % Math.ceil(n/6) === 0) bars += `<text x="${x + bw/2}" y="${PAD_T + H + 14}" text-anchor="middle">${dateLabel}</text>`;
     bars += `<g class="tip">`;
     bars += `<rect x="${tipXAdj}" y="${tipY}" width="${tipW}" height="${tipH}" rx="3" fill="#1f2937" opacity="0.9"/>`;
@@ -1166,20 +1167,71 @@ function renderBarChart(data, opts) {
     bars += `<text x="${tipXAdj + tipW/2}" y="${tipY + 22}" text-anchor="middle" fill="#f9fafb" font-size="9">${kTokens}k tokens</text>`;
     bars += `</g></g>`;
   });
-  return `<svg viewBox="0 0 ${W} ${H + PAD_T + PAD_B}" style="width:100%;height:auto;overflow:visible">${yAxis}${bars}</svg>`;
+  const idAttr = chartId ? ` id="${chartId}"` : '';
+  return `<svg${idAttr} viewBox="0 0 ${W} ${H + PAD_T + PAD_B}" style="width:100%;height:auto;overflow:visible" data-bar-count="${n}" data-max="${max}">${yAxis}${bars}</svg>`;
 }
 
-function renderHistory_card(history) {
-  const filtered = filterHistory(history || []);
-  const btns = ['week','4w','all'].map(f => {
-    const label = {week:'This week', '4w':'4 weeks', all:'All time'}[f];
-    return `<button class="filter-btn ${historyFilter===f?'active':''}" onclick="setFilter('${f}')">${label}</button>`;
-  }).join('');
-  const btnRow = `<div class="filter-btns">${btns}</div>`;
-  if (!filtered.length) {
-    return btnRow + '<p style="color:#9ca3af;font-size:12px">No completed sessions yet. Sub-session history appears after your first rate-limit boundary.</p>';
+function updateBarChart(svgId, data, opts) {
+  const svg = document.getElementById(svgId);
+  if (!svg) return false;
+  const dateKey = opts.dateKey || 'start';
+  const showTime = opts.showTime || false;
+  const prevCount = parseInt(svg.getAttribute('data-bar-count') || '0');
+  const n = data.length;
+  // If bar count changed, a full re-render is needed (new/removed bars)
+  if (n !== prevCount) return false;
+  const PAD_T = 5, H = 80;
+  const max = Math.max(...data.map(d => d.output_all||0), 1);
+  const prevMax = parseFloat(svg.getAttribute('data-max') || '1');
+  svg.setAttribute('data-max', max);
+  // Update y-axis labels if scale changed
+  if (Math.round(max/1000) !== Math.round(prevMax/1000)) {
+    svg.querySelectorAll('[data-axis-frac]').forEach(el => {
+      const frac = parseFloat(el.getAttribute('data-axis-frac'));
+      el.textContent = Math.round(frac * max / 1000) + 'k';
+    });
   }
-  return btnRow + renderBarChart(filtered, {dateKey:'start', showTime:true});
+  // Animate each bar to new position/height
+  data.forEach((d, i) => {
+    const el = svg.querySelector('[data-bar="' + i + '"]');
+    if (!el) return;
+    const val = d.output_all || 0;
+    const bh = Math.max(Math.round((val / max) * H), 2);
+    const y = PAD_T + H - bh;
+    const pct = val / max * 100;
+    const fill = pct < 60 ? '#10b981' : pct < 80 ? '#eab308' : '#ef4444';
+    // Remove barGrowUp animation on subsequent updates
+    el.style.animation = 'none';
+    animateAttr(el, 'y', y);
+    animateAttr(el, 'height', bh);
+    el.setAttribute('fill', fill);
+  });
+  return true; // updated in-place
+}
+
+function renderHistory_card(history, data, wl) {
+  const filtered = filterHistoryByWindow(history || [], data);
+  if (!filtered.length) {
+    return '<p style="color:#9ca3af;font-size:12px">No completed sessions in this window. Sub-session history appears after your first rate-limit boundary.</p>';
+  }
+  return `<p style="color:#6b7280;font-size:11px;margin:0 0 8px">Sub-session token usage (${wl || 'last 28 days'})</p>`
+    + renderBarChart(filtered, {dateKey:'start', showTime:true, chartId:'session-history-svg'});
+}
+
+function updateSessionHistory(history, data, wl) {
+  const filtered = filterHistoryByWindow(history || [], data);
+  const card = document.getElementById('card-history');
+  if (!card) return;
+  // Try in-place update first (same bar count → animate)
+  if (filtered.length > 0 && updateBarChart('session-history-svg', filtered, {dateKey:'start', showTime:true})) {
+    // Update description text if window label changed
+    const p = card.querySelector('p');
+    if (p && p.style.color) p.innerHTML = `Sub-session token usage (${wl || 'last 28 days'})`;
+    return;
+  }
+  // Full re-render (bar count changed or first paint)
+  card.innerHTML = `<h2>Session History${tip("Output tokens per sub-session (each ~5h block between rate-limit resets). Useful for spotting heavy coding sessions.")}</h2>`
+    + renderHistory_card(history, data, wl);
 }
 
 function renderWeeklyHistory_card(periodHistory) {
@@ -1203,7 +1255,7 @@ function onSortClick(projIdx, key) {
   const st = projSortState[projIdx] || {key: 'last_ts', asc: false};
   if (st.key === key) { st.asc = !st.asc; } else { st.key = key; st.asc = key === 'title'; }
   projSortState[projIdx] = st;
-  renderMetricsCards(lastData);
+  if (lastData) renderFilteredCards(lastData);
 }
 function renderProjectsCard(rm, data) {
   const projects = (rm && rm.project_usage) || [];
@@ -1344,13 +1396,7 @@ function render(data) {
   const hasWeeklyHistory = (data.period_history || []).length > 0;
   weeklyHistoryEl.style.display = hasWeeklyHistory ? '' : 'none';
   if (hasWeeklyHistory) weeklyHistoryEl.innerHTML = `<h2>Weekly Budget History${tip("Output token totals for each past billing week. Color: green < 60%, yellow 60–80%, red ≥ 80% of the highest observed week.")}</h2>` + renderWeeklyHistory_card(data.period_history);
-  autoSelectHistoryFilter(data.session_history);
-  document.getElementById('card-history').innerHTML = `<h2>Session History${tip("Output tokens per sub-session (each ~5h block between rate-limit resets). Useful for spotting heavy coding sessions.")}</h2>` + renderHistory_card(data.session_history);
-  const projectsEl = document.getElementById('card-projects');
-  const rm = getMetricsForWindow(data);
-  const hasProjects = rm && (rm.project_usage || []).length > 0;
-  projectsEl.style.display = hasProjects ? '' : 'none';
-  if (hasProjects) projectsEl.innerHTML = `<h2>Projects${tip("Token usage breakdown by project (working directory). Click a project to see its individual sessions.")}</h2>` + renderProjectsCard(rm, data);
+  renderFilteredCards(data);
   renderPluginCards(data.plugin_cards);
 }
 
