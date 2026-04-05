@@ -61,17 +61,18 @@ graph TD
 |--------|---------------|
 | `app.py` | `PennyApp` NSObject delegate — status bar, popover, timers, orchestration, `_didFetchData_` main-thread callback |
 | `bg_worker.py` | `BackgroundWorker` — runs `_fetch_data` on a daemon thread, posts result to main thread |
-| `analysis.py` | Reads `*.jsonl` token logs, builds `Prediction` dataclass, capacity math |
+| `analysis.py` | Reads `*.jsonl` token logs, builds `Prediction` dataclass, capacity math, health alerts (`compute_health_alerts`) |
 | `dashboard.py` | `DashboardServer` — local HTTP server, `_snapshot()` JSON serialisation, embedded HTML/JS dashboard |
 | `report.py` | Generates self-contained HTML report with SVG usage history chart |
-| `status_fetcher.py` | Reads and parses `stats-cache.json` for current usage data |
+| `status_fetcher.py` | Scrapes `claude /status` via pexpect+pyte for live usage percentages and reset labels |
 | `state.py` | JSON persistence (`~/.penny/state.json`), period reset, session archiving |
 | `popover_vc.py` | Programmatic `NSStackView` UI — no NIB, pure PyObjC |
 | `onboarding.py` | First-run dialog |
 | `paths.py` | Resolves `PENNY_HOME` env var → `~/.penny/` |
 | `preflight.py` | Startup validation: `claude`, config paths, stats cache |
 
-> Plugin infrastructure exists in the codebase for future use (see `penny/plugin.py`, `penny/plugins/`, and the `feature/beads-plugin` branch).
+| `plugin.py` | Abstract plugin base + dynamic import + registry |
+| `plugins/` | Plugin implementations (e.g. Loadout skill coverage tracker) |
 
 ---
 
@@ -120,10 +121,36 @@ state.json
 ├── session_history         array           — archived sub-sessions (last 200)
 │   └── {start, end, output_all, output_sonnet}
 ├── last_session_scan       string | null   — ISO timestamp of last session archive scan
-├── rich_metrics            object          — detailed model/cache/tool metrics
+├── rich_metrics            object          — detailed model/cache/tool metrics (default window)
+├── rich_metrics_by_window  object          — metrics per time window (session/week/month/all)
+│   └── {session, week, month, all} → RichMetrics
+├── health_alerts           array           — active health alerts [{project, cwd, health, reasons}]
+├── intraday_samples        array           — periodic usage samples (last 48h)
+│   └── {ts, pct_all, pct_sonnet}
 └── plugin_state            object          — plugin-owned state, namespaced by plugin name
-                                              (empty when no plugins active)
 ```
+
+### Health alerts state
+
+`health_alerts` is a list of active alert objects computed each refresh cycle by `compute_health_alerts()` in `analysis.py`. Alerts are not persisted across restarts — they are recomputed from JSONL data and live `/status` every 30 seconds.
+
+```
+health_alerts[]
+├── project     string   — project name or "Weekly Budget" for global alerts
+├── cwd         string   — working directory (empty for global alerts)
+├── health      string   — "red" or "yellow"
+└── reasons     array    — human-readable reason strings with context
+```
+
+Three alert categories:
+
+| Category | Scope | Trigger |
+|----------|-------|---------|
+| Budget projection | Global | Projected weekly usage ≥ 85% (yellow) or ≥ 95% (red) |
+| Sustained session anomaly | Per-project | Session burn rate > 3x (yellow) or > 5x (red) the project's active-hour baseline |
+| Error rate | Per-project | Tool call error rate > 20% (yellow) or > 50% (red) |
+
+A lightweight `quick_health_scan()` runs every 60 seconds between full scans, reading only new JSONL lines (byte-offset tracking) to detect error rate spikes.
 
 ### Core state keys
 
@@ -133,4 +160,7 @@ state.json
 | `period_history` | Core | Appended, not cleared |
 | `session_history` | Core | Appended, capped at 200 |
 | `rich_metrics` | Core | Yes — recalculated each cycle |
+| `rich_metrics_by_window` | Core | Yes — recalculated each cycle |
+| `health_alerts` | Core | Yes — recomputed from JSONL + `/status` |
+| `intraday_samples` | Core | Appended, pruned to 48h |
 | `plugin_state.*` | Each plugin | Never — plugins manage their own lifecycle |

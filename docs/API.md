@@ -42,6 +42,10 @@ These endpoints require an active plugin that provides task management (e.g. the
     "predictions": { "pct_all": 42.1, "pct_sonnet": 31.8 },
     "period_history": [...],
     "session_history": [...],
+    "health_alerts": [
+      {"project": "Weekly Budget", "cwd": "", "health": "yellow", "reasons": ["Projected to use 92% of weekly budget by reset (1.8d remaining). Currently at 71%."]},
+      {"project": "my-project", "cwd": "/path/to/my-project", "health": "red", "reasons": ["High error rate: 37 of 60 tool calls failed (62%)"]}
+    ],
     "plugin_state": {}
   },
   "prediction": {
@@ -72,9 +76,10 @@ These endpoints require an active plugin that provides task management (e.g. the
 | `period_history` | Archived billing period records |
 | `plugin_cards` | Dashboard cards contributed by active plugins (empty when none active) |
 | `active_plugins` | List of currently active plugin names |
-| `rich_metrics` | Detailed model/cache/tool metrics for the current period |
-| `rich_metrics_by_window` | Metrics broken down by time window |
-| `intraday_samples` | Periodic usage samples within the current day |
+| `state.health_alerts` | Active health alerts: budget projection, sustained anomaly, error rate |
+| `rich_metrics` | Detailed model/cache/tool metrics (default window) |
+| `rich_metrics_by_window` | Metrics per time window: `session`, `week`, `month`, `all` |
+| `intraday_samples` | Periodic usage samples (last 48 hours) |
 
 ## Error Responses
 
