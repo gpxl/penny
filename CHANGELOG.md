@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.6.0b1] - 2026-04-03
+
 ### Added
 
 - Per-project and per-session token usage tracking in dashboard

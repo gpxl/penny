@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "penny"
-version = "0.5.0"
+version = "0.6.0b1"
 description = "Claude Code Token Monitor — macOS menu bar app"
 requires-python = ">=3.9"
 dependencies = [
