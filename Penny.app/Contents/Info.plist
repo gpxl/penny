@@ -10,9 +10,9 @@
   <key>CFBundleIdentifier</key>
   <string>com.gpxl.penny</string>
   <key>CFBundleVersion</key>
-  <string>0.5.0</string>
+  <string>0.6.0b1</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.5.0</string>
+  <string>0.6.0b1</string>
   <key>CFBundleExecutable</key>
   <string>Penny</string>
   <key>CFBundlePackageType</key>
