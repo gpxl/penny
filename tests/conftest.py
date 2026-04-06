@@ -123,6 +123,7 @@ def rich_jsonl_dir(tmp_path):
         json.dumps({
             "type": "assistant",
             "timestamp": "2025-01-10T14:00:00.000Z",
+            "sessionId": "sess-111",
             "cwd": "/home/user/proj-a",
             "gitBranch": "main",
             "message": {
@@ -144,6 +145,7 @@ def rich_jsonl_dir(tmp_path):
         json.dumps({
             "type": "assistant",
             "timestamp": "2025-01-10T15:00:00.000Z",
+            "sessionId": "sess-222",
             "isSidechain": True,
             "cwd": "/home/user/proj-b",
             "gitBranch": "feature-x",
@@ -165,6 +167,7 @@ def rich_jsonl_dir(tmp_path):
         json.dumps({
             "type": "assistant",
             "timestamp": "2025-01-10T16:00:00.000Z",
+            "sessionId": "sess-111",
             "cwd": "/home/user/proj-a",
             "gitBranch": "main",
             "message": {
@@ -205,6 +208,104 @@ def mock_subprocess():
     """Patch subprocess.run and subprocess.Popen."""
     with patch("subprocess.run") as mock_run, patch("subprocess.Popen") as mock_popen:
         yield mock_run, mock_popen
+
+
+@pytest.fixture
+def multi_project_jsonl_dir(tmp_path):
+    """JSONL data spanning two projects and three sessions for project_usage tests.
+
+    Layout:
+      proj-a: sess-aaa (Opus 500, Sonnet 200), sess-bbb (Haiku 100)
+      proj-b: sess-ccc (Sonnet 300)
+    """
+    import os
+
+    projects_dir = tmp_path / ".claude" / "projects" / "proj-multi"
+    projects_dir.mkdir(parents=True)
+
+    convo = projects_dir / "session1.jsonl"
+    lines = [
+        # proj-a, sess-aaa, Opus 500
+        json.dumps({
+            "type": "assistant",
+            "timestamp": "2025-01-10T10:00:00.000Z",
+            "sessionId": "sess-aaa",
+            "cwd": "/home/user/proj-a",
+            "message": {
+                "model": "claude-opus-4-6",
+                "usage": {"output_tokens": 500, "input_tokens": 0,
+                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                "content": [],
+            },
+        }),
+        # proj-a, sess-aaa, Sonnet 200 (same session, different model)
+        json.dumps({
+            "type": "assistant",
+            "timestamp": "2025-01-10T11:00:00.000Z",
+            "sessionId": "sess-aaa",
+            "cwd": "/home/user/proj-a",
+            "message": {
+                "model": "claude-sonnet-4-6",
+                "usage": {"output_tokens": 200, "input_tokens": 0,
+                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                "content": [],
+            },
+        }),
+        # proj-a, sess-bbb, Haiku 100 (second session in same project)
+        json.dumps({
+            "type": "assistant",
+            "timestamp": "2025-01-10T12:00:00.000Z",
+            "sessionId": "sess-bbb",
+            "cwd": "/home/user/proj-a",
+            "message": {
+                "model": "claude-haiku-4-5-20251001",
+                "usage": {"output_tokens": 100, "input_tokens": 0,
+                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                "content": [],
+            },
+        }),
+        # proj-b, sess-ccc, Sonnet 300 (different project)
+        json.dumps({
+            "type": "assistant",
+            "timestamp": "2025-01-10T14:00:00.000Z",
+            "sessionId": "sess-ccc",
+            "cwd": "/home/user/proj-b",
+            "message": {
+                "model": "claude-sonnet-4-6",
+                "usage": {"output_tokens": 300, "input_tokens": 0,
+                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                "content": [],
+            },
+        }),
+        # Tool error in proj-a, sess-aaa
+        json.dumps({
+            "type": "user",
+            "timestamp": "2025-01-10T10:30:00.000Z",
+            "sessionId": "sess-aaa",
+            "cwd": "/home/user/proj-a",
+            "toolUseResult": {"is_error": True},
+        }),
+        # Tool error in proj-a, sess-bbb
+        json.dumps({
+            "type": "user",
+            "timestamp": "2025-01-10T12:30:00.000Z",
+            "sessionId": "sess-bbb",
+            "cwd": "/home/user/proj-a",
+            "toolUseResult": {"is_error": True},
+        }),
+        # Tool error in proj-b, sess-ccc
+        json.dumps({
+            "type": "user",
+            "timestamp": "2025-01-10T14:30:00.000Z",
+            "sessionId": "sess-ccc",
+            "cwd": "/home/user/proj-b",
+            "toolUseResult": {"is_error": True},
+        }),
+    ]
+    convo.write_text("\n".join(lines), encoding="utf-8")
+    os.utime(convo, None)
+
+    return tmp_path
 
 
 @pytest.fixture

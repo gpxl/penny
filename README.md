@@ -26,8 +26,10 @@ macOS menu bar app that monitors your Claude Code token usage, tracks session an
 1. **Token monitoring** — reads Claude Code session files and displays current session + weekly usage in the menu bar.
 2. **Budget tracking** — All Models and Sonnet usage with progress bars and reset countdowns for both session and weekly billing periods.
 3. **Capacity prediction** — projected usage at current burn rate, estimated remaining time, and unused capacity percentage.
-4. **Analytics dashboard** — live at `127.0.0.1:7432` with model breakdown, cache efficiency, tool usage, session history, and activity by hour.
-5. **HTML report** — self-contained status report with weekly usage history.
+4. **Health alerts** — budget projection warnings when you're on track to exceed your weekly limit, sustained anomaly detection for runaway processes, and error rate monitoring. Alerts appear in the menu bar and dashboard.
+5. **Per-project analytics** — token usage breakdown by project with per-session drill-down, sortable columns, and session titles.
+6. **Analytics dashboard** — live at `127.0.0.1:7432` with model breakdown, cache efficiency, tool usage, session history, activity by hour, and project-level metrics. All time-scoped cards share a global time window selector.
+7. **HTML report** — self-contained status report with weekly usage history.
 
 ## Who it's for
 

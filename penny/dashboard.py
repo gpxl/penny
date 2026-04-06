@@ -225,6 +225,15 @@ class DashboardServer:
                     _dispatch("clearAllCompleted:", None, True)
                     self._ok({"ok": True})
 
+                elif self.path == "/api/resume-session":
+                    session_id = payload.get("session_id", "")
+                    cwd = payload.get("cwd", "")
+                    if not session_id:
+                        self._error(400, "session_id required")
+                        return
+                    _resume_session(session_id, cwd)
+                    self._ok({"ok": True})
+
                 elif self.path == "/api/config":
                     error = _validate_config_patch(payload)
                     if error:
@@ -274,6 +283,19 @@ class DashboardServer:
                 pass  # Suppress request logs
 
         return Handler
+
+
+def _resume_session(session_id: str, cwd: str) -> None:
+    """Open a Terminal.app window resuming a Claude session."""
+    import shlex
+
+    from .spawner import _open_in_terminal
+
+    parts = []
+    if cwd:
+        parts.append(f"cd {shlex.quote(cwd)}")
+    parts.append(f"claude --resume {shlex.quote(session_id)}")
+    _open_in_terminal(" && ".join(parts))
 
 
 def _snapshot(app) -> dict[str, Any]:
@@ -569,6 +591,37 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .save-status { font-size:11px; color:#10b981; margin-left:8px; opacity:0; transition:opacity .3s; }
     .save-status.visible { opacity:1; }
     .inline-error { font-size:11px; color:#ef4444; margin-top:4px; }
+    /* Project accordion */
+    .proj-row { border-bottom:1px solid #f3f4f6; padding:6px 0; }
+    .proj-row:last-child { border-bottom:none; }
+    .proj-row summary { display:flex; align-items:center; gap:12px; cursor:pointer; list-style:none; font-size:13px; }
+    .proj-row summary::-webkit-details-marker { display:none; }
+    .proj-row summary::before { content:'▸'; color:#9ca3af; font-size:11px; transition:transform .15s; }
+    .proj-row[open] summary::before { transform:rotate(90deg); }
+    .proj-name { font-weight:600; min-width:100px; }
+    .proj-stat { color:#6b7280; font-size:12px; }
+    .tbl-sm { margin:6px 0 2px 16px; font-size:11px; }
+    .tbl-sm th { font-size:10px; padding:2px 6px; cursor:pointer; user-select:none; white-space:nowrap; }
+    .tbl-sm th:last-child { cursor:default; }
+    .tbl-sm th:hover:not(:last-child) { color:#3b82f6; }
+    .tbl-sm th .sort-arrow { font-size:8px; margin-left:2px; opacity:0.4; }
+    .tbl-sm th.sorted .sort-arrow { opacity:1; color:#3b82f6; }
+    .tbl-sm td { padding:2px 6px; }
+    .btn-resume { font-size:10px; padding:2px 8px; border:1px solid #e5e7eb; border-radius:3px; background:#fff; cursor:pointer; color:#3b82f6; }
+    .btn-resume:hover { background:#eff6ff; }
+    /* Health indicators */
+    .health-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; flex-shrink:0; }
+    .health-yellow { background:#eab308; }
+    .health-red { background:#ef4444; animation:healthPulse 1.5s infinite; }
+    @keyframes healthPulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+    .health-banner { padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:12px; display:flex; align-items:center; gap:8px; }
+    .health-banner.banner-red { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
+    .health-banner.banner-yellow { background:#fefce8; border:1px solid #fef08a; color:#854d0e; }
+    .health-banner .dismiss { cursor:pointer; margin-left:auto; opacity:0.5; font-size:16px; line-height:1; }
+    .health-banner .dismiss:hover { opacity:1; }
+    .anomaly-row { background:#fef2f2; border-left:3px solid #ef4444; }
+    .anomaly-row-yellow { background:#fefce8; border-left:3px solid #eab308; }
+    .proj-rate { color:#9ca3af; font-size:11px; }
   </style>
 </head>
 <body>
@@ -578,6 +631,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <button class="nav-tab" onclick="showPage('settings')">Settings</button>
 </div>
 
+<div id="health-banner"></div>
 <div id="page-dashboard">
 <div class="grid">
   <div class="card" id="card-period"><h2>Weekly Budget</h2><p>…</p></div>
@@ -593,6 +647,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card" id="card-activity-hour"><h2>Activity by Hour</h2><p>…</p></div>
 </div>
 <div class="card" id="card-weekly-history" style="margin-bottom:12px"><h2>Weekly Budget History</h2><p>…</p></div>
+<div class="card" id="card-projects" style="margin-bottom:12px"><h2>Projects</h2><p>…</p></div>
 <div id="plugin-cards-container"></div>
 </div><!-- /page-dashboard -->
 
@@ -661,23 +716,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 let lastOk = null;
 let lastData = null;
-let historyFilter = 'week';
 let metricsFilter = 'month';
-let historyFilterAutoSet = false;
-
-function autoSelectHistoryFilter(history) {
-  if (historyFilterAutoSet) return;
-  historyFilterAutoSet = true;
-  const now = Date.now();
-  const weekCutoff = new Date(now - 7 * 86400000).toISOString();
-  const fourWeekCutoff = new Date(now - 28 * 86400000).toISOString();
-  const weekData = (history || []).filter(h => (h.start || '') >= weekCutoff);
-  if (weekData.length > 0) { historyFilter = 'week'; return; }
-  const fourWeekData = (history || []).filter(h => (h.start || '') >= fourWeekCutoff);
-  if (fourWeekData.length > 0) { historyFilter = '4w'; return; }
-  if ((history || []).length > 0) { historyFilter = 'all'; return; }
-  historyFilter = 'week';
-}
 
 function tip(text) {
   return `<span class="info-tip">ⓘ<span class="tip-text">${text}</span></span>`;
@@ -963,29 +1002,45 @@ function renderSession(pred) {
     <div class="stat-row"><span>${(pred.session_hours_remaining||0).toFixed(1)} hours remaining</span></div>`;
 }
 
-function filterHistory(history) {
-  if (historyFilter === 'week') {
-    const cutoff = new Date(Date.now() - 7 * 86400000).toISOString();
-    return history.filter(h => (h.start || '') >= cutoff);
+function filterHistoryByWindow(history, data) {
+  if (!history || !history.length) return [];
+  const pred = data && data.prediction || {};
+  if (metricsFilter === 'session') {
+    const cutoff = pred.session_start || '';
+    return cutoff ? history.filter(h => (h.start || '') >= cutoff) : history;
   }
-  if (historyFilter === '4w') {
+  if (metricsFilter === 'week') {
+    const cutoff = pred.period_start || '';
+    return cutoff ? history.filter(h => (h.start || '') >= cutoff) : history;
+  }
+  if (metricsFilter === 'month') {
     const cutoff = new Date(Date.now() - 28 * 86400000).toISOString();
     return history.filter(h => (h.start || '') >= cutoff);
   }
   return history; // 'all'
 }
 
-function setFilter(f) {
-  historyFilter = f;
-  if (lastData) {
-    document.getElementById('card-history').innerHTML = '<h2>Session History</h2>' + renderHistory_card(lastData.session_history);
-  }
-}
-
 function setMetricsFilter(f) {
   metricsFilter = f;
   renderMetricsFilterBar();
-  if (lastData) renderMetricsCards(lastData);
+  if (lastData) {
+    renderMetricsCards(lastData);
+    renderFilteredCards(lastData);
+  }
+}
+
+function renderFilteredCards(data) {
+  // Session history — filtered by global metricsFilter
+  const historyEl = document.getElementById('card-history');
+  const wl = metricsWindowLabel();
+  updateSessionHistory(data.session_history, data, wl);
+
+  // Projects — filtered by global metricsFilter
+  const projectsEl = document.getElementById('card-projects');
+  const rm = getMetricsForWindow(data);
+  const hasProjects = rm && (rm.project_usage || []).length > 0;
+  projectsEl.style.display = hasProjects ? '' : 'none';
+  if (hasProjects) projectsEl.innerHTML = `<h2>Projects${tip("Token usage breakdown by project (working directory). Click a project to see its individual sessions.")}</h2>` + renderProjectsCard(rm, data);
 }
 
 function renderMetricsFilterBar() {
@@ -1070,6 +1125,7 @@ function renderMetricsCards(data) {
 function renderBarChart(data, opts) {
   const dateKey = opts.dateKey || 'start';
   const showTime = opts.showTime || false;
+  const chartId = opts.chartId || '';
   const PAD_L = 40, PAD_T = 5, PAD_B = 20;
   const max = Math.max(...data.map(d => d.output_all||0), 1);
   const W = 480, H = 80, n = data.length;
@@ -1082,7 +1138,7 @@ function renderBarChart(data, opts) {
     const y = PAD_T + yOff;
     const kVal = Math.round(frac * maxK);
     yAxis += `<line x1="${PAD_L}" y1="${y}" x2="${W}" y2="${y}" stroke="#f3f4f6" stroke-width="1"/>`;
-    yAxis += `<text x="${PAD_L - 4}" y="${y + 3}" text-anchor="end">${kVal}k</text>`;
+    yAxis += `<text x="${PAD_L - 4}" y="${y + 3}" text-anchor="end" data-axis-frac="${frac}">${kVal}k</text>`;
   });
   const tipW = showTime ? 90 : 80;
   const tipH = 28;
@@ -1103,7 +1159,7 @@ function renderBarChart(data, opts) {
     const tipY = Math.max(y - tipH - 4, PAD_T);
     bars += `<g class="bar-g">`;
     bars += `<rect x="${x}" y="${PAD_T}" width="${bw}" height="${H}" fill="transparent"/>`;
-    bars += `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${fill}" rx="2" style="transform-origin:${x + bw/2}px ${PAD_T + H}px; animation: barGrowUp 0.3s ease-out ${(i * 0.02).toFixed(2)}s both"/>`;
+    bars += `<rect data-bar="${i}" x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${fill}" rx="2" style="transform-origin:${x + bw/2}px ${PAD_T + H}px; animation: barGrowUp 0.3s ease-out ${(i * 0.02).toFixed(2)}s both"/>`;
     if (n <= 8 || i % Math.ceil(n/6) === 0) bars += `<text x="${x + bw/2}" y="${PAD_T + H + 14}" text-anchor="middle">${dateLabel}</text>`;
     bars += `<g class="tip">`;
     bars += `<rect x="${tipXAdj}" y="${tipY}" width="${tipW}" height="${tipH}" rx="3" fill="#1f2937" opacity="0.9"/>`;
@@ -1111,20 +1167,71 @@ function renderBarChart(data, opts) {
     bars += `<text x="${tipXAdj + tipW/2}" y="${tipY + 22}" text-anchor="middle" fill="#f9fafb" font-size="9">${kTokens}k tokens</text>`;
     bars += `</g></g>`;
   });
-  return `<svg viewBox="0 0 ${W} ${H + PAD_T + PAD_B}" style="width:100%;height:auto;overflow:visible">${yAxis}${bars}</svg>`;
+  const idAttr = chartId ? ` id="${chartId}"` : '';
+  return `<svg${idAttr} viewBox="0 0 ${W} ${H + PAD_T + PAD_B}" style="width:100%;height:auto;overflow:visible" data-bar-count="${n}" data-max="${max}">${yAxis}${bars}</svg>`;
 }
 
-function renderHistory_card(history) {
-  const filtered = filterHistory(history || []);
-  const btns = ['week','4w','all'].map(f => {
-    const label = {week:'This week', '4w':'4 weeks', all:'All time'}[f];
-    return `<button class="filter-btn ${historyFilter===f?'active':''}" onclick="setFilter('${f}')">${label}</button>`;
-  }).join('');
-  const btnRow = `<div class="filter-btns">${btns}</div>`;
-  if (!filtered.length) {
-    return btnRow + '<p style="color:#9ca3af;font-size:12px">No completed sessions yet. Sub-session history appears after your first rate-limit boundary.</p>';
+function updateBarChart(svgId, data, opts) {
+  const svg = document.getElementById(svgId);
+  if (!svg) return false;
+  const dateKey = opts.dateKey || 'start';
+  const showTime = opts.showTime || false;
+  const prevCount = parseInt(svg.getAttribute('data-bar-count') || '0');
+  const n = data.length;
+  // If bar count changed, a full re-render is needed (new/removed bars)
+  if (n !== prevCount) return false;
+  const PAD_T = 5, H = 80;
+  const max = Math.max(...data.map(d => d.output_all||0), 1);
+  const prevMax = parseFloat(svg.getAttribute('data-max') || '1');
+  svg.setAttribute('data-max', max);
+  // Update y-axis labels if scale changed
+  if (Math.round(max/1000) !== Math.round(prevMax/1000)) {
+    svg.querySelectorAll('[data-axis-frac]').forEach(el => {
+      const frac = parseFloat(el.getAttribute('data-axis-frac'));
+      el.textContent = Math.round(frac * max / 1000) + 'k';
+    });
   }
-  return btnRow + renderBarChart(filtered, {dateKey:'start', showTime:true});
+  // Animate each bar to new position/height
+  data.forEach((d, i) => {
+    const el = svg.querySelector('[data-bar="' + i + '"]');
+    if (!el) return;
+    const val = d.output_all || 0;
+    const bh = Math.max(Math.round((val / max) * H), 2);
+    const y = PAD_T + H - bh;
+    const pct = val / max * 100;
+    const fill = pct < 60 ? '#10b981' : pct < 80 ? '#eab308' : '#ef4444';
+    // Remove barGrowUp animation on subsequent updates
+    el.style.animation = 'none';
+    animateAttr(el, 'y', y);
+    animateAttr(el, 'height', bh);
+    el.setAttribute('fill', fill);
+  });
+  return true; // updated in-place
+}
+
+function renderHistory_card(history, data, wl) {
+  const filtered = filterHistoryByWindow(history || [], data);
+  if (!filtered.length) {
+    return '<p style="color:#9ca3af;font-size:12px">No completed sessions in this window. Sub-session history appears after your first rate-limit boundary.</p>';
+  }
+  return `<p style="color:#6b7280;font-size:11px;margin:0 0 8px">Sub-session token usage (${wl || 'last 28 days'})</p>`
+    + renderBarChart(filtered, {dateKey:'start', showTime:true, chartId:'session-history-svg'});
+}
+
+function updateSessionHistory(history, data, wl) {
+  const filtered = filterHistoryByWindow(history || [], data);
+  const card = document.getElementById('card-history');
+  if (!card) return;
+  // Try in-place update first (same bar count → animate)
+  if (filtered.length > 0 && updateBarChart('session-history-svg', filtered, {dateKey:'start', showTime:true})) {
+    // Update description text if window label changed
+    const p = card.querySelector('p');
+    if (p && p.style.color) p.innerHTML = `Sub-session token usage (${wl || 'last 28 days'})`;
+    return;
+  }
+  // Full re-render (bar count changed or first paint)
+  card.innerHTML = `<h2>Session History${tip("Output tokens per sub-session (each ~5h block between rate-limit resets). Useful for spotting heavy coding sessions.")}</h2>`
+    + renderHistory_card(history, data, wl);
 }
 
 function renderWeeklyHistory_card(periodHistory) {
@@ -1135,6 +1242,117 @@ function renderWeeklyHistory_card(periodHistory) {
   return renderBarChart(history, {dateKey:'period_start', showTime:false});
 }
 
+const projSortState = {};
+function sortSessions(sessions, key, asc) {
+  const cmp = (a, b) => {
+    const va = a[key] || '', vb = b[key] || '';
+    if (typeof va === 'number') return asc ? va - vb : vb - va;
+    return asc ? (va < vb ? -1 : va > vb ? 1 : 0) : (va > vb ? -1 : va < vb ? 1 : 0);
+  };
+  return [...sessions].sort(cmp);
+}
+function onSortClick(projIdx, key) {
+  const st = projSortState[projIdx] || {key: 'last_ts', asc: false};
+  if (st.key === key) { st.asc = !st.asc; } else { st.key = key; st.asc = key === 'title'; }
+  projSortState[projIdx] = st;
+  if (lastData) renderFilteredCards(lastData);
+}
+function renderProjectsCard(rm, data) {
+  const projects = (rm && rm.project_usage) || [];
+  if (!projects.length) return '<p style="color:#9ca3af;font-size:12px">No project data yet.</p>';
+  // Build billing-period health lookup from state.health_alerts (not window-dependent)
+  const billingHealth = {};
+  ((data && data.state && data.state.health_alerts) || []).forEach(a => {
+    billingHealth[a.cwd] = a;
+  });
+  const grandTotal = projects.reduce((s, p) => s + p.total_output_tokens, 0) || 1;
+  const cols = [
+    {key:'title', label:'Session'},
+    {key:'total_output_tokens', label:'Tokens'},
+    {key:'_pct', label:'Share'},
+    {key:'total_turns', label:'Turns'},
+    {key:'duration_m', label:'Duration'},
+    {key:'tool_errors', label:'Errors'},
+    {key:'tokens_per_turn', label:'Tok/Turn'},
+    {key:'last_ts', label:'Last Active'},
+  ];
+  return projects.map((p, pi) => {
+    const pct = (p.total_output_tokens / grandTotal * 100).toFixed(1);
+    const kTokens = Math.round(p.total_output_tokens / 1000);
+    const sessions = (p.sessions || []);
+    const st = projSortState[pi] || {key: 'last_ts', asc: false};
+    const sortKey = st.key === '_pct' ? 'total_output_tokens' : st.key;
+    const sorted = sortSessions(sessions, sortKey, st.asc);
+    const headers = cols.map(c => {
+      const active = st.key === c.key;
+      const arrow = active ? (st.asc ? '&#9650;' : '&#9660;') : '&#9660;';
+      const cls = active ? ' class="sorted"' : '';
+      return `<th${cls} onclick="onSortClick(${pi},'${c.key}')">${c.label}<span class="sort-arrow">${arrow}</span></th>`;
+    }).join('') + '<th></th>';
+    const sessRows = sorted.map(s => {
+      const sK = Math.round(s.total_output_tokens / 1000);
+      const sPct = (s.total_output_tokens / p.total_output_tokens * 100).toFixed(0);
+      const lastActive = s.last_ts ? s.last_ts.slice(5, 16).replace('T', ' ') : '';
+      const sid = s.session_id || '';
+      const shortId = sid.length > 12 ? sid.slice(0, 8) + '\u2026' : sid;
+      const label = s.title || shortId;
+      const titleAttr = s.title ? `${s.title} (${sid})` : sid;
+      const durM = s.duration_m != null ? (s.duration_m < 60 ? s.duration_m.toFixed(0) + 'm' : (s.duration_m / 60).toFixed(1) + 'h') : '';
+      const errs = s.tool_errors || 0;
+      const tpt = s.tokens_per_turn != null ? Math.round(s.tokens_per_turn) : '';
+      const isAnomaly = s.anomaly === true;
+      const anomalyReasons = (s.anomaly_reasons || []).join('; ');
+      const rowCls = isAnomaly ? ' class="anomaly-row"' : '';
+      const rowTitle = isAnomaly ? ` title="${anomalyReasons}"` : '';
+      return `<tr${rowCls}${rowTitle}>
+        <td title="${titleAttr}" style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}</td>
+        <td>${sK}k</td><td>${sPct}%</td><td>${s.total_turns}</td>
+        <td>${durM}</td>
+        <td${errs > 0 ? ' style="color:#ef4444;font-weight:600"' : ''}>${errs || ''}</td>
+        <td${isAnomaly ? ' style="color:#ef4444"' : ''}>${tpt}</td>
+        <td>${lastActive}</td>
+        <td><button class="btn-resume" onclick="resumeSession('${sid}','${(p.cwd||'').replace(/'/g,"\\'")}')">Resume</button></td>
+      </tr>`;
+    }).join('');
+    const sessTable = sessions.length ? `<table class="tbl-sm">
+      <tr>${headers}</tr>
+      ${sessRows}</table>` : '<p style="color:#9ca3af;font-size:11px;margin:4px 0">No session data</p>';
+    // Health dot — use billing-period health for summary row, not window-dependent
+    const bh = billingHealth[p.cwd];
+    const dotHealth = bh ? bh.health : 'green';
+    const dotReasons = bh ? (bh.reasons || []).join('; ') : '';
+    const healthDot = dotHealth !== 'green'
+      ? `<span class="health-dot health-${dotHealth}" title="${dotReasons}"></span>`
+      : '';
+    // Rate stats
+    const burnRate = p.burn_rate > 0 ? Math.round(p.burn_rate / 1000) + 'k/h' : '';
+    const errRate = p.error_rate > 0 ? p.error_rate.toFixed(0) + '% err' : '';
+    return `<details class="proj-row">
+      <summary>
+        ${healthDot}
+        <span class="proj-name" title="${p.cwd||''}">${p.name}</span>
+        <span class="proj-stat">${kTokens}k tokens</span>
+        <span class="proj-stat">${pct}%</span>
+        <span class="proj-stat">${p.total_turns} turns</span>
+        <span class="proj-stat">${p.session_count} sessions</span>
+        ${burnRate ? `<span class="proj-rate">${burnRate}</span>` : ''}
+        ${errRate ? `<span class="proj-rate" style="color:#ef4444">${errRate}</span>` : ''}
+      </summary>
+      ${sessTable}
+    </details>`;
+  }).join('');
+}
+
+async function resumeSession(sessionId, cwd) {
+  try {
+    await fetch('/api/resume-session', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: sessionId, cwd: cwd}),
+    });
+  } catch (e) { /* ignore */ }
+}
+
 function renderPluginCards(cards) {
   const container = document.getElementById('plugin-cards-container');
   if (!container) return;
@@ -1143,11 +1361,33 @@ function renderPluginCards(cards) {
   ).join('');
 }
 
+const dismissedAlerts = new Set();
+function renderHealthBanner(data) {
+  const el = document.getElementById('health-banner');
+  const state = data.state || {};
+  // Use only billing-period-scoped alerts (state.health_alerts), not
+  // window-dependent rich_metrics alerts which reflect historical data.
+  const alerts = (state.health_alerts || [])
+    .filter(a => !dismissedAlerts.has(a.cwd))
+    .sort((a, b) => (a.health === 'red' ? 0 : 1) - (b.health === 'red' ? 0 : 1));
+  if (!alerts.length) { el.innerHTML = ''; return; }
+  el.innerHTML = alerts.map(a => {
+    const icon = a.health === 'red' ? '&#9888;' : '&#9888;';
+    const reasons = (a.reasons || []).join(', ');
+    return `<div class="health-banner banner-${a.health}">
+      <span>${icon}</span>
+      <span><strong>${a.project}</strong> &mdash; ${reasons}</span>
+      <span class="dismiss" onclick="dismissedAlerts.add('${a.cwd.replace(/'/g,"\\'")}');renderHealthBanner(lastData)">&times;</span>
+    </div>`;
+  }).join('');
+}
+
 function render(data) {
   lastData = data;
   const pred = data.prediction || {};
   const state = data.state || {};
   const samples = data.intraday_samples || [];
+  renderHealthBanner(data);
   document.getElementById('card-period').innerHTML = `<h2>Weekly Budget${tip("Your cumulative output token usage this billing week. Resets every 7 days (Fri 20:00 UTC). Tracked against Anthropic Claude Pro or Max plan limits.")}</h2>` + renderPeriod(pred, samples);
   document.getElementById('card-session').innerHTML = `<h2>Session Budget${tip("Output token usage since your last rate-limit boundary (~5h windows). Resets independently of the weekly budget.")}</h2>` + renderSession(pred);
   renderMetricsFilterBar();
@@ -1156,8 +1396,7 @@ function render(data) {
   const hasWeeklyHistory = (data.period_history || []).length > 0;
   weeklyHistoryEl.style.display = hasWeeklyHistory ? '' : 'none';
   if (hasWeeklyHistory) weeklyHistoryEl.innerHTML = `<h2>Weekly Budget History${tip("Output token totals for each past billing week. Color: green < 60%, yellow 60–80%, red ≥ 80% of the highest observed week.")}</h2>` + renderWeeklyHistory_card(data.period_history);
-  autoSelectHistoryFilter(data.session_history);
-  document.getElementById('card-history').innerHTML = `<h2>Session History${tip("Output tokens per sub-session (each ~5h block between rate-limit resets). Useful for spotting heavy coding sessions.")}</h2>` + renderHistory_card(data.session_history);
+  renderFilteredCards(data);
   renderPluginCards(data.plugin_cards);
 }
 

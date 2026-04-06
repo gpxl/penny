@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Added
+
+- Per-project and per-session token usage tracking in dashboard
+- Session titles and sortable columns in Projects card
+- Per-project health signals: error rate monitoring with contextual messages
+- Health warning indicator (⚠) in menu bar icon for active alerts
+- Budget projection alerts — warns when projected to use 85%+ of weekly budget
+- Sustained session anomaly detection — flags projects burning tokens at 3x+ their active-hour baseline
+
+### Changed
+
+- Health alerts redesigned to be budget-aware and actionable — removed noisy absolute burn rate thresholds, cross-project comparison, session velocity/duration alerts, and 1-minute spike extrapolation
+- Session History and Projects cards now use the global time window selector instead of independent filters
+- Dashboard charts transition smoothly on data updates instead of redrawing from scratch
+- Quick health scan simplified to error-rate detection only
+
+### Fixed
+
+- Batch session detection to eliminate N×scan startup bottleneck
+- Project health dots use billing-period health, not selected window
+- Scoped health baselines to current billing period
+- Dashboard project accordions no longer auto-open for red items
+
 ## [0.5.0] - 2026-03-26
 
 ### Added

@@ -65,40 +65,59 @@ def archive_completed_session(
 
 def detect_new_sessions(state: dict[str, Any], period_start: datetime) -> dict[str, Any]:
     """
-    Detect completed sub-sessions across the last 12 billing periods and archive them.
+    Detect completed sub-sessions across recent billing periods and archive them.
     Called at the start of each analysis cycle so estimate_session_budget() improves
     over time as real rate-limit data accumulates.
+
+    Performance: only scans the current billing period when session_history already
+    has data.  Falls back to 12-week scan on the very first run (empty history).
+    Token counting for un-archived sessions uses a single JSONL pass via
+    count_tokens_by_window() instead of one scan per session.
     """
-    from .analysis import count_tokens_since, find_session_boundaries, past_billing_periods
+    from .analysis import (
+        count_tokens_by_window,
+        find_session_boundaries,
+        past_billing_periods,
+    )
 
     now = datetime.now(timezone.utc)
 
-    # Scan all historical billing periods (last 12 weeks) in a single JSONL pass.
-    periods = past_billing_periods(12)
+    # Only scan 12 weeks on the very first run; after that, just the current period.
+    has_history = bool(state.get("session_history"))
+    periods = past_billing_periods(1) if has_history else past_billing_periods(12)
     oldest_start = periods[0][0]
     all_boundaries = find_session_boundaries(oldest_start)
 
     already_archived = {s["start"] for s in state.get("session_history", [])}
 
+    # Collect all un-archived (start, end) pairs first
+    pending: list[tuple[datetime, datetime]] = []
     for p_start, p_end in periods:
-        # Rate-limit boundaries that fall within this billing period.
         period_boundaries = [b for b in all_boundaries if p_start < b <= p_end]
         if not period_boundaries:
             continue
 
-        # Each boundary is the END of a session; the previous boundary (or period
-        # start) is the START of that session.
         sess_starts = [p_start] + period_boundaries[:-1]
         sess_ends = period_boundaries
 
         for sess_start, sess_end in zip(sess_starts, sess_ends):
             if sess_end > now:
-                break  # Future boundary — session not completed yet
-            start_str = sess_start.isoformat()
-            if start_str in already_archived:
+                break
+            if sess_start.isoformat() in already_archived:
                 continue
-            usage = count_tokens_since(sess_start, until=sess_end)
-            archive_completed_session(state, sess_start, sess_end, usage.output_all, usage.output_sonnet)
+            pending.append((sess_start, sess_end))
+
+    # Batch token counting: one JSONL pass for all pending sessions
+    if pending:
+        windows = {s.isoformat(): (s, e) for s, e in pending}
+        usage_map = count_tokens_by_window(windows)
+        for sess_start, sess_end in pending:
+            usage = usage_map.get(sess_start.isoformat())
+            if usage is not None:
+                archive_completed_session(
+                    state, sess_start, sess_end,
+                    usage.output_all, usage.output_sonnet,
+                )
 
     state["last_session_scan"] = now.isoformat()
     return state, all_boundaries

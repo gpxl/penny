@@ -18,6 +18,8 @@ class BackgroundWorker:
         self._app = app          # PennyApp NSObject instance
         self._lock = threading.Lock()
         self._running = False
+        self._health_lock = threading.Lock()
+        self._health_running = False
 
     def fetch(self, force: bool = False) -> None:
         """Trigger a background fetch. No-ops if a fetch is already in progress."""
@@ -43,13 +45,61 @@ class BackgroundWorker:
             "_didFetchData:", result, False
         )
 
+    def health_check(self) -> None:
+        """Run a lightweight health check. No-ops if already running."""
+        with self._health_lock:
+            if self._health_running:
+                return
+            self._health_running = True
+        t = threading.Thread(target=self._run_health_check, daemon=True)
+        t.start()
+
+    def _run_health_check(self) -> None:
+        try:
+            result = self._do_health_check()
+        except Exception as exc:
+            print(f"[penny] health_check exception: {exc}", flush=True)
+            result = {"error": str(exc)}
+        finally:
+            with self._health_lock:
+                self._health_running = False
+
+        self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "_didHealthCheck:", result, False
+        )
+
+    @staticmethod
+    def _do_health_check() -> dict[str, Any]:
+        """Lightweight JSONL tail for health alerts. Called on a background thread."""
+        from .analysis import quick_health_scan
+        from .state import load_state, save_state
+
+        state = load_state()
+        offsets = state.get("_health_scan_offsets", {})
+
+        alerts, new_offsets = quick_health_scan(offsets)
+
+        state["_health_scan_offsets"] = new_offsets
+        if alerts:
+            state["health_alerts"] = alerts
+        save_state(state)
+
+        return {"health_alerts": alerts}
+
     @staticmethod
     def _fetch_data(force: bool) -> dict[str, Any]:
         """Gather all data needed by the UI. Called on a background thread."""
         import dataclasses
+        import glob
         from datetime import timedelta, timezone
+        from pathlib import Path
 
-        from .analysis import build_prediction, current_billing_period, scan_rich_metrics_multi
+        from .analysis import (
+            build_prediction,
+            compute_health_alerts,
+            current_billing_period,
+            scan_rich_metrics_multi,
+        )
         from .spawner import check_running_agents
         from .state import detect_new_sessions, load_state, reset_period_if_needed, save_state
         from .status_fetcher import get_cached_status
@@ -83,16 +133,48 @@ class BackgroundWorker:
             session_dt = now_utc - timedelta(hours=5)
 
         windows = {
+            "recent": now_utc - timedelta(hours=1),
             "session": session_dt,
-            "week": now_utc - timedelta(days=7),
+            "week": start,  # current billing period — baselines scoped here
             "month": now_utc - timedelta(days=28),
             "all": datetime(2024, 1, 1, tzinfo=timezone.utc),
         }
         multi = scan_rich_metrics_multi(windows)
-        state["rich_metrics"] = dataclasses.asdict(multi.get("month", multi.get("all")))
+        primary = multi.get("month", multi.get("all"))
+        state["rich_metrics"] = dataclasses.asdict(primary)
         state["rich_metrics_by_window"] = {
             k: dataclasses.asdict(v) for k, v in multi.items()
         }
+
+        # Compute budget-aware health alerts
+        week_metrics = multi.get("week", primary)
+        session_metrics = multi.get("session")
+        budget_ctx = None
+        if prediction is not None:
+            budget_ctx = {
+                "projected_pct_all": prediction.projected_pct_all,
+                "pct_all": prediction.pct_all,
+                "budget_all": prediction.budget_all,
+                "days_remaining": prediction.days_remaining,
+                "reset_label": getattr(prediction, "reset_label", ""),
+            }
+        state["health_alerts"] = compute_health_alerts(
+            week_projects=week_metrics.project_usage,
+            session_projects=session_metrics.project_usage if session_metrics else None,
+            budget_ctx=budget_ctx,
+        )
+
+        # Reset health scan offsets — full scan already processed everything
+        import os
+        offsets: dict[str, int] = {}
+        projects_dir = Path.home() / ".claude" / "projects"
+        if projects_dir.exists():
+            for fp in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True):
+                try:
+                    offsets[fp] = os.path.getsize(fp)
+                except OSError:
+                    pass
+        state["_health_scan_offsets"] = offsets
 
         # Intraday sample — append current /status percentages for burn-rate sparkline
         live = get_cached_status()
