@@ -716,11 +716,11 @@ class PennyApp(NSObject):
             self._spawn_agents()
 
     def runUpdate_(self, sender: Any) -> None:
-        """Open a Terminal window to run `penny update`."""
-        subprocess.Popen([
-            "osascript", "-e",
-            'tell application "Terminal" to do script "penny update"',
-        ])
+        """Open the GitHub release page for the latest version."""
+        uc = self.state.get("update_check", {})
+        url = uc.get("release_url", "")
+        if url:
+            subprocess.Popen(["open", url])
         self._popover.performClose_(sender)
 
     @objc.python_method

@@ -109,6 +109,24 @@ def update_state_with_check(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def revalidate_update_flag(state: dict[str, Any]) -> None:
+    """Re-check update_available against the current running version.
+
+    Handles the case where the user updated Penny but the state file still has
+    a stale update_available=True from a check done before the update.
+    """
+    uc = state.get("update_check")
+    if not uc or not uc.get("update_available"):
+        return
+    latest = uc.get("latest_version", "")
+    if not latest:
+        return
+    cmp = compare_versions(__version__, latest)
+    if cmp >= 0:
+        # Current version is equal to or newer than latest — clear the flag
+        uc["update_available"] = False
+
+
 def should_notify(state: dict[str, Any]) -> bool:
     """True if update available and user hasn't been notified for this version."""
     uc = state.get("update_check", {})

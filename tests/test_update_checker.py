@@ -272,6 +272,60 @@ class TestDismiss:
         assert is_dismissed(state, "") is False
 
 
+class TestRevalidateUpdateFlag:
+    """Tests for revalidate_update_flag() — clears stale update_available."""
+
+    @patch("penny.update_checker.__version__", "0.6.0b1")
+    def test_clears_flag_when_current_matches_latest(self):
+        from penny.update_checker import revalidate_update_flag
+
+        state = {"update_check": {
+            "update_available": True,
+            "latest_version": "0.6.0b1",
+        }}
+        revalidate_update_flag(state)
+        assert state["update_check"]["update_available"] is False
+
+    @patch("penny.update_checker.__version__", "0.7.0")
+    def test_clears_flag_when_current_newer_than_latest(self):
+        from penny.update_checker import revalidate_update_flag
+
+        state = {"update_check": {
+            "update_available": True,
+            "latest_version": "0.6.0b1",
+        }}
+        revalidate_update_flag(state)
+        assert state["update_check"]["update_available"] is False
+
+    @patch("penny.update_checker.__version__", "0.5.0")
+    def test_preserves_flag_when_update_genuinely_available(self):
+        from penny.update_checker import revalidate_update_flag
+
+        state = {"update_check": {
+            "update_available": True,
+            "latest_version": "0.6.0b1",
+        }}
+        revalidate_update_flag(state)
+        assert state["update_check"]["update_available"] is True
+
+    def test_noop_when_no_update_check(self):
+        from penny.update_checker import revalidate_update_flag
+
+        state = {}
+        revalidate_update_flag(state)
+        assert "update_check" not in state
+
+    def test_noop_when_flag_already_false(self):
+        from penny.update_checker import revalidate_update_flag
+
+        state = {"update_check": {
+            "update_available": False,
+            "latest_version": "0.6.0b1",
+        }}
+        revalidate_update_flag(state)
+        assert state["update_check"]["update_available"] is False
+
+
 class TestUpdateStateWithCheck:
     """Tests for update_state_with_check()."""
 
