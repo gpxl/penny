@@ -191,10 +191,11 @@ class BackgroundWorker:
         save_state(state)
 
         # Check for updates (at most once per 24 hours)
-        from .update_checker import should_check, update_state_with_check
+        from .update_checker import revalidate_update_flag, should_check, update_state_with_check
+        revalidate_update_flag(state)
         if should_check(state):
             state = update_state_with_check(state)
-            save_state(state)
+        save_state(state)
 
         return {
             "state": state,
