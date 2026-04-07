@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.6.0b2] - 2026-04-06
+
+### Fixed
+
+- Revert `runUpdate_` to open Terminal and run `penny update` via osascript (fixes broken Update button)
+- Clear stale update banner when the running version is already up to date
+
 ## [0.6.0b1] - 2026-04-03
 
 ### Added
