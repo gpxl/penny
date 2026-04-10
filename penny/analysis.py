@@ -179,14 +179,36 @@ def format_reset_label(label: str) -> str:
     return label
 
 
-def short_reset_label(label: str) -> str:
-    """Return a compact reset label: 'today at <time>' or '<date> at <time>'.
+def _parse_bare_time_hour(label: str) -> int | None:
+    """Extract the hour (0-23) from a bare time label, or None if unparseable.
 
-    - "Mar 24 at 10am" → "today at 10am"  (if today is Mar 24)
+    Handles: "5pm" → 17, "10:59am" → 10, "17:59" → 17, "21" → 21.
+    """
+    # "5pm", "10:59am" — 12h format
+    m = re.match(r"^(\d{1,2})(?::\d{2})?(am|pm)$", label, re.IGNORECASE)
+    if m:
+        h = int(m.group(1))
+        ap = m.group(2).lower()
+        return (0 if h == 12 else h) if ap == "am" else (12 if h == 12 else h + 12)
+    # "17:59" — 24h format with minutes
+    m = re.match(r"^(\d{1,2}):\d{2}$", label)
+    if m:
+        return int(m.group(1))
+    # "21" — bare hour
+    m = re.match(r"^(\d{1,2})$", label)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def short_reset_label(label: str) -> str:
+    """Return a compact reset label: 'Today/Tomorrow at <time>' or '<date> at <time>'.
+
+    - "Mar 24 at 10am" → "Today at 10am"  (if today is Mar 24)
     - "Mar 28 at 9:59"  → "Mar 28 at 9:59"
-    - "Today at 5:59 PM" → "today at 5:59 PM"
-    - "5pm" → "today at 5pm"  (bare time from session scraper)
-    - "17:59" → "today at 17:59"
+    - "Today at 5:59 PM" → "Today at 5:59 PM"
+    - "5pm" → "Today at 5pm"  (bare time, still in the future)
+    - "10:59am" → "Tomorrow at 10:59am"  (bare time, already passed today)
     """
     if not label or label == "—":
         return label
@@ -205,7 +227,11 @@ def short_reset_label(label: str) -> str:
             return f"Today at {time_str}"
         return label
 
-    # Bare time (session scraper): "5pm", "17:59", "21" — prefix with "Today"
+    # Bare time (from scraper): "5pm", "10:59am", "17:59", "21"
+    # If the time has already passed today, the reset is tomorrow.
+    hour = _parse_bare_time_hour(label)
+    if hour is not None and hour <= datetime.now().hour:
+        return f"Tomorrow at {label}"
     return f"Today at {label}"
 
 

@@ -3,7 +3,7 @@ and parsing the /status Usage tab output.
 
 Uses pexpect to drive a claude subprocess in a pseudo-terminal, sends
 /status, navigates to the Usage tab (the dialog has four tabs:
-Settings | Status | Config | Usage), captures the terminal output via
+Status | Config | Usage | Stats), captures the terminal output via
 the pyte terminal emulator (which tracks screen state cleanly, avoiding
 mangled text from interleaved cursor-positioning sequences), and extracts
 the three percentage values and reset times with regex.
@@ -324,8 +324,9 @@ def fetch_live_status(force: bool = False) -> LiveStatus:
       1. Spawn claude, wait for ❯ prompt
       2. Send /status + second Enter (first Enter selects autocomplete, second executes)
       3. Wait for dialog navigation hint ("to cycle")
-      4. Press Right Arrow × 2 to reach Usage tab (Settings | Status | Config | Usage)
-      5. Read clean screen text via pyte, parse
+      4. Press Right Arrow × 2 to reach Usage tab (Status | Config | Usage | Stats)
+      5. Reset pyte screen + SIGWINCH to get a clean redraw of just the Usage tab
+      6. Read clean screen text via pyte, parse
     """
     global _cache
 
@@ -415,12 +416,21 @@ def fetch_live_status(force: bool = False) -> LiveStatus:
                 return _stale_or_default()
 
         # Phase 4: navigate to the Usage tab.
-        # Tab order: Settings(1) | Status(2) | Config(3) | Usage(4)
+        # Tab order: Status(0) | Config(1) | Usage(2) | Stats(3)
         # Claude opens on the Status tab; Right Arrow × 2 reaches Usage.
         child.send(b"\x1b[C")   # Right Arrow → Config tab
         _feed_child(child, pyte_stream, 0.8)
         child.send(b"\x1b[C")   # Right Arrow → Usage tab
-        _feed_child(child, pyte_stream, 2.5)
+        _feed_child(child, pyte_stream, 1.5)
+
+        # Phase 4b: reset pyte screen and trigger full redraw via SIGWINCH.
+        # The pyte screen accumulated content from prior tabs (Status, Config)
+        # whose longer lines leave artifacts on the Usage tab.  A fresh screen
+        # plus a SIGWINCH forces the TUI to repaint just the current tab.
+        screen = pyte.Screen(_COLS, _ROWS)
+        pyte_stream = pyte.ByteStream(screen)
+        child.setwinsize(_ROWS, _COLS)
+        _feed_child(child, pyte_stream, 2.0)
 
         # Phase 5: extract clean screen text from pyte.
         screen_txt = _screen_text(screen)

@@ -1400,14 +1400,28 @@ class TestShortResetLabel:
     def test_today_at_preserves_time(self):
         assert short_reset_label("Today at 17:59") == "Today at 17:59"
 
-    def test_bare_time_gets_today_prefix(self):
-        assert short_reset_label("5pm") == "Today at 5pm"
+    def test_bare_time_future_gets_today_prefix(self):
+        """A bare time still in the future today → 'Today at ...'"""
+        # Use a time that is definitely in the future
+        assert short_reset_label("11:59pm") == "Today at 11:59pm"
 
-    def test_bare_24h_time_gets_today_prefix(self):
-        assert short_reset_label("17:59") == "Today at 17:59"
+    def test_bare_time_past_gets_tomorrow_prefix(self):
+        """A bare time already passed today → 'Tomorrow at ...'"""
+        # Use a time that is definitely in the past (midnight)
+        assert short_reset_label("12am") == "Tomorrow at 12am"
 
-    def test_bare_hour_gets_today_prefix(self):
-        assert short_reset_label("21") == "Today at 21"
+    def test_bare_24h_time_future_gets_today_prefix(self):
+        assert short_reset_label("23:59") == "Today at 23:59"
+
+    def test_bare_24h_time_past_gets_tomorrow_prefix(self):
+        # Hour 0 is always in the past (or equal to current hour at midnight)
+        assert short_reset_label("0:01") == "Tomorrow at 0:01"
+
+    def test_bare_hour_future_gets_today_prefix(self):
+        assert short_reset_label("23") == "Today at 23"
+
+    def test_bare_hour_past_gets_tomorrow_prefix(self):
+        assert short_reset_label("0") == "Tomorrow at 0"
 
     def test_todays_date_replaced_with_today(self):
         today = datetime.now()
