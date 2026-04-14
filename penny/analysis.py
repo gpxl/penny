@@ -179,41 +179,69 @@ def format_reset_label(label: str) -> str:
     return label
 
 
-def _parse_bare_time_hour(label: str) -> int | None:
-    """Extract the hour (0-23) from a bare time label, or None if unparseable.
+def _parse_bare_time(label: str) -> tuple[int, int, str] | None:
+    """Parse a bare time label into (hour_24, minute, format_hint).
 
-    Handles: "5pm" → 17, "10:59am" → 10, "17:59" → 17, "21" → 21.
+    format_hint preserves the original style so it can be reconstructed:
+      - "am" / "pm" → 12-hour with am/pm suffix
+      - "24h"       → "HH:MM" 24-hour
+      - "bare"      → just the hour, no minutes
+    Handles: "5pm" → (17, 0, "pm"), "10:59am" → (10, 59, "am"),
+             "17:59" → (17, 59, "24h"), "21" → (21, 0, "bare").
     """
-    # "5pm", "10:59am" — 12h format
-    m = re.match(r"^(\d{1,2})(?::\d{2})?(am|pm)$", label, re.IGNORECASE)
+    m = re.match(r"^(\d{1,2})(?::(\d{2}))?(am|pm)$", label, re.IGNORECASE)
     if m:
         h = int(m.group(1))
-        ap = m.group(2).lower()
-        return (0 if h == 12 else h) if ap == "am" else (12 if h == 12 else h + 12)
-    # "17:59" — 24h format with minutes
-    m = re.match(r"^(\d{1,2}):\d{2}$", label)
+        mins = int(m.group(2) or 0)
+        ap = m.group(3).lower()
+        h24 = (0 if h == 12 else h) if ap == "am" else (12 if h == 12 else h + 12)
+        return h24, mins, ap
+    m = re.match(r"^(\d{1,2}):(\d{2})$", label)
     if m:
-        return int(m.group(1))
-    # "21" — bare hour
+        return int(m.group(1)), int(m.group(2)), "24h"
     m = re.match(r"^(\d{1,2})$", label)
     if m:
-        return int(m.group(1))
+        return int(m.group(1)), 0, "bare"
     return None
 
 
-def short_reset_label(label: str) -> str:
+def _parse_bare_time_hour(label: str) -> int | None:
+    """Extract just the 0-23 hour from a bare time label, or None."""
+    parsed = _parse_bare_time(label)
+    return parsed[0] if parsed else None
+
+
+def _format_bare_time(hour_24: int, minute: int, fmt: str) -> str:
+    """Inverse of _parse_bare_time — reconstruct the bare label."""
+    if fmt in ("am", "pm"):
+        h12 = 12 if hour_24 % 12 == 0 else hour_24 % 12
+        ap = "am" if hour_24 < 12 else "pm"
+        return f"{h12}:{minute:02d}{ap}" if minute else f"{h12}{ap}"
+    if fmt == "24h":
+        return f"{hour_24}:{minute:02d}"
+    return str(hour_24)
+
+
+def short_reset_label(label: str, period_hours: float | None = None) -> str:
     """Return a compact reset label: 'Today/Tomorrow at <time>' or '<date> at <time>'.
 
-    - "Mar 24 at 10am" → "Today at 10am"  (if today is Mar 24)
-    - "Mar 28 at 9:59"  → "Mar 28 at 9:59"
-    - "Today at 5:59 PM" → "Today at 5:59 PM"
-    - "5pm" → "Today at 5pm"  (bare time, still in the future)
-    - "10:59am" → "Tomorrow at 10:59am"  (bare time, already passed today)
+    The scraper sometimes emits bare times like "11am" with no date — those
+    always mean "today at X" at the moment of scraping. If the cached scrape
+    is stale and X has already passed, project forward by ``period_hours``
+    (the reset cycle length) to compute the real next reset. Without a known
+    period we cannot project, so we drop the misleading prefix and return the
+    bare label as-is.
+
+    Examples:
+      - "Mar 24 at 10am"   → "Today at 10am"  (when today is Mar 24)
+      - "Mar 28 at 9:59"   → "Mar 28 at 9:59"
+      - "5pm"              → "Today at 5pm"   (bare, still in the future)
+      - "11am" + period=5  → "Today at 4pm"   (projected from stale 5h session)
+      - "11am" no period   → "11am"           (stale, can't project)
     """
     if not label or label == "—":
         return label
 
-    # Already has "Today at" — pass through
     if label.lower().startswith("today at "):
         return "Today at " + label[9:]
 
@@ -227,12 +255,32 @@ def short_reset_label(label: str) -> str:
             return f"Today at {time_str}"
         return label
 
-    # Bare time (from scraper): "5pm", "10:59am", "17:59", "21"
-    # If the time has already passed today, the reset is tomorrow.
-    hour = _parse_bare_time_hour(label)
-    if hour is not None and hour <= datetime.now().hour:
-        return f"Tomorrow at {label}"
-    return f"Today at {label}"
+    parsed = _parse_bare_time(label)
+    if parsed is None:
+        return f"Today at {label}"
+
+    hour_24, minute, fmt = parsed
+    now = datetime.now()
+    today_reset = now.replace(hour=hour_24, minute=minute, second=0, microsecond=0)
+
+    if today_reset > now:
+        return f"Today at {label}"
+
+    # Bare time has passed → underlying scrape is stale.
+    if period_hours is None:
+        return label
+
+    next_reset = today_reset + timedelta(hours=period_hours)
+    while next_reset <= now:
+        next_reset += timedelta(hours=period_hours)
+
+    new_label = _format_bare_time(next_reset.hour, next_reset.minute, fmt)
+    today = now.date()
+    if next_reset.date() == today:
+        return f"Today at {new_label}"
+    if next_reset.date() == today + timedelta(days=1):
+        return f"Tomorrow at {new_label}"
+    return f"{next_reset.strftime('%b')} {next_reset.day} at {new_label}"
 
 
 # ---------------------------------------------------------------------------

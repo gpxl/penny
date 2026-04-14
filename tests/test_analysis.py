@@ -1405,23 +1405,28 @@ class TestShortResetLabel:
         # Use a time that is definitely in the future
         assert short_reset_label("11:59pm") == "Today at 11:59pm"
 
-    def test_bare_time_past_gets_tomorrow_prefix(self):
-        """A bare time already passed today → 'Tomorrow at ...'"""
-        # Use a time that is definitely in the past (midnight)
-        assert short_reset_label("12am") == "Tomorrow at 12am"
+    def test_bare_time_past_without_period_returns_label_unchanged(self):
+        """Past bare time + no period_hours → drop the misleading prefix.
+
+        The scraper only emits today's reset; if it has passed, the cache is
+        stale and we cannot know the next reset without the cycle length.
+        """
+        # 12am has always passed (unless it's literally midnight)
+        result = short_reset_label("12am")
+        assert result == "12am"
 
     def test_bare_24h_time_future_gets_today_prefix(self):
         assert short_reset_label("23:59") == "Today at 23:59"
 
-    def test_bare_24h_time_past_gets_tomorrow_prefix(self):
+    def test_bare_24h_time_past_without_period_returns_label_unchanged(self):
         # Hour 0 is always in the past (or equal to current hour at midnight)
-        assert short_reset_label("0:01") == "Tomorrow at 0:01"
+        assert short_reset_label("0:01") == "0:01"
 
     def test_bare_hour_future_gets_today_prefix(self):
         assert short_reset_label("23") == "Today at 23"
 
-    def test_bare_hour_past_gets_tomorrow_prefix(self):
-        assert short_reset_label("0") == "Tomorrow at 0"
+    def test_bare_hour_past_without_period_returns_label_unchanged(self):
+        assert short_reset_label("0") == "0"
 
     def test_todays_date_replaced_with_today(self):
         today = datetime.now()
@@ -1447,6 +1452,86 @@ class TestShortResetLabel:
         result = short_reset_label(label)
         assert "at" in result
         assert "Today" not in result
+
+
+class TestShortResetLabelProjection:
+    """Bare-time projection when the cached scrape is stale.
+
+    The scraper emits the next reset as a bare time relative to scrape moment
+    (e.g. "11am" = "today at 11am"). If the cached value's bare time has
+    already passed, we project forward by ``period_hours`` to find the real
+    next reset (sessions = 5h cycle, weekly = 168h cycle).
+    """
+
+    def _frozen_now(self, hour: int, minute: int = 0):
+        """Patch datetime.now in penny.analysis to a fixed wall-clock time."""
+        fixed = datetime(2026, 4, 14, hour, minute, 0)
+
+        class _FrozenDT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is not None:
+                    return fixed.replace(tzinfo=tz)
+                return fixed
+
+            @classmethod
+            def strftime(cls, fmt):  # pragma: no cover — instance, not class
+                return fixed.strftime(fmt)
+
+        return patch("penny.analysis.datetime", _FrozenDT)
+
+    def test_session_past_bare_projects_forward_5h(self):
+        """At 11:09, a stale '11am' session reset → 'Today at 4pm'."""
+        with self._frozen_now(11, 9):
+            assert short_reset_label("11am", period_hours=5) == "Today at 4pm"
+
+    def test_session_past_bare_with_minutes_preserves_minutes(self):
+        with self._frozen_now(11, 0):
+            assert short_reset_label("10:59am", period_hours=5) == "Today at 3:59pm"
+
+    def test_session_past_bare_projects_multiple_cycles_when_needed(self):
+        """At 21:00, '11am' is past by 10h — must skip two 5h cycles → 9pm."""
+        with self._frozen_now(21, 30):
+            assert short_reset_label("11am", period_hours=5) == "Tomorrow at 2am"
+
+    def test_session_future_bare_unchanged(self):
+        """A bare time still in the future today → 'Today at <bare>' (no projection)."""
+        with self._frozen_now(11, 9):
+            assert short_reset_label("4pm", period_hours=5) == "Today at 4pm"
+
+    def test_session_projection_crosses_midnight_to_tomorrow(self):
+        """At 23:30, '11am' projected by 5h cycles ends at 4am next day."""
+        with self._frozen_now(23, 30):
+            # 11am today + 5h*N until > 23:30: 11→16→21→2(tomorrow)
+            assert short_reset_label("11am", period_hours=5) == "Tomorrow at 2am"
+
+    def test_weekly_past_bare_projects_one_week_forward(self):
+        """A weekly bare time that has passed → 7 days from now at the same time."""
+        with self._frozen_now(11, 9):
+            # 9am has passed. Weekly cycle = 168h. Next reset is Apr 21 at 9am.
+            assert short_reset_label("9am", period_hours=7 * 24) == "Apr 21 at 9am"
+
+    def test_weekly_future_bare_today(self):
+        """Weekly bare time still ahead today → 'Today at <bare>'."""
+        with self._frozen_now(8, 0):
+            assert short_reset_label("9am", period_hours=7 * 24) == "Today at 9am"
+
+    def test_24h_format_preserved_through_projection(self):
+        with self._frozen_now(12, 0):
+            # 11:00 24h has passed; +5h = 16:00 today
+            assert short_reset_label("11:00", period_hours=5) == "Today at 16:00"
+
+    def test_period_hours_none_does_not_project(self):
+        """Past bare time without period_hours → label returned as-is."""
+        with self._frozen_now(15, 0):
+            assert short_reset_label("11am") == "11am"
+
+    def test_dated_label_ignores_period_hours(self):
+        """Period projection only applies to bare times, not dated labels."""
+        with self._frozen_now(11, 9):
+            label = "Apr 18 at 11am"
+            # April 18 is not today; period_hours is irrelevant for dated labels.
+            assert short_reset_label(label, period_hours=5) == label
 
 
 # ---------------------------------------------------------------------------
