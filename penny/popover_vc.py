@@ -123,10 +123,12 @@ class ControlCenterViewController(NSViewController):
             self._lbl_sonnet_pct.setStringValue_(f"{pred.pct_sonnet:.0f}%")
             self._lbl_session_pct.setStringValue_(f"{pred.session_pct_all:.0f}%")
             # Inline reset labels (compact, in each bar row).
-            # period_hours is the cycle length — used to project the next
-            # reset when the cached scrape's bare time has already passed.
+            # Only session projects forward (5h cycle is well-known). For
+            # weekly bare times we don't pass period_hours — Anthropic's TUI
+            # shows them bare for "near" resets and the true cycle is
+            # ambiguous, so we mirror that ambiguity rather than invent a
+            # potentially-wrong date.
             _SESSION_HOURS = 5.0
-            _WEEK_HOURS = 7 * 24.0
             if pred.session_reset_label:
                 formatted = format_reset_label(pred.session_reset_label)
                 short = short_reset_label(formatted, period_hours=_SESSION_HOURS)
@@ -134,15 +136,11 @@ class ControlCenterViewController(NSViewController):
                 self._lbl_session_reset.setToolTip_(f"Resets at {formatted}")
             if pred.reset_label:
                 full = format_reset_label(pred.reset_label)
-                self._lbl_all_reset.setStringValue_(
-                    short_reset_label(full, period_hours=_WEEK_HOURS)
-                )
+                self._lbl_all_reset.setStringValue_(short_reset_label(full))
                 self._lbl_all_reset.setToolTip_(f"Resets at {full}")
             if pred.reset_label_sonnet:
                 full = format_reset_label(pred.reset_label_sonnet)
-                self._lbl_sonnet_reset.setStringValue_(
-                    short_reset_label(full, period_hours=_WEEK_HOURS)
-                )
+                self._lbl_sonnet_reset.setStringValue_(short_reset_label(full))
                 self._lbl_sonnet_reset.setToolTip_(f"Resets at {full}")
             if self._lbl_outage_warning is not None:
                 if pred.outage:
