@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.6.0b3] - 2026-04-14
+
+### Fixed
+
+- Inject `USER` env var into `claude /status` subprocess so launchd-launched instances can authenticate and retrieve live usage (previously rendered "/usage is only available for subscription plans")
+- Use unique temp files per `save_state()` call to eliminate concurrent-write race between bg_worker fetch and health_check threads (previously caused `FileNotFoundError` leaving the cache stale for hours)
+- Loosen `Resets\s+` regex to tolerate pyte 1-character screen residuals (e.g. "ResetstApr 18…") that broke all-models reset parsing
+- Correct stale reset labels and lying "last refresh" time — refresh timestamp now reflects actual scrape age rather than the last UI update
+- Drop weekly `period_hours` projection to mirror TUI ambiguity (avoids misleading countdown when the TUI does not show a distinct weekly reset)
+- Fix bare-time Tomorrow label rendering for past reset cycles in the popover
+
 ## [0.6.0b2] - 2026-04-06
 
 ### Fixed
