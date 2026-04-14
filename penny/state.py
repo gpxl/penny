@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,10 +25,30 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    """Persist state to disk atomically."""
-    tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2, default=str))
-    tmp.replace(STATE_PATH)
+    """Persist state to disk atomically.
+
+    Uses ``tempfile.mkstemp`` for a unique per-call temp file. A shared
+    ``state.tmp`` is a silent landmine when bg_worker's fetch and
+    health-check threads save concurrently: both write the same tmp, the
+    first ``replace`` wins, and the second raises ``FileNotFoundError``.
+    That exception propagated out of ``_fetch_data`` before
+    ``fetch_live_status`` could run, leaving the /status cache stale for
+    hours.
+    """
+    state_path = STATE_PATH
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".state.", suffix=".tmp", dir=str(state_path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=2, default=str)
+        os.replace(tmp_path, state_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _default_state() -> dict[str, Any]:
