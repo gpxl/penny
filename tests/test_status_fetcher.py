@@ -511,6 +511,63 @@ Resets Mar 7 at 5pm (UTC)
         assert result is not None
         assert result.session_pct == 16.0
 
+    def test_reset_regex_tolerates_single_char_pyte_residual(self):
+        """pyte sometimes leaks 1-char artifacts from prior tabs.
+
+        Observed case: 'ResetstApr 18 at 11am (Europe/Amsterdam)' — a stray
+        't' between 'Resets' and the content. Previously label-anchored
+        extraction missed that line, all_models_reset was None, and the
+        parser crashed on ``all_models_reset[0]``. Now the regex tolerates
+        one residual non-space char.
+        """
+        screen = """\
+   Status   Config   Usage   Stats
+
+   Current session
+   ████████ 63% used
+   Resets 9pm (Europe/Amsterdam)
+
+   Current week (all models)
+   ████ 25% used
+   ResetstApr 18 at 11am (Europe/Amsterdam)
+
+   Current week (Sonnet only)
+   ██ 15% used
+   Resets 9am (Europe/Amsterdam)
+"""
+        result = _parse_usage_screen(screen)
+        assert result is not None
+        assert result.session_reset_label == "9pm"
+        assert result.weekly_reset_label == "Apr 18 at 11am"
+        assert result.weekly_reset_label_sonnet == "9am"
+
+    def test_missing_middle_reset_uses_positional_fallback(self):
+        """When label anchoring finds session and Sonnet but not all-models
+        (e.g. the middle 'Resets ...' line is mangled beyond repair), the
+        positional fallback fills the gap by index, not by last-match. The
+        previous code used ``resets[-1]`` which misassigned Sonnet's reset
+        to all-models.
+        """
+        screen = """\
+   Status   Config   Usage   Stats
+
+   Current session
+   ████████ 16% used
+   Resets 3pm (UTC)
+
+   Current week (all models)
+   ████ 30% used
+   (mangled line with no Resets keyword)
+
+   Current week (Sonnet only)
+   ██ 41% used
+   Resets 10am (UTC)
+"""
+        result = _parse_usage_screen(screen)
+        # Only 2 reset lines found; middle one (all-models) can't be
+        # positionally filled (no resets[1]) — parse signals failure.
+        assert result is None
+
 
 # ── status_as_prediction_overrides ────────────────────────────────────────────
 
@@ -1548,6 +1605,83 @@ class TestFetchLiveStatusSubprocessPaths:
         )
         assert "CLAUDE_CODE" not in captured_env, (
             "CLAUDE_CODE must be removed from the subprocess environment"
+        )
+
+    def test_env_sets_user_when_missing(self):
+        """When USER is unset (launchd environment), fetch_live_status must
+        inject it from the process UID. Without USER, claude's /status Usage
+        tab renders '/usage is only available for subscription plans' instead
+        of real data."""
+        import os
+
+        child = _build_child_mock(expect_returns=[0])
+        nav_screen = _make_screen_mock(NAV_SCREEN_TEXT)
+        capture_screen = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
+
+        captured_env = {}
+
+        def _capture_spawn(cmd, env=None, **kwargs):
+            captured_env.update(env or {})
+            return child
+
+        original_env = os.environ.copy()
+        try:
+            os.environ.pop("USER", None)
+            os.environ.pop("LOGNAME", None)
+
+            with (
+                patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+                patch("pexpect.spawn", side_effect=_capture_spawn),
+                patch("pyte.Screen", side_effect=[nav_screen, capture_screen]),
+                patch("pyte.ByteStream", side_effect=[MagicMock(), MagicMock()]),
+                patch("penny.status_fetcher._feed_child"),
+                patch("penny.status_fetcher.time.sleep"),
+                patch("penny.status_fetcher._save_cache"),
+            ):
+                fetch_live_status(force=True)
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
+
+        assert captured_env.get("USER"), (
+            "USER must be injected into subprocess env when not set — otherwise "
+            "claude shows '/usage is only available for subscription plans'"
+        )
+
+    def test_env_preserves_existing_user(self):
+        """If USER is already set in the parent env, don't overwrite it."""
+        import os
+
+        child = _build_child_mock(expect_returns=[0])
+        nav_screen = _make_screen_mock(NAV_SCREEN_TEXT)
+        capture_screen = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
+
+        captured_env = {}
+
+        def _capture_spawn(cmd, env=None, **kwargs):
+            captured_env.update(env or {})
+            return child
+
+        original_env = os.environ.copy()
+        try:
+            os.environ["USER"] = "test_user_sentinel"
+
+            with (
+                patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+                patch("pexpect.spawn", side_effect=_capture_spawn),
+                patch("pyte.Screen", side_effect=[nav_screen, capture_screen]),
+                patch("pyte.ByteStream", side_effect=[MagicMock(), MagicMock()]),
+                patch("penny.status_fetcher._feed_child"),
+                patch("penny.status_fetcher.time.sleep"),
+                patch("penny.status_fetcher._save_cache"),
+            ):
+                fetch_live_status(force=True)
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
+
+        assert captured_env.get("USER") == "test_user_sentinel", (
+            "fetch_live_status must not clobber an existing USER env var"
         )
 
     def test_dialog_check_passes_when_screen_contains_to_cycle(self):

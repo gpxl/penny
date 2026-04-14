@@ -240,7 +240,13 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     # "Resets ..." line to its preceding section label.  This handles both
     # the old format (single shared weekly reset) and the new format (separate
     # resets for all-models and Sonnet).
-    _reset_re = re.compile(r"Resets\s+(.+?)\s*\(([^)]+)\)")
+    #
+    # The ``\S?`` between "Resets" and the separator tolerates a single
+    # residual character from pyte's prior-tab state — e.g. "ResetstApr 18
+    # at 11am (…)" actually appears on screen when the Status-tab content
+    # bleeds through one column. Without this, label-anchored extraction
+    # silently loses the weekly-all-models line and the scrape fails.
+    _reset_re = re.compile(r"Resets\S?\s*(.+?)\s*\(([^)]+)\)")
 
     def _extract_labeled_reset(label_pattern: str) -> tuple[str, str] | None:
         for i, line in enumerate(section_lines):
@@ -263,7 +269,8 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
     all_models_reset = _extract_labeled_reset(r"all models")
     sonnet_reset = _extract_labeled_reset(r"sonnet")
 
-    # Fallback: positional parsing for old/minimal formats
+    # Fallback: positional parsing for old/minimal formats where only some
+    # labels were label-anchored.
     if session_reset is None or (all_models_reset is None and sonnet_reset is None):
         resets = _reset_re.findall(section)
         if len(resets) < 1:
@@ -273,9 +280,17 @@ def _parse_usage_screen(screen_txt: str) -> LiveStatus | None:
         if all_models_reset is None:
             all_models_reset = (resets[-1][0].strip(), resets[-1][1].strip())
 
-    # If Sonnet has no independent reset, use the all-models reset
+    # If Sonnet has no independent reset, use the all-models reset.
     if sonnet_reset is None:
         sonnet_reset = all_models_reset
+
+    # Signal parse failure (caller keeps cached data) rather than crashing on
+    # ``all_models_reset[0]`` below when a critical reset couldn't be
+    # extracted — e.g. the middle weekly line is mangled beyond what the
+    # lenient regex can recover and the fallback's trigger condition wasn't
+    # met.
+    if session_reset is None or all_models_reset is None or sonnet_reset is None:
+        return None
 
     return LiveStatus(
         session_pct=session_pct,
@@ -352,6 +367,18 @@ def fetch_live_status(force: bool = False) -> LiveStatus:
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE", None)
+    # Claude's /status Usage tab gates subscription-vs-API auth on the USER
+    # env var. launchd doesn't propagate it by default, so the spawned claude
+    # sees only "API mode" and renders "/usage is only available for
+    # subscription plans" instead of real data. Fall back to the process UID's
+    # login name so we always scrape real usage regardless of how Penny was
+    # launched (launchd, shell, Xcode, etc.).
+    if not env.get("USER"):
+        try:
+            import pwd
+            env["USER"] = pwd.getpwuid(os.getuid()).pw_name
+        except (KeyError, ImportError):
+            pass
 
     screen = pyte.Screen(_COLS, _ROWS)
     pyte_stream = pyte.ByteStream(screen)
