@@ -197,9 +197,16 @@ class BackgroundWorker:
             state = update_state_with_check(state)
         save_state(state)
 
+        # Surface the true scrape age — _last_fetch_at on the app side will
+        # reflect the most recent successful /status scrape, not the worker
+        # tick. Without this the popover lies about freshness when scrapes
+        # silently fail and the cache stays stale.
+        live_fetched_at = live.fetched_at if (live is not None and not live.outage) else None
+
         return {
             "state": state,
             "prediction": prediction,
             "newly_done": newly_done,
             "update_check": state.get("update_check"),
+            "live_fetched_at": live_fetched_at,
         }

@@ -49,7 +49,7 @@ class TestDetectApiError:
 
 
 SAMPLE_USAGE_SCREEN = """\
-                                                Settings   Status   Config   Usage
+                                                Status   Config   Usage   Stats
  ─────────────────────────────────────────────────────────────────────────────────
 
   Current session                                                 16% used
@@ -66,7 +66,7 @@ SAMPLE_USAGE_SCREEN = """\
 
 # Legacy format: Sonnet shared the same reset line as all-models
 SAMPLE_USAGE_SCREEN_SHARED_RESET = """\
-                                                Settings   Status   Config   Usage
+                                                Status   Config   Usage   Stats
  ─────────────────────────────────────────────────────────────────────────────────
 
   Current session                                                 16% used
@@ -77,6 +77,49 @@ SAMPLE_USAGE_SCREEN_SHARED_RESET = """\
   Resets Mar 6 at 9pm (Europe/Amsterdam)
 
   Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
+"""
+
+# Current Claude 2.1.100 format: progress bars, Stats tab, Extra usage section
+SAMPLE_USAGE_SCREEN_CURRENT_FORMAT = """\
+  Status   Config   Usage   Stats
+ ────────────────────────────────────────────────────────────────────────────────
+
+  Current session
+  █████▌                                             11% used
+  Resets 1pm (Europe/Amsterdam)
+
+  Current week (all models)
+  █████████████████████████                          50% used
+  Resets Apr 11 at 11am (Europe/Amsterdam)
+
+  Current week (Sonnet only)
+  ██████                                             12% used
+  Resets Apr 15 at 9am (Europe/Amsterdam)
+
+  Extra usage
+  Extra usage not enabled · /extra-usage to enable
+  $100 in extra usage for third-party apps · /extra-usage
+
+  Esc to cancel
+"""
+
+# Screen with corruption from prior tab bleed-through (the bug SIGWINCH fixes)
+CORRUPTED_USAGE_SCREEN = """\
+  Status   Config   Usage   Stats
+
+  Current session
+  █████▌                                             11% used
+  Resets 1pm (Europe/Amsterdam)
+
+  Current week (all models)       terdam)
+  █████████████████████████                          50% used
+  Resets 11am (Europe/Amsterdam)msterdam)
+
+  Current week (Sonnet only)pe/Amsterdam)
+  ██████                                             12% used
+  Resets Apr 15 ata9am (Europe/Amsterdam)
+
+  Esc to cancel
 """
 
 
@@ -179,6 +222,27 @@ Resets Jan 1 at 3am (US/Pacific)
         assert result.session_reset_label == "3pm"
         assert result.weekly_reset_label == "Mar 21 at 9am"
         assert result.weekly_reset_label_sonnet == "Mar 24 at 8pm"
+
+    def test_current_format_with_progress_bars_and_extra_usage(self):
+        """Claude 2.1.100 format: progress bars, Stats tab, Extra usage section."""
+        result = _parse_usage_screen(SAMPLE_USAGE_SCREEN_CURRENT_FORMAT)
+        assert result is not None
+        assert result.session_pct == 11.0
+        assert result.weekly_pct_all == 50.0
+        assert result.weekly_pct_sonnet == 12.0
+        assert result.session_reset_label == "1pm"
+        assert result.weekly_reset_label == "Apr 11 at 11am"
+        assert result.weekly_reset_label_sonnet == "Apr 15 at 9am"
+
+    def test_corrupted_screen_does_not_crash(self):
+        """Parser handles corrupted screen text (leftover chars from prior tabs)
+        without raising.  Values may be partially correct or return None."""
+        result = _parse_usage_screen(CORRUPTED_USAGE_SCREEN)
+        # Must not crash; if parsed, percentages should be correct
+        if result is not None:
+            assert result.session_pct == 11.0
+            assert result.weekly_pct_all == 50.0
+            assert result.weekly_pct_sonnet == 12.0
 
 
 # ── _screen_text ───────────────────────────────────────────────────────────────
@@ -446,6 +510,63 @@ Resets Mar 7 at 5pm (UTC)
         result = _parse_usage_screen(screen)
         assert result is not None
         assert result.session_pct == 16.0
+
+    def test_reset_regex_tolerates_single_char_pyte_residual(self):
+        """pyte sometimes leaks 1-char artifacts from prior tabs.
+
+        Observed case: 'ResetstApr 18 at 11am (Europe/Amsterdam)' — a stray
+        't' between 'Resets' and the content. Previously label-anchored
+        extraction missed that line, all_models_reset was None, and the
+        parser crashed on ``all_models_reset[0]``. Now the regex tolerates
+        one residual non-space char.
+        """
+        screen = """\
+   Status   Config   Usage   Stats
+
+   Current session
+   ████████ 63% used
+   Resets 9pm (Europe/Amsterdam)
+
+   Current week (all models)
+   ████ 25% used
+   ResetstApr 18 at 11am (Europe/Amsterdam)
+
+   Current week (Sonnet only)
+   ██ 15% used
+   Resets 9am (Europe/Amsterdam)
+"""
+        result = _parse_usage_screen(screen)
+        assert result is not None
+        assert result.session_reset_label == "9pm"
+        assert result.weekly_reset_label == "Apr 18 at 11am"
+        assert result.weekly_reset_label_sonnet == "9am"
+
+    def test_missing_middle_reset_uses_positional_fallback(self):
+        """When label anchoring finds session and Sonnet but not all-models
+        (e.g. the middle 'Resets ...' line is mangled beyond repair), the
+        positional fallback fills the gap by index, not by last-match. The
+        previous code used ``resets[-1]`` which misassigned Sonnet's reset
+        to all-models.
+        """
+        screen = """\
+   Status   Config   Usage   Stats
+
+   Current session
+   ████████ 16% used
+   Resets 3pm (UTC)
+
+   Current week (all models)
+   ████ 30% used
+   (mangled line with no Resets keyword)
+
+   Current week (Sonnet only)
+   ██ 41% used
+   Resets 10am (UTC)
+"""
+        result = _parse_usage_screen(screen)
+        # Only 2 reset lines found; middle one (all-models) can't be
+        # positionally filled (no resets[1]) — parse signals failure.
+        assert result is None
 
 
 # ── status_as_prediction_overrides ────────────────────────────────────────────
@@ -1113,7 +1234,7 @@ def _make_screen_mock(text: str) -> MagicMock:
 
 
 VALID_USAGE_SCREEN_TEXT = """\
-Settings   Status   Config   Usage
+Status   Config   Usage   Stats
   Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
 Current session                       16% used
 Resets 2pm (Europe/Amsterdam)
@@ -1128,21 +1249,28 @@ API_ERROR_SCREEN_TEXT = "Failed to load usage data"
 # API error screen that also contains dialog-open text, so the pyte screen
 # check at phase 3 passes (dialog considered open) before parse is attempted.
 API_ERROR_SCREEN_WITH_DIALOG = """\
-Settings   Status   Config   Usage
+Status   Config   Usage   Stats
   Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
 Failed to load usage data
 """
 
 GARBLED_SCREEN_TEXT = """\
-Settings   Status   Config   Usage
+Status   Config   Usage   Stats
 garbled content with no percentages
 """
 
 # Garbled screen that also contains dialog-open text so phase 3 check passes.
 GARBLED_SCREEN_WITH_DIALOG = """\
-Settings   Status   Config   Usage
+Status   Config   Usage   Stats
   Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
 garbled content with no percentages
+"""
+
+# Navigation screen: dialog-open text so phase 3 check passes, but no usage data.
+# Used as the first (throwaway) screen during tab navigation before SIGWINCH redraw.
+NAV_SCREEN_TEXT = """\
+Status   Config   Usage   Stats
+  Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
 """
 
 
@@ -1175,19 +1303,25 @@ class TestFetchLiveStatusSubprocessPaths:
         screen_text: str,
         child: MagicMock,
         force: bool = True,
+        nav_screen_text: str = NAV_SCREEN_TEXT,
     ):
         """Helper: run fetch_live_status with a mocked screen and child process.
+
+        The production code creates pyte.Screen twice: once for initial navigation
+        (accumulates artifacts from prior tabs) and again after the SIGWINCH redraw
+        (fresh capture of just the Usage tab).  We provide both via side_effect.
 
         Patches _load_cache to return None so the real ~/.penny/status_cache.json
         on disk does not interfere with cold-start logic in the tests.
         """
-        screen_mock = _make_screen_mock(screen_text)
+        nav_screen = _make_screen_mock(nav_screen_text)
+        capture_screen = _make_screen_mock(screen_text)
         with (
             patch("penny.status_fetcher._load_cache", return_value=None),
             patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
             patch("pexpect.spawn", return_value=child),
-            patch("pyte.Screen", return_value=screen_mock),
-            patch("pyte.ByteStream", return_value=MagicMock()),
+            patch("pyte.Screen", side_effect=[nav_screen, capture_screen]),
+            patch("pyte.ByteStream", side_effect=[MagicMock(), MagicMock()]),
             patch("penny.status_fetcher._feed_child"),
             patch("penny.status_fetcher.time.sleep"),
             patch("penny.status_fetcher._save_cache"),
@@ -1237,8 +1371,12 @@ class TestFetchLiveStatusSubprocessPaths:
         """When claude does not show the prompt (idx != 0), and the screen has
         no API error text, returns _stale_or_default() — not an outage status."""
         # child.expect returns 1 (TIMEOUT index — idx != 0)
+        # Exits at Phase 1 — only the nav screen (first) is checked.
         child = _build_child_mock(expect_returns=[1])
-        result = self._run_with_screen("some startup text", child, force=True)
+        result = self._run_with_screen(
+            "some startup text", child, force=True,
+            nav_screen_text="some startup text",
+        )
 
         assert isinstance(result, LiveStatus)
         assert result.outage is False
@@ -1247,8 +1385,12 @@ class TestFetchLiveStatusSubprocessPaths:
     def test_prompt_timeout_with_api_error_on_screen_returns_outage(self):
         """When claude times out at the prompt AND the screen shows an API error,
         fetch_live_status must return an outage LiveStatus (outage=True)."""
+        # Exits at Phase 1 — only the nav screen (first) is checked for API error.
         child = _build_child_mock(expect_returns=[1])
-        result = self._run_with_screen(API_ERROR_SCREEN_TEXT, child, force=True)
+        result = self._run_with_screen(
+            API_ERROR_SCREEN_TEXT, child, force=True,
+            nav_screen_text=API_ERROR_SCREEN_TEXT,
+        )
 
         assert isinstance(result, LiveStatus)
         assert result.outage is True
@@ -1284,12 +1426,15 @@ class TestFetchLiveStatusSubprocessPaths:
         """When the /status dialog does not open (pyte screen check fails),
         the fallback expect also times out (idx2 >= 2), and there is no API
         error on screen — returns _stale_or_default()."""
-        # Screen text does NOT contain "Esc to cancel" or "to cycle", so the
+        # Nav screen does NOT contain "Esc to cancel" or "to cycle", so the
         # code falls through to the fallback child.expect call.
         # That call returns 2 (TIMEOUT index — idx2 >= 2).
+        # Exits at Phase 3 — only the nav screen (first) is checked.
         child = _build_child_mock(expect_returns=[0, 2])
-        # Use screen text that has no dialog indicator and no API error
-        result = self._run_with_screen("startup screen no dialog", child, force=True)
+        result = self._run_with_screen(
+            "startup screen no dialog", child, force=True,
+            nav_screen_text="startup screen no dialog",
+        )
 
         assert isinstance(result, LiveStatus)
         assert result.outage is False
@@ -1298,11 +1443,15 @@ class TestFetchLiveStatusSubprocessPaths:
         """When dialog doesn't open, fallback times out, and screen shows API
         error — must return outage status."""
         # child.expect: first call returns 0 (prompt OK), second returns 2 (TIMEOUT)
-        child = _build_child_mock(expect_returns=[0, 2])
-        # Screen text must trigger the fallback path (no "Esc to cancel" / "to cycle")
+        # Nav screen must trigger the fallback path (no "Esc to cancel" / "to cycle")
         # AND contain an API error marker.
+        # Exits at Phase 3 — only the nav screen (first) is checked.
         api_error_no_dialog = "api_error happened before dialog opened"
-        result = self._run_with_screen(api_error_no_dialog, child, force=True)
+        child = _build_child_mock(expect_returns=[0, 2])
+        result = self._run_with_screen(
+            api_error_no_dialog, child, force=True,
+            nav_screen_text=api_error_no_dialog,
+        )
 
         assert isinstance(result, LiveStatus)
         assert result.outage is True
@@ -1397,14 +1546,15 @@ class TestFetchLiveStatusSubprocessPaths:
         stale_disk = _make_live_status(session_pct=33.0, fetched_at=old_time)
 
         child = _build_child_mock(expect_returns=[0])
-        screen_mock = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
+        nav_screen = _make_screen_mock(NAV_SCREEN_TEXT)
+        capture_screen = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
 
         with (
             patch("penny.status_fetcher._load_cache", return_value=stale_disk),
             patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
             patch("pexpect.spawn", return_value=child) as mock_spawn,
-            patch("pyte.Screen", return_value=screen_mock),
-            patch("pyte.ByteStream", return_value=MagicMock()),
+            patch("pyte.Screen", side_effect=[nav_screen, capture_screen]),
+            patch("pyte.ByteStream", side_effect=[MagicMock(), MagicMock()]),
             patch("penny.status_fetcher._feed_child"),
             patch("penny.status_fetcher.time.sleep"),
             patch("penny.status_fetcher._save_cache"),
@@ -1422,7 +1572,8 @@ class TestFetchLiveStatusSubprocessPaths:
         import os
 
         child = _build_child_mock(expect_returns=[0])
-        screen_mock = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
+        nav_screen = _make_screen_mock(NAV_SCREEN_TEXT)
+        capture_screen = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
 
         captured_env = {}
 
@@ -1438,8 +1589,8 @@ class TestFetchLiveStatusSubprocessPaths:
             with (
                 patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
                 patch("pexpect.spawn", side_effect=_capture_spawn),
-                patch("pyte.Screen", return_value=screen_mock),
-                patch("pyte.ByteStream", return_value=MagicMock()),
+                patch("pyte.Screen", side_effect=[nav_screen, capture_screen]),
+                patch("pyte.ByteStream", side_effect=[MagicMock(), MagicMock()]),
                 patch("penny.status_fetcher._feed_child"),
                 patch("penny.status_fetcher.time.sleep"),
                 patch("penny.status_fetcher._save_cache"),
@@ -1456,21 +1607,89 @@ class TestFetchLiveStatusSubprocessPaths:
             "CLAUDE_CODE must be removed from the subprocess environment"
         )
 
+    def test_env_sets_user_when_missing(self):
+        """When USER is unset (launchd environment), fetch_live_status must
+        inject it from the process UID. Without USER, claude's /status Usage
+        tab renders '/usage is only available for subscription plans' instead
+        of real data."""
+        import os
+
+        child = _build_child_mock(expect_returns=[0])
+        nav_screen = _make_screen_mock(NAV_SCREEN_TEXT)
+        capture_screen = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
+
+        captured_env = {}
+
+        def _capture_spawn(cmd, env=None, **kwargs):
+            captured_env.update(env or {})
+            return child
+
+        original_env = os.environ.copy()
+        try:
+            os.environ.pop("USER", None)
+            os.environ.pop("LOGNAME", None)
+
+            with (
+                patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+                patch("pexpect.spawn", side_effect=_capture_spawn),
+                patch("pyte.Screen", side_effect=[nav_screen, capture_screen]),
+                patch("pyte.ByteStream", side_effect=[MagicMock(), MagicMock()]),
+                patch("penny.status_fetcher._feed_child"),
+                patch("penny.status_fetcher.time.sleep"),
+                patch("penny.status_fetcher._save_cache"),
+            ):
+                fetch_live_status(force=True)
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
+
+        assert captured_env.get("USER"), (
+            "USER must be injected into subprocess env when not set — otherwise "
+            "claude shows '/usage is only available for subscription plans'"
+        )
+
+    def test_env_preserves_existing_user(self):
+        """If USER is already set in the parent env, don't overwrite it."""
+        import os
+
+        child = _build_child_mock(expect_returns=[0])
+        nav_screen = _make_screen_mock(NAV_SCREEN_TEXT)
+        capture_screen = _make_screen_mock(VALID_USAGE_SCREEN_TEXT)
+
+        captured_env = {}
+
+        def _capture_spawn(cmd, env=None, **kwargs):
+            captured_env.update(env or {})
+            return child
+
+        original_env = os.environ.copy()
+        try:
+            os.environ["USER"] = "test_user_sentinel"
+
+            with (
+                patch("penny.status_fetcher.shutil.which", return_value="/usr/local/bin/claude"),
+                patch("pexpect.spawn", side_effect=_capture_spawn),
+                patch("pyte.Screen", side_effect=[nav_screen, capture_screen]),
+                patch("pyte.ByteStream", side_effect=[MagicMock(), MagicMock()]),
+                patch("penny.status_fetcher._feed_child"),
+                patch("penny.status_fetcher.time.sleep"),
+                patch("penny.status_fetcher._save_cache"),
+            ):
+                fetch_live_status(force=True)
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
+
+        assert captured_env.get("USER") == "test_user_sentinel", (
+            "fetch_live_status must not clobber an existing USER env var"
+        )
+
     def test_dialog_check_passes_when_screen_contains_to_cycle(self):
-        """When the pyte screen check finds 'to cycle', the dialog is considered
+        """When the nav screen check finds 'to cycle', the dialog is considered
         open and the fetch proceeds to parse the Usage tab data successfully."""
         child = _build_child_mock(expect_returns=[0])
-        screen_with_dialog = """\
-Settings   Status   Config   Usage
-Tab/Shift+Tab to cycle   Enter to select   Esc to cancel
-Current session                       16% used
-Resets 2pm (Europe/Amsterdam)
-Current week (all models)             30% used
-Current week (Sonnet only)            41% used
-Resets Mar 6 at 9pm (Europe/Amsterdam)
-Resets Mar 6 at 9pm (Europe/Amsterdam)
-"""
-        result = self._run_with_screen(screen_with_dialog, child, force=True)
+        # Usage data goes on the capture screen (after SIGWINCH)
+        result = self._run_with_screen(VALID_USAGE_SCREEN_TEXT, child, force=True)
 
         # The fallback expect path must be skipped — child.expect must NOT
         # be called with the fallback pattern list (4-element list with TIMEOUT).
@@ -1486,20 +1705,17 @@ Resets Mar 6 at 9pm (Europe/Amsterdam)
         assert result.session_pct == 16.0
 
     def test_dialog_check_passes_when_screen_contains_esc_to_cancel(self):
-        """When the pyte screen contains 'Esc to cancel', the dialog is considered
+        """When the nav screen contains 'Esc to cancel', the dialog is considered
         open and the fallback expect path is not triggered."""
         child = _build_child_mock(expect_returns=[0])
-        screen_with_esc = """\
-Settings   Status   Config   Usage
+        nav_text = """\
+Status   Config   Usage   Stats
   Esc to cancel
-Current session                       16% used
-Resets 2pm (Europe/Amsterdam)
-Current week (all models)             30% used
-Current week (Sonnet only)            41% used
-Resets Mar 6 at 9pm (Europe/Amsterdam)
-Resets Mar 6 at 9pm (Europe/Amsterdam)
 """
-        result = self._run_with_screen(screen_with_esc, child, force=True)
+        result = self._run_with_screen(
+            VALID_USAGE_SCREEN_TEXT, child, force=True,
+            nav_screen_text=nav_text,
+        )
 
         fallback_calls = [
             c for c in child.expect.call_args_list

@@ -610,7 +610,12 @@ class PennyApp(NSObject):
 
         self.state = state
         self._prediction = pred
-        self._last_fetch_at = datetime.now(timezone.utc)
+        # Reflect the actual /status scrape time so the "last refresh" label is
+        # honest when scrapes silently fail and we serve a stale cache. Falls
+        # back to now() only when no live status has ever been captured (cold
+        # start, no claude binary, etc.).
+        live_fetched_at = result.get("live_fetched_at")
+        self._last_fetch_at = live_fetched_at or datetime.now(timezone.utc)
         bump_state_generation()
 
         # Notify about available updates (at most once per new version)
