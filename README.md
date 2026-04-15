@@ -1,5 +1,15 @@
 # Penny <img src="docs/images/loading_animation.gif" width="32" alt="Penny loading animation" />
 
+> [!IMPORTANT]
+> **This project is archived.** Anthropic's Claude Desktop app now includes
+> native session, weekly, and Sonnet-only usage tracking with live reset
+> countdowns — covering the core need that motivated Penny. **New users should
+> use the built-in Claude Desktop usage view instead of installing Penny.**
+>
+> This repository is read-only: no new features, releases, or issue responses.
+> The code continues to work as of [v0.6.0b3](https://github.com/gpxl/penny/releases/tag/v0.6.0b3);
+> fork it if you need something Anthropic's native tooling doesn't cover.
+
 macOS menu bar app that monitors your Claude Code token usage, tracks session and weekly budgets, and surfaces detailed analytics to help you stay within your plan limits.
 
 ## Screenshots
