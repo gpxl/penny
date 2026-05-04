@@ -1,4 +1,4 @@
-# Penny <img src="docs/images/loading_animation.gif" width="32" alt="Penny loading animation" />
+# Penny <img src="docs/images/loading_animation.gif" width="64" alt="Penny loading animation" />
 
 > [!IMPORTANT]
 > **This project is archived.** Anthropic's Claude Desktop app now includes
